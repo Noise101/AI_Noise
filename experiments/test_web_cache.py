@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from web_cache import ReadOnlyWebCache
+from web_cache import NetworkBudgetExceeded, ReadOnlyWebCache
 
 
 class FakeResponse:
@@ -30,7 +30,17 @@ class WebCacheTest(unittest.TestCase):
                 self.assertEqual(cache.get_json("https://example.test/data", "test"), {"value": 1})
                 self.assertEqual(cache.get_json("https://example.test/data", "test"), {"value": 1})
             self.assertEqual(mocked.call_count, 1)
-            self.assertEqual(cache.stats(), {"cache_hits": 1, "cache_misses": 1, "network_requests": 1})
+            self.assertEqual(cache.stats()["network_requests"], 1)
+            self.assertEqual(cache.stats()["cache_hits"], 1)
+
+    def test_network_budget_is_enforced_before_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = ReadOnlyWebCache(Path(directory))
+            cache.set_network_budget(0)
+            with patch("urllib.request.urlopen") as mocked:
+                with self.assertRaises(NetworkBudgetExceeded):
+                    cache.get_bytes("https://example.test/new", "test")
+            mocked.assert_not_called()
 
 
 if __name__ == "__main__":

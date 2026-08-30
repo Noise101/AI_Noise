@@ -10,6 +10,10 @@ import urllib.request
 from pathlib import Path
 
 
+class NetworkBudgetExceeded(RuntimeError):
+    pass
+
+
 class ReadOnlyWebCache:
     def __init__(self, cache_dir: Path | None = None, ttl_seconds: int = 7 * 24 * 3600):
         default = Path(__file__).resolve().parent.parent / ".cache" / "web"
@@ -18,6 +22,17 @@ class ReadOnlyWebCache:
         self.hits = 0
         self.misses = 0
         self.network_requests = 0
+        self.network_limit: int | None = None
+        self.budget_start = 0
+
+    def set_network_budget(self, additional_requests: int | None) -> None:
+        self.network_limit = additional_requests
+        self.budget_start = self.network_requests
+
+    def remaining_network_budget(self) -> int | None:
+        if self.network_limit is None:
+            return None
+        return max(0, self.network_limit - (self.network_requests - self.budget_start))
 
     def get_bytes(self, url: str, user_agent: str, accept: str = "*/*") -> bytes:
         key = hashlib.sha256(url.encode()).hexdigest()
@@ -33,6 +48,8 @@ class ReadOnlyWebCache:
             except (OSError, ValueError, KeyError):
                 pass
         self.misses += 1
+        if self.network_limit is not None and self.network_requests - self.budget_start >= self.network_limit:
+            raise NetworkBudgetExceeded(f"network request budget exhausted before {url}")
         request = urllib.request.Request(url, headers={"User-Agent": user_agent, "Accept": accept})
         with urllib.request.urlopen(request, timeout=25) as response:
             payload = response.read()
@@ -48,7 +65,8 @@ class ReadOnlyWebCache:
 
     def stats(self) -> dict:
         return {"cache_hits": self.hits, "cache_misses": self.misses,
-                "network_requests": self.network_requests}
+                "network_requests": self.network_requests,
+                "remaining_network_budget": self.remaining_network_budget()}
 
 
 WEB_CACHE = ReadOnlyWebCache()

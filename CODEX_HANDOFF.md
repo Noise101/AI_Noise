@@ -29,6 +29,7 @@ Read `ARCHITECTURE.md` before changing the learning path. Its invariants are the
 - `v17`: phrase research; a repeated phrase is not called an idiom until component meanings are grounded.
 - `v18`: Japanese word-boundary induction without a pretrained tokenizer, validated against exact Wiktionary/Wikipedia pages.
 - `v19`: ambiguous Japanese senses are enumerated from references, grounded in observable story features, cited, and revisable by counter-context.
+- `v20`: a persistent budgeted controller selects gaps by expected information gain, saves every cycle, restores learned beliefs, and stops cleanly at network/time/step boundaries.
 
 The latest live v18 run generated the query `きつね つる`, selected `イソップ童話集/きつねとつる`, and induced many repeated chunks. Only `きつね` and `つる` were corroborated by both Japanese Wiktionary and an exact/redirected Japanese Wikipedia page. `つる` remains meaning-ambiguous even though its boundary is accepted.
 
@@ -40,7 +41,7 @@ From `experiments/`:
 python3 -m unittest discover -v
 ```
 
-The complete suite currently has 48 tests and takes about 90 seconds on the development machine.
+Use `python3 run_tests.py --profile quick --quiet` while iterating, then the full profile before a milestone commit.
 
 Live read-only checks:
 
@@ -49,13 +50,12 @@ python3 developmental_language_v15.py "fox grapes" --output report-v15.json
 python3 lexical_research_v16.py "fox grapes" --output report-v16.json
 python3 phrase_learning_v17.py "fox grapes" --max-phrases 4 --output report-v17.json
 python3 japanese_boundaries_v18.py "きつね つる" --candidate-limit 15 --output report-v18.json
+python3 autonomous_controller_v20.py "fox grapes" --state controller-state.json --max-steps 3 --max-network 8 --summary
 ```
 
 ## Next concrete work
 
-The next version should turn the separate v12-v19 stages into one persistent autonomous controller. It should choose among causal, concept, word, phrase, boundary, and sense gaps by expected information gain, obey explicit request and test budgets, resume from its evidence ledger, and prove the full loop on unseen seeds.
-
-After that, run an evaluation matrix with previously unseen English and Japanese seed concepts. The required end-to-end gates remain: autonomous gap detection, generated query, read-only retrieval, multiple-source evaluation, concept/causal update, cited conclusion, and demonstrated self-correction.
+Extend v20 beyond its current English word/phrase/Why execution paths to Japanese boundary/sense and concept gaps. Then run an evaluation matrix with previously unseen English and Japanese seed concepts. The required end-to-end gates remain: autonomous gap detection, generated query, read-only retrieval, multiple-source evaluation, concept/causal update, cited conclusion, and demonstrated self-correction.
 
 ## Safety and integrity
 

@@ -26,3 +26,4 @@ python3 -m unittest discover -v
 - `phrase_learning_v17.py`: 反復句の検索と構成的／非構成的意味の証拠評価
 - `japanese_boundaries_v18.py`: 日本語児童文からの境界誘導、辞書・百科事典による検証
 - `japanese_sense_grounding_v19.py`: 日本語多義語の候補列挙、文脈接地、反証訂正
+- `autonomous_controller_v20.py`: 期待情報利得による課題選択、予算停止、状態・知識の永続化と再開

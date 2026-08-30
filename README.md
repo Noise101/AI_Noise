@@ -198,6 +198,19 @@ python3 japanese_sense_grounding_v19.py "きつね つる" --summary --output re
 python3 -m unittest -v test_japanese_sense_grounding_v19.py
 ```
 
+## v20
+
+`experiments/autonomous_controller_v20.py` は、未解決の語・句・Why課題を期待情報利得で比較し、時間・手順数・実通信回数の上限内で次の調査を選びます。各周期の結果と採用した意味をJSONへ保存し、再起動時には完了IDだけでなく学習内容も語彙記憶へ復元します。
+
+通信上限に達しても例外終了せず、`network_budget_exhausted`として状態を保存します。同じ資料は7日間のローカルキャッシュから読み、再実行時の通信とCodex出力を抑えます。
+
+```bash
+cd experiments
+python3 autonomous_controller_v20.py "fox grapes" --state controller-state.json --max-steps 3 --max-network 8 --summary
+```
+
+同じコマンドを再実行すると、前回の知識から次の未解決課題へ進みます。これは常駐プロセスではなく、予算単位で安全に再開できる制御器です。
+
 ## ライセンス
 
 未設定です。利用・再配布条件を決めてからLICENSEを追加します。
