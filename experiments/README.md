@@ -23,3 +23,4 @@ python3 -m unittest discover -v
 - `story_concepts_v14.py`: 表現差を統合し、視点・出典・反証を保持する概念台帳
 - `developmental_language_v15.py`: 文字、語、句、意味役割、文因果の並行学習
 - `lexical_research_v16.py`: 自己生成した未知語検索、複数sense評価、語彙記憶への書き戻し
+- `phrase_learning_v17.py`: 反復句の検索と構成的／非構成的意味の証拠評価

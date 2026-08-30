@@ -63,6 +63,7 @@ python3 -m unittest discover -v
 | v14 | 資料間の表現統合・視点分離・反証による概念信念更新 |
 | v15 | 文字・単語・句・意味役割・文因果の並行発達学習 |
 | v16 | 未知語の辞書・児童文用例調査と出典付きsense書き戻し |
+| v17 | 反復句の自律調査と構成的／非構成的意味の保留判定 |
 
 各版は`experiments/`内に独立した実行可能ファイルとして残しています。
 
@@ -151,6 +152,18 @@ python3 -m unittest -v test_developmental_language_v15.py
 cd experiments
 python3 lexical_research_v16.py "fox grapes" --output report.json
 python3 -m unittest -v test_lexical_research_v16.py
+```
+
+## v17
+
+`experiments/phrase_learning_v17.py` は、反復する2語・3語列から句候補を作り、単語とは別の未知意味として調査します。句ページが存在しなければ`unknown`として保存して次候補へ進みます。定義が見つかっても、構成語それぞれの意味が未接地なら熟語・イディオムとは断定しません。
+
+実ウェブ例では`are sour`に独立した定義を発見できず、次の`at last`から`eventually_after_delay`を抽出しました。ただし定義資料がEnglish Wiktionary 1件だけだったため`single_source`であり、`at`と`last`の語義比較が済むまで非構成的とは認定しません。
+
+```bash
+cd experiments
+python3 phrase_learning_v17.py "fox grapes" --max-phrases 4 --output report.json
+python3 -m unittest -v test_phrase_learning_v17.py
 ```
 
 ## ライセンス

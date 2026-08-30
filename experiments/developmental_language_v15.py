@@ -38,11 +38,13 @@ class DevelopmentalLexicon:
         self.character_links: Counter[tuple[str, str]] = Counter()
         self.words: Counter[str] = Counter()
         self.word_links: Counter[tuple[str, str]] = Counter()
+        self.word_ngrams: Counter[tuple[str, ...]] = Counter()
         self.chunk_candidates: Counter[str] = Counter()
         self.roles: dict[str, Counter[str]] = defaultdict(Counter)
         self.contexts: dict[str, Counter[str]] = defaultdict(Counter)
         self.meaning_revisions: list[dict] = []
         self.meaning_hypotheses: dict[str, dict] = {}
+        self.phrase_meaning_hypotheses: dict[str, dict] = {}
         self.sentences_seen = 0
 
     @staticmethod
@@ -62,6 +64,9 @@ class DevelopmentalLexicon:
         words = self._words(sentence)
         self.words.update(words)
         self.word_links.update(zip(words, words[1:]))
+        for size in (2, 3):
+            self.word_ngrams.update(tuple(words[index:index + size])
+                                    for index in range(len(words) - size + 1))
         for left, word, right in zip(["<START>"] + words, words, words[1:] + ["<END>"]):
             self.contexts[word][f"left:{left}"] += 1
             self.contexts[word][f"right:{right}"] += 1
@@ -114,19 +119,48 @@ class DevelopmentalLexicon:
                 "reason": "new sourced lexical evidence revised the stored sense",
             })
 
+    def update_phrase_hypothesis(self, phrase: str, belief: dict, compositionality: str) -> None:
+        before = self.phrase_meaning_hypotheses.get(phrase)
+        compact = {
+            "status": belief.get("status"), "accepted_sense": belief.get("accepted_sense"),
+            "leading_sense": belief.get("leading_sense"),
+            "confidence_margin": belief.get("confidence_margin", 0.0),
+            "alternatives": belief.get("alternatives", []), "compositionality": compositionality,
+        }
+        self.phrase_meaning_hypotheses[phrase] = compact
+        if before and before.get("accepted_sense") != compact.get("accepted_sense"):
+            self.meaning_revisions.append({
+                "phrase": phrase, "before": before.get("accepted_sense"),
+                "after": compact.get("accepted_sense"),
+                "reason": "new sourced phrase evidence revised the stored sense",
+            })
+
     def phrase_candidates(self, minimum_count: int = 2) -> list[dict]:
         phrases = []
-        for (left, right), count in self.word_links.items():
+        for ngram, count in self.word_ngrams.items():
             if count < minimum_count:
                 continue
-            association = count / math.sqrt(self.words[left] * self.words[right])
-            phrases.append({"phrase": f"{left} {right}", "count": count,
+            denominator = math.prod(self.words[word] for word in ngram) ** (1 / len(ngram))
+            association = count / denominator
+            phrases.append({"phrase": " ".join(ngram), "count": count,
                             "association": round(association, 3), "kind": "word_phrase_candidate"})
         for chunk, count in self.chunk_candidates.items():
             if count >= minimum_count:
                 phrases.append({"phrase": chunk, "count": count,
                                 "association": None, "kind": "unsegmented_chunk_candidate"})
         return sorted(phrases, key=lambda item: (-item["count"], item["phrase"]))
+
+    def phrase_gap(self) -> dict | None:
+        candidates = [candidate for candidate in self.phrase_candidates()
+                      if candidate["kind"] == "word_phrase_candidate"
+                      and candidate["phrase"] not in self.phrase_meaning_hypotheses]
+        if not candidates:
+            return None
+        selected = max(candidates, key=lambda item: (item["association"], item["count"],
+                                                     len(item["phrase"].split()), item["phrase"]))
+        return {"kind": "unknown_phrase_meaning", "form": selected["phrase"],
+                "observations": selected["count"], "association": selected["association"],
+                "query": f'"{selected["phrase"]}" phrase meaning simple English'}
 
     def lexical_gap(self) -> dict | None:
         unknown = [(count, word) for word, count in self.words.items()
@@ -159,9 +193,11 @@ class DevelopmentalLexicon:
             "word_forms": dict(self.words.most_common()),
             "grounded_meanings": grounded,
             "researched_meanings": self.meaning_hypotheses,
+            "researched_phrase_meanings": self.phrase_meaning_hypotheses,
             "phrase_candidates": self.phrase_candidates(),
             "meaning_revisions": self.meaning_revisions,
             "next_lexical_goal": self.lexical_gap(),
+            "next_phrase_goal": self.phrase_gap(),
         }
 
 
