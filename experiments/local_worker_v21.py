@@ -15,6 +15,9 @@ import urllib.parse
 from pathlib import Path
 
 from web_cache import WEB_CACHE, NetworkBudgetExceeded
+from curiosity_drive_v23 import curiosity_pressure
+from mastery_drive_v24 import assess_language_mastery
+from local_conversation_v25 import practice_once
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -61,6 +64,37 @@ def run_cycle(seed: str, runtime: Path, steps: int, seconds: float, network: int
     if completed.returncode:
         raise RuntimeError((completed.stderr or completed.stdout).strip()[-1000:])
     return read_json(report)
+
+
+def prime_seed_curiosity(runtime: Path, seed: str, curriculum: dict) -> None:
+    path = seed_runtime(runtime, seed) / "controller-state.json"
+    if path.exists() or not curriculum.get("curiosity_ledger"):
+        return
+    write_json(path, {"seed": seed, "curiosity_ledger": curriculum["curiosity_ledger"]})
+
+
+def merge_curiosity(curriculum: dict, seed: str, report: dict, cycle: int) -> None:
+    global_ledger = curriculum.setdefault("curiosity_ledger", {})
+    local_ledger = report.get("state", {}).get("curiosity_ledger", {})
+    for gap_id, local in local_ledger.items():
+        entry = global_ledger.setdefault(gap_id, {
+            "layer": local.get("layer"), "query": local.get("query"),
+            "first_seen_cycle": cycle, "last_seen_cycle": cycle,
+            "encounters": 0, "contexts_seen": 0, "seed_encounters": {},
+            "status": "wanting_to_know", "resolution": None,
+        })
+        previous = entry["seed_encounters"].get(seed, 0)
+        observed = local.get("encounters", 0)
+        if observed > previous:
+            entry["encounters"] += observed - previous
+            entry["seed_encounters"][seed] = observed
+            entry["contexts_seen"] = len(entry["seed_encounters"])
+            entry["last_seen_cycle"] = cycle
+        if local.get("status") == "satisfied_for_now":
+            entry.update({"status": "satisfied_for_now", "resolution": local.get("resolution"),
+                          "pressure": 0.0})
+        elif entry.get("status") != "satisfied_for_now":
+            entry["pressure"] = curiosity_pressure(entry, 1.0, cycle)
 
 
 def _seed_from_title(title: str) -> str | None:
@@ -115,6 +149,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
                   report: dict | None = None, error: str | None = None) -> dict:
     report = report or {}
     state = report.get("state", read_json(runtime / "controller-state.json"))
+    mastery = report.get("mastery") or read_json(runtime / "mastery.json")
     return {
         "phase": phase,
         "seed": seed,
@@ -128,11 +163,15 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "actual_network_requests": report.get("web_usage", {}).get("network_requests", 0),
         "error": error,
         "codex_or_remote_llm_calls": 0,
+        "mastery": {"status": mastery.get("status"), "overall_score": mastery.get("overall_score"),
+                    "weakest_dimension": mastery.get("weakest_dimension"),
+                    "next_goal": mastery.get("next_mastery_goal")},
+        "local_conversation": report.get("local_conversation"),
     }
 
 
 def work(seed: str, runtime: Path, max_rounds: int, interval: float,
-         steps: int, seconds: float, network: int) -> dict:
+         steps: int, seconds: float, network: int, local_conversation: bool = True) -> dict:
     runtime.mkdir(parents=True, exist_ok=True)
     status_path = runtime / "status.json"
     stop_path = runtime / "STOP"
@@ -140,8 +179,12 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
     curriculum_path = runtime / "curriculum-state.json"
     curriculum = read_json(curriculum_path) or {
         "initial_seed": seed, "current_seed": seed, "completed_seeds": [],
-        "frontier": [], "transitions": [],
+        "deferred_seeds": [], "frontier": [], "transitions": [], "curiosity_ledger": {},
     }
+    for key, default in (("completed_seeds", []), ("deferred_seeds", []), ("frontier", []),
+                         ("transitions", []), ("curiosity_ledger", {}), ("mastery_history", [])):
+        curriculum.setdefault(key, default)
+    curriculum.setdefault("conversation_practiced_seeds", [])
     seed = curriculum["current_seed"]
     write_json(curriculum_path, curriculum)
     latest = status_record(seed, runtime, "starting", 0)
@@ -155,16 +198,38 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             return latest
         write_json(status_path, status_record(seed, runtime, "learning", round_number - 1))
         try:
+            prime_seed_curiosity(runtime, seed, curriculum)
             report = run_cycle(seed, runtime, steps, seconds, network)
         except Exception as error:
             latest = status_record(seed, runtime, "error", round_number, error=str(error))
             write_json(status_path, latest)
             return latest
         reason = report.get("state", {}).get("stop_reason")
-        if reason == "no_unresolved_executable_gap":
-            if seed not in curriculum["completed_seeds"]:
-                curriculum["completed_seeds"].append(seed)
-            visited = set(curriculum["completed_seeds"])
+        mastery = assess_language_mastery(report)
+        report["mastery"] = mastery
+        write_json(runtime / "mastery.json", mastery)
+        curriculum["mastery_history"].append({"seed": seed, "round": round_number,
+                                               "overall_score": mastery["overall_score"],
+                                               "weakest_dimension": mastery["weakest_dimension"],
+                                               "next_mastery_goal": mastery["next_mastery_goal"]})
+        if local_conversation and seed not in curriculum["conversation_practiced_seeds"]:
+            turn = practice_once(seed, mastery, curriculum["curiosity_ledger"])
+            dialogue_path = runtime / "dialogue-ledger.json"
+            dialogue = read_json(dialogue_path) or {"turns": []}
+            dialogue["turns"].append(turn)
+            write_json(dialogue_path, dialogue)
+            curriculum["conversation_practiced_seeds"].append(seed)
+            report["local_conversation"] = {"status": turn["status"],
+                                             "turns_total": len(dialogue["turns"]),
+                                             "evidence_score": 0.0}
+        write_json(curriculum_path, curriculum)
+        merge_curiosity(curriculum, seed, report, round_number)
+        exhausted = reason in {"no_unresolved_executable_gap", "no_new_evidence_for_unresolved_gap"}
+        if exhausted:
+            bucket = "completed_seeds" if reason == "no_unresolved_executable_gap" else "deferred_seeds"
+            if seed not in curriculum[bucket]:
+                curriculum[bucket].append(seed)
+            visited = set(curriculum["completed_seeds"]) | set(curriculum["deferred_seeds"])
             discovered = discover_curriculum(report, visited, network)
             known = {item["seed"] for item in curriculum["frontier"]}
             curriculum["frontier"].extend(item for item in discovered if item["seed"] not in known)
@@ -183,11 +248,11 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                 continue
         resource_pause = reason == "network_budget_exhausted"
         phase = "resource_paused" if resource_pause else (
-            "curriculum_exhausted" if reason == "no_unresolved_executable_gap" else "between_rounds")
+            "curriculum_exhausted" if exhausted else "between_rounds")
         latest = status_record(seed, runtime, phase,
                                round_number, report)
         write_json(status_path, latest)
-        if reason == "no_unresolved_executable_gap":
+        if exhausted:
             return latest
         if interval > 0 and (max_rounds <= 0 or round_number < max_rounds):
             time.sleep(interval)
@@ -208,6 +273,7 @@ def main() -> None:
         work_parser.add_argument("--steps", type=int, default=1)
         work_parser.add_argument("--seconds", type=float, default=60)
         work_parser.add_argument("--network", type=int, default=8)
+        work_parser.add_argument("--no-local-conversation", action="store_true")
     run_parser = subparsers.add_parser("run", help="run in the foreground")
     add_work_arguments(run_parser)
     start_parser = subparsers.add_parser("start", help="start once and keep working in the background")
@@ -240,6 +306,8 @@ def main() -> None:
                    "--runtime", str(args.runtime), "--max-rounds", str(args.max_rounds),
                    "--interval", str(args.interval), "--steps", str(args.steps),
                    "--seconds", str(args.seconds), "--network", str(args.network)]
+        if args.no_local_conversation:
+            command.append("--no-local-conversation")
         process = subprocess.Popen(command, cwd=Path(__file__).parent, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                    start_new_session=True)
@@ -247,7 +315,7 @@ def main() -> None:
                           "progress": str(args.runtime / "status.json")}, ensure_ascii=False))
         return
     result = work(args.seed, args.runtime, args.max_rounds, args.interval,
-                  args.steps, args.seconds, args.network)
+                  args.steps, args.seconds, args.network, not args.no_local_conversation)
     print(json.dumps(result, ensure_ascii=False))
 
 

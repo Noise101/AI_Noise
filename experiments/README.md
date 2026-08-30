@@ -29,3 +29,6 @@ python3 -m unittest discover -v
 - `autonomous_controller_v20.py`: 期待情報利得による課題選択、予算停止、状態・知識の永続化と再開
 - `local_worker_v21.py`: Codex/APIを呼ばないローカル反復実行、heartbeat、再開、安全停止
 - `kanjipedia_reference_v22.py`: 漢字ペディアの完全一致項目を本文転載なしで構造検証
+- `curiosity_drive_v23.py`: 再遭遇・複数文脈・未解決時間で増える知りたい圧
+- `mastery_drive_v24.py`: 言語能力の自己評価と最弱層からの次の習得目標
+- `local_conversation_v25.py`: 自作した問いによるOllamaとの短い会話練習（証拠スコア0）

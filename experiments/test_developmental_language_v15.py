@@ -60,6 +60,16 @@ class DevelopmentalLanguageTest(unittest.TestCase):
         self.assertEqual(report["researched_meanings"]["again"]["accepted_sense"], "repetition")
         self.assertTrue(report["meaning_revisions"])
 
+    def test_repeated_dialogue_cue_becomes_its_own_unknown(self):
+        lexicon = DevelopmentalLexicon()
+        lexicon.observe('Fox said, "I am hungry."')
+        lexicon.observe('Crow said, "I have food."')
+        gap = lexicon.conversation_gap()
+        self.assertEqual(gap["kind"], "unknown_conversation_act")
+        self.assertEqual(gap["form"], "said")
+        self.assertEqual(gap["observations"], 2)
+        self.assertIn("dialogue", gap["query"])
+
 
 if __name__ == "__main__":
     unittest.main()

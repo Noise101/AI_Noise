@@ -14,6 +14,7 @@ from typing import Protocol
 from developmental_language_v15 import MultiLevelLearningAgent
 from lexical_research_v16 import LexicalResearchAgent, WiktionaryDefinitions
 from phrase_learning_v17 import PhraseResearchAgent
+from curiosity_drive_v23 import observe_unknown, resolve_unknown, result_is_grounded
 from web_cache import WEB_CACHE, NetworkBudgetExceeded
 
 
@@ -38,6 +39,7 @@ class PersistentState:
     seed: str
     completed_gap_ids: list[str] = field(default_factory=list)
     cycles: list[dict] = field(default_factory=list)
+    curiosity_ledger: dict[str, dict] = field(default_factory=dict)
     stop_reason: str | None = None
     created_at: str = field(default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
     updated_at: str | None = None
@@ -78,6 +80,8 @@ class EnglishDevelopmentEnvironment:
             elif gap.get("layer") == "phrase":
                 self.agent.lexicon.update_phrase_hypothesis(
                     form, belief, result.get("compositionality", {}))
+            elif gap.get("layer") == "conversation":
+                self.agent.lexicon.update_conversation_hypothesis(form, belief)
 
     def gaps(self) -> list[LearningGap]:
         gaps = []
@@ -92,6 +96,13 @@ class EnglishDevelopmentEnvironment:
             gaps.append(LearningGap(
                 f"phrase:{phrase['form']}", "phrase", phrase["query"], 0.75,
                 phrase.get("observations", 1), 2, "repeated phrase has no accepted phrase sense",
+            ))
+        conversation = self.agent.lexicon.conversation_gap()
+        if conversation:
+            gaps.append(LearningGap(
+                f"conversation:{conversation['form']}", "conversation", conversation["query"], 1.0,
+                conversation.get("observations", 1), 2,
+                "observed dialogue cue has no grounded conversational function",
             ))
         for question in self.agent.story.why_questions:
             if question.status == "open":
@@ -117,6 +128,15 @@ class EnglishDevelopmentEnvironment:
             outcome = gap.gap_id.split("->", 1)[1]
             return {"why": self.agent.story.ask_why(outcome),
                     "investigation": self.agent.story.plan_why_investigation(outcome)}
+        if gap.layer == "conversation":
+            cue = gap.gap_id.split(":", 1)[1]
+            lexical = {"form": cue, "query": gap.query,
+                       "contexts": list(self.agent.lexicon.conversation_contexts[cue]),
+                       "observations": self.agent.lexicon.conversation_cues[cue]}
+            research = LexicalResearchAgent(self.sources).investigate(lexical, self.agent.lexicon.word_links)
+            belief = research["meaning_belief"]
+            self.agent.lexicon.update_conversation_hypothesis(cue, belief)
+            return {**research, "grounded_pattern": belief.get("accepted_sense")}
         raise ValueError(f"unsupported gap layer: {gap.layer}")
 
     def snapshot(self) -> dict:
@@ -154,22 +174,34 @@ class AutonomousController:
 
     def run(self, max_steps: int, max_seconds: float) -> dict:
         started = time.monotonic()
+        attempted_this_run: set[str] = set()
         self.state.stop_reason = None
         for _ in range(max_steps):
             if time.monotonic() - started >= max_seconds:
                 self.state.stop_reason = "time_budget_exhausted"
                 break
-            available = [gap for gap in self.environment.gaps()
-                         if gap.gap_id not in self.state.completed_gap_ids]
+            gaps = self.environment.gaps()
+            cycle_number = len(self.state.cycles)
+            for gap in gaps:
+                observe_unknown(self.state.curiosity_ledger, gap, cycle_number)
+            available = [gap for gap in gaps
+                         if gap.gap_id not in self.state.completed_gap_ids
+                         and self.state.curiosity_ledger[gap.gap_id].get("last_attempt_encounters", -1)
+                         < gap.observations
+                         and gap.gap_id not in attempted_this_run]
             if not available:
                 bootstrap = self.environment.snapshot().get("bootstrap", {})
                 self.state.stop_reason = (
                     "network_budget_exhausted"
                     if bootstrap.get("status") == "network_budget_exhausted"
-                    else "no_unresolved_executable_gap"
+                    else ("no_new_evidence_for_unresolved_gap" if attempted_this_run
+                          else "no_unresolved_executable_gap")
                 )
                 break
-            selected = max(available, key=lambda gap: (gap.expected_information_gain, gap.gap_id))
+            selected = max(available, key=lambda gap: (
+                self.state.curiosity_ledger[gap.gap_id]["pressure"],
+                gap.expected_information_gain, gap.gap_id))
+            selected_pressure = self.state.curiosity_ledger[selected.gap_id]["pressure"]
             before = WEB_CACHE.stats()["network_requests"]
             try:
                 result = self.environment.execute(selected)
@@ -177,10 +209,17 @@ class AutonomousController:
                 self.state.stop_reason = "network_budget_exhausted"
                 break
             after = WEB_CACHE.stats()["network_requests"]
-            self.state.completed_gap_ids.append(selected.gap_id)
+            grounded, resolution = result_is_grounded(selected.layer, result)
+            attempted_this_run.add(selected.gap_id)
+            self.state.curiosity_ledger[selected.gap_id]["last_attempt_encounters"] = selected.observations
+            if grounded:
+                self.state.completed_gap_ids.append(selected.gap_id)
+                resolve_unknown(self.state.curiosity_ledger, selected.gap_id, resolution, cycle_number + 1)
             self.state.cycles.append({
-                "gap": {**asdict(selected), "expected_information_gain": selected.expected_information_gain},
+                "gap": {**asdict(selected), "expected_information_gain": selected.expected_information_gain,
+                        "curiosity_pressure": selected_pressure},
                 "result": result, "actual_network_requests": after - before,
+                "grounded": grounded,
             })
             self.save()
         else:

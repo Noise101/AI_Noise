@@ -23,6 +23,7 @@ FUNCTION_WORDS = {
     "a", "an", "the", "and", "or", "to", "of", "in", "on", "at", "for", "from",
     "he", "she", "it", "they", "his", "her", "their", "this", "that", "with", "but",
 }
+SPEECH_CUES = {"said", "asked", "replied", "answered", "cried", "quoth", "told", "saying"}
 
 
 class DevelopmentalLexicon:
@@ -45,6 +46,9 @@ class DevelopmentalLexicon:
         self.meaning_revisions: list[dict] = []
         self.meaning_hypotheses: dict[str, dict] = {}
         self.phrase_meaning_hypotheses: dict[str, dict] = {}
+        self.conversation_cues: Counter[str] = Counter()
+        self.conversation_contexts: dict[str, Counter[str]] = defaultdict(Counter)
+        self.conversation_hypotheses: dict[str, dict] = {}
         self.sentences_seen = 0
 
     @staticmethod
@@ -64,6 +68,11 @@ class DevelopmentalLexicon:
         words = self._words(sentence)
         self.words.update(words)
         self.word_links.update(zip(words, words[1:]))
+        for index, word in enumerate(words):
+            if word in SPEECH_CUES:
+                self.conversation_cues[word] += 1
+                window = " ".join(words[max(0, index - 2):index + 4])
+                self.conversation_contexts[word][window] += 1
         for size in (2, 3):
             self.word_ngrams.update(tuple(words[index:index + size])
                                     for index in range(len(words) - size + 1))
@@ -178,6 +187,24 @@ class DevelopmentalLexicon:
                     "query": f'"{chunk}" やさしい 文 意味'}
         return None
 
+    def conversation_gap(self) -> dict | None:
+        unknown = [(count, cue) for cue, count in self.conversation_cues.items()
+                   if not self.conversation_hypotheses.get(cue, {}).get("accepted_sense")]
+        if not unknown:
+            return None
+        count, cue = max(unknown, key=lambda item: (item[0], item[1]))
+        contexts = [text for text, _ in self.conversation_contexts[cue].most_common(4)]
+        return {"kind": "unknown_conversation_act", "form": cue, "observations": count,
+                "contexts": contexts,
+                "query": f'"{cue}" speech dialogue meaning simple story example'}
+
+    def update_conversation_hypothesis(self, cue: str, belief: dict) -> None:
+        self.conversation_hypotheses[cue] = {
+            "status": belief.get("status"), "accepted_sense": belief.get("accepted_sense"),
+            "confidence_margin": belief.get("confidence_margin", 0.0),
+            "alternatives": belief.get("alternatives", []),
+        }
+
     def report(self) -> dict:
         grounded = []
         for word, role_counts in sorted(self.roles.items()):
@@ -194,10 +221,13 @@ class DevelopmentalLexicon:
             "grounded_meanings": grounded,
             "researched_meanings": self.meaning_hypotheses,
             "researched_phrase_meanings": self.phrase_meaning_hypotheses,
+            "conversation_cues": dict(self.conversation_cues.most_common()),
+            "researched_conversation_acts": self.conversation_hypotheses,
             "phrase_candidates": self.phrase_candidates(),
             "meaning_revisions": self.meaning_revisions,
             "next_lexical_goal": self.lexical_gap(),
             "next_phrase_goal": self.phrase_gap(),
+            "next_conversation_goal": self.conversation_gap(),
         }
 
 
