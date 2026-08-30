@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Protocol
 
 from story_learning_v12 import Event, StoryLearner
+from web_cache import WEB_CACHE
 
 
 USER_AGENT = "AI_Noise/0.13 (read-only research; https://github.com/Noise101/AI_Noise)"
@@ -103,9 +104,7 @@ class StorySource(Protocol):
 
 
 def _request(url: str) -> bytes:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "*/*"})
-    with urllib.request.urlopen(request, timeout=25) as response:
-        return response.read()
+    return WEB_CACHE.get_bytes(url, USER_AGENT)
 
 
 class WikisourceStories:

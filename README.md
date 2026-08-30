@@ -2,6 +2,8 @@
 
 巨大LLMの縮小模倣ではなく、少ない経験から概念と因果関係を形成し、予測の失敗から自己訂正するAIアーキテクチャの実験プロジェクトです。
 
+この方針は[ARCHITECTURE.md](ARCHITECTURE.md)の変更不能な設計契約として定義しています。任意のローカルAIは未検証候補の生成にしか使えず、証拠・採否・信念更新を担当できません。
+
 現在の研究対象は、次の循環です。
 
 ```text
@@ -39,6 +41,8 @@ cd experiments
 python3 unified_agent_v9.py --trials 50
 python3 -m unittest discover -v
 ```
+
+通常開発では`python3 experiments/run_tests.py --profile quick --quiet`を使い、旧版を含む全評価は節目だけ実行します。ウェブ応答キャッシュ、要約出力、任意のローカルOllama補助を含む消費量方針は[RESOURCE_POLICY.md](RESOURCE_POLICY.md)を参照してください。
 
 長い評価は、完了seed数を逐次表示します。
 

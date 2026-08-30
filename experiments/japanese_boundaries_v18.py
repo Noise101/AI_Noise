@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Protocol
 
 from story_web_curriculum_v13 import _TextExtractor
+from web_cache import WEB_CACHE
 
 
 USER_AGENT = "AI_Noise/0.18 (read-only research; https://github.com/Noise101/AI_Noise)"
@@ -24,9 +25,7 @@ JAPANESE_RUN = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]+")
 
 
 def _json(url: str) -> dict:
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
-    with urllib.request.urlopen(request, timeout=20) as response:
-        return json.load(response)
+    return WEB_CACHE.get_json(url, USER_AGENT)
 
 
 @dataclass
@@ -169,7 +168,7 @@ class JapaneseBoundaryAgent:
     def make_query(seed_concept: str) -> str:
         return " ".join(part for part in seed_concept.split() if part)
 
-    def learn(self, seed_concept: str, candidate_limit: int = 15) -> dict:
+    def learn(self, seed_concept: str, candidate_limit: int = 15, target_words: int | None = None) -> dict:
         query = self.make_query(seed_concept)
         story = self.story_source.search(query)
         if not story:
@@ -193,12 +192,15 @@ class JapaneseBoundaryAgent:
             checked.append(record)
             if len(evidence) >= 2:
                 accepted.append(record)
+                if target_words and len(accepted) >= target_words:
+                    break
         return {
             "status": "learned", "generated_query": query,
             "story_evidence": {"title": story.title, "url": story.url,
                                "sha256": hashlib.sha256(story.text.encode()).hexdigest()},
             "checked_candidates": checked, "accepted_words": accepted,
             "uncertainty": "a validated surface can still be inflected grammar or have multiple meanings",
+            "web_usage": WEB_CACHE.stats(),
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
 
@@ -207,14 +209,21 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("concept", nargs="?", default="きつね つる")
     parser.add_argument("--candidate-limit", type=int, default=15)
+    parser.add_argument("--target-words", type=int, default=2)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--summary", action="store_true")
     args = parser.parse_args()
     agent = JapaneseBoundaryAgent(JapaneseWikisource(), [JapaneseWiktionary(), JapaneseWikipedia()])
-    report = agent.learn(args.concept, args.candidate_limit)
+    report = agent.learn(args.concept, args.candidate_limit, args.target_words)
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     if args.output:
         args.output.write_text(rendered + "\n", encoding="utf-8")
-    print(rendered)
+    if args.summary:
+        print(json.dumps({"status": report.get("status"), "query": report.get("generated_query"),
+                          "accepted": [item["form"] for item in report.get("accepted_words", [])],
+                          "web_usage": report.get("web_usage", {})}, ensure_ascii=False))
+    else:
+        print(rendered)
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Protocol
 
 from developmental_language_v15 import MultiLevelLearningAgent
+from web_cache import WEB_CACHE
 
 
 USER_AGENT = "AI_Noise/0.16 (read-only research; https://github.com/Noise101/AI_Noise)"
@@ -103,10 +104,8 @@ class WiktionaryDefinitions:
             "action": "parse", "page": word, "prop": "text", "format": "json", "formatversion": 2,
         })
         url = f"https://{self.host}/w/api.php?{params}"
-        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
         try:
-            with urllib.request.urlopen(request, timeout=20) as response:
-                parsed = json.load(response).get("parse", {})
+            parsed = WEB_CACHE.get_json(url, USER_AGENT).get("parse", {})
         except Exception:
             return None
         parser = _DefinitionParser(self.require_english_heading)

@@ -14,6 +14,8 @@ AI_Noise is an experiment in building a small autonomous learner rather than imi
 
 Do not claim general intelligence or full natural-language understanding. Every version intentionally exposes its limitations.
 
+Read `ARCHITECTURE.md` before changing the learning path. Its invariants are the project constitution: the epistemic core must work without an LLM, and a local-model proposal has no evidential weight.
+
 ## Current state
 
 - `v9`: integrated binary causal/concept learner.
@@ -61,3 +63,4 @@ After that, run an evaluation matrix with previously unseen English and Japanese
 - Do not treat substring search results as lexical validation; v18 requires exact pages or formal redirects.
 - Distinguish observed form, candidate boundary, grounded meaning, and causal explanation. Evidence at one level does not prove the next.
 - Preserve failed experiments and negative results when they explain a design change.
+- Read `RESOURCE_POLICY.md` before running evaluations. Use the quick test profile during iteration, cached web reads, summary output, and the optional 4B Ollama helper only for unverified proposals.
