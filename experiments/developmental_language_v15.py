@@ -42,6 +42,7 @@ class DevelopmentalLexicon:
         self.roles: dict[str, Counter[str]] = defaultdict(Counter)
         self.contexts: dict[str, Counter[str]] = defaultdict(Counter)
         self.meaning_revisions: list[dict] = []
+        self.meaning_hypotheses: dict[str, dict] = {}
         self.sentences_seen = 0
 
     @staticmethod
@@ -95,6 +96,24 @@ class DevelopmentalLexicon:
             return None
         return max(counts, key=lambda role: (counts[role], role))
 
+    def update_meaning_hypothesis(self, word: str, belief: dict) -> None:
+        """Write researched lexical meaning back into long-lived vocabulary memory."""
+        word = word.lower()
+        before = self.meaning_hypotheses.get(word)
+        compact = {
+            "status": belief.get("status"), "accepted_sense": belief.get("accepted_sense"),
+            "leading_sense": belief.get("leading_sense"),
+            "confidence_margin": belief.get("confidence_margin", 0.0),
+            "alternatives": belief.get("alternatives", []),
+        }
+        self.meaning_hypotheses[word] = compact
+        if before and before.get("accepted_sense") != compact.get("accepted_sense"):
+            self.meaning_revisions.append({
+                "word": word, "before": before.get("accepted_sense"),
+                "after": compact.get("accepted_sense"),
+                "reason": "new sourced lexical evidence revised the stored sense",
+            })
+
     def phrase_candidates(self, minimum_count: int = 2) -> list[dict]:
         phrases = []
         for (left, right), count in self.word_links.items():
@@ -111,7 +130,8 @@ class DevelopmentalLexicon:
 
     def lexical_gap(self) -> dict | None:
         unknown = [(count, word) for word, count in self.words.items()
-                   if word not in FUNCTION_WORDS and not self.roles.get(word)]
+                   if word not in FUNCTION_WORDS and not self.roles.get(word)
+                   and not self.meaning_hypotheses.get(word, {}).get("accepted_sense")]
         if unknown:
             count, word = max(unknown, key=lambda item: (item[0], item[1]))
             contexts = [name.split(":", 1)[1] for name, _ in self.contexts[word].most_common(4)]
@@ -138,6 +158,7 @@ class DevelopmentalLexicon:
             "characters": dict(self.characters.most_common()),
             "word_forms": dict(self.words.most_common()),
             "grounded_meanings": grounded,
+            "researched_meanings": self.meaning_hypotheses,
             "phrase_candidates": self.phrase_candidates(),
             "meaning_revisions": self.meaning_revisions,
             "next_lexical_goal": self.lexical_gap(),

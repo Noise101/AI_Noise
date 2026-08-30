@@ -62,6 +62,7 @@ python3 -m unittest discover -v
 | v13 | 知識不足から公開児童文学を自律検索する読み取り専用カリキュラム |
 | v14 | 資料間の表現統合・視点分離・反証による概念信念更新 |
 | v15 | 文字・単語・句・意味役割・文因果の並行発達学習 |
+| v16 | 未知語の辞書・児童文用例調査と出典付きsense書き戻し |
 
 各版は`experiments/`内に独立した実行可能ファイルとして残しています。
 
@@ -138,6 +139,18 @@ python3 -m unittest -v test_story_web_curriculum_v13.py
 cd experiments
 python3 developmental_language_v15.py "fox grapes" --output report.json
 python3 -m unittest -v test_developmental_language_v15.py
+```
+
+## v16
+
+`experiments/lexical_research_v16.py` は、v15が自分で選んだ未知語と検索目的を実行します。English Wiktionary、Simple English Wiktionary、すでに読んだ児童文の用例を別の証拠として保持し、定義から複数のsense候補を抽出します。多義語は矛盾扱いせず代替senseとして残し、現在の用例に最も合うsenseを暫定採用します。
+
+採用結果はv15の語彙記憶へ出典付きで書き戻されます。後の証拠で先頭senseが変われば訂正履歴を残し、学習済みの語を未知リストから外して次の不足語を選びます。
+
+```bash
+cd experiments
+python3 lexical_research_v16.py "fox grapes" --output report.json
+python3 -m unittest -v test_lexical_research_v16.py
 ```
 
 ## ライセンス

@@ -46,6 +46,20 @@ class DevelopmentalLanguageTest(unittest.TestCase):
         self.assertNotIn("the", grounded)
         self.assertNotIn("at", grounded)
 
+    def test_sourced_meaning_is_written_back_and_can_be_revised(self):
+        lexicon = DevelopmentalLexicon()
+        lexicon.update_meaning_hypothesis("again", {
+            "status": "single_source", "accepted_sense": "return_to_prior_state",
+            "leading_sense": "return_to_prior_state", "alternatives": [],
+        })
+        lexicon.update_meaning_hypothesis("again", {
+            "status": "corroborated", "accepted_sense": "repetition",
+            "leading_sense": "repetition", "alternatives": [{"citations": ["https://source"]}],
+        })
+        report = lexicon.report()
+        self.assertEqual(report["researched_meanings"]["again"]["accepted_sense"], "repetition")
+        self.assertTrue(report["meaning_revisions"])
+
 
 if __name__ == "__main__":
     unittest.main()
