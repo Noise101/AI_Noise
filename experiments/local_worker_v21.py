@@ -134,6 +134,24 @@ def discover_curriculum(report: dict, visited: set[str], network: int) -> list[d
                 candidates[seed] = {"seed": seed, "score": score,
                                     "reason": "unvisited story link found in read evidence",
                                     "parent_url": url, "linked_title": linked_title}
+        if "/" in title:
+            collection = title.rsplit("/", 1)[0] + "/"
+            params = urllib.parse.urlencode({"action": "query", "list": "allpages",
+                                             "apprefix": collection, "apnamespace": 0,
+                                             "aplimit": 100, "format": "json", "formatversion": 2})
+            try:
+                shelf = WEB_CACHE.get_json("https://en.wikisource.org/w/api.php?" + params,
+                                           "AI_Noise/0.24 (read-only observed-shelf curriculum)")
+            except Exception:
+                shelf = {}
+            for page in shelf.get("query", {}).get("allpages", []):
+                linked_title = page.get("title", "")
+                seed = _seed_from_title(linked_title)
+                if not seed or seed in visited:
+                    continue
+                candidates.setdefault(seed, {"seed": seed, "score": 2.5,
+                                              "reason": "unvisited page in an observed story collection",
+                                              "parent_url": url, "linked_title": linked_title})
     beliefs = report.get("knowledge", {}).get("concepts", {}).get("beliefs", [])
     for belief in beliefs:
         seed = f"{belief.get('subject', '')} {belief.get('object', '')}".strip().lower()
@@ -143,6 +161,20 @@ def discover_curriculum(report: dict, visited: set[str], network: int) -> list[d
                                      "reason": "unvisited concept pair from evidence ledger",
                                      "parent_url": (belief.get("citations") or [None])[0]})
     return sorted(candidates.values(), key=lambda item: (-item["score"], item["seed"]))
+
+
+def rediscover_from_history(runtime: Path, visited: set[str], network: int) -> list[dict]:
+    found: dict[str, dict] = {}
+    reports = [runtime / "latest-report.json", *sorted((runtime / "seeds").glob("*/latest-report.json"))]
+    for path in reports:
+        report = read_json(path)
+        if not report:
+            continue
+        for item in discover_curriculum(report, visited | set(found), network):
+            found.setdefault(item["seed"], item)
+        if len(found) >= 20:
+            break
+    return sorted(found.values(), key=lambda item: (-item["score"], item["seed"]))
 
 
 def status_record(seed: str, runtime: Path, phase: str, rounds: int,
@@ -235,6 +267,8 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             curriculum["frontier"].extend(item for item in discovered if item["seed"] not in known)
             curriculum["frontier"] = [item for item in curriculum["frontier"]
                                       if item["seed"] not in visited]
+            if not curriculum["frontier"]:
+                curriculum["frontier"].extend(rediscover_from_history(runtime, visited, network))
             if curriculum["frontier"]:
                 selected = curriculum["frontier"].pop(0)
                 curriculum["transitions"].append({"from": seed, "to": selected["seed"],

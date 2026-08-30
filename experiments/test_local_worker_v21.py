@@ -15,9 +15,10 @@ class LocalWorkerTest(unittest.TestCase):
             self.assertEqual(read_json(path), {"phase": "learning"})
             self.assertFalse(path.with_suffix(".json.tmp").exists())
 
+    @patch("local_worker_v21.rediscover_from_history", return_value=[])
     @patch("local_worker_v21.discover_curriculum", return_value=[])
     @patch("local_worker_v21.run_cycle")
-    def test_repeats_step_budgets_then_exhausts_frontier(self, run_cycle, _discover):
+    def test_repeats_step_budgets_then_exhausts_frontier(self, run_cycle, _discover, _history):
         run_cycle.side_effect = [
             {"state": {"completed_gap_ids": ["one"], "stop_reason": "step_budget_exhausted"},
              "current_gaps": [{"gap_id": "two"}], "web_usage": {"network_requests": 1}},
