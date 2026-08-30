@@ -126,6 +126,26 @@ class StoryLearner:
             "warning": "predictive evidence, not yet a proven cause",
         }
 
+    def plan_why_investigation(self, outcome: str) -> dict:
+        """Choose the observations needed to turn association into a causal test."""
+        answer = self.ask_why(outcome)
+        candidate = answer.get("candidate_cause") or answer.get("best_candidate")
+        if not candidate:
+            return {
+                "goal": f"explain {outcome}",
+                "next_observation": "find at least one context where the outcome occurs",
+            }
+        return {
+            "goal": f"test whether {candidate} changes {outcome}",
+            "candidate_cause": candidate,
+            "observe": [
+                f"stories with {candidate}",
+                f"comparable stories without {candidate}",
+            ],
+            "success_condition": "outcome rate differs repeatedly between the two groups",
+            "falsification_condition": "outcome rate is the same or reverses",
+        }
+
     def confidence(self, context: str, outcome: str) -> float:
         counts = self.transitions.get(context, Counter())
         total = sum(counts.values())
@@ -147,7 +167,11 @@ class StoryLearner:
         for question in self.why_questions:
             answer = self.ask_why(question.outcome)
             question.status = "candidate_found" if answer.get("candidate_cause") else "open"
-            why_answers.append({**asdict(question), "current_answer": answer})
+            why_answers.append({
+                **asdict(question),
+                "current_answer": answer,
+                "investigation": self.plan_why_investigation(question.outcome),
+            })
         return {
             "method": "counted event transitions; no pretrained model or LLM",
             "events_seen": sum(self.event_counts.values()),

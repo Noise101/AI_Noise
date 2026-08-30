@@ -50,6 +50,14 @@ class StoryLearningTest(unittest.TestCase):
         self.assertGreater(answer["lift_over_baseline"], 0)
         self.assertIn("not yet a proven cause", answer["warning"])
 
+    def test_why_creates_a_falsifiable_investigation(self):
+        learner = StoryLearner()
+        learner.observe_story(["Rain falls softly.", "Seed grows tall."])
+        plan = learner.plan_why_investigation("seed|grows|tall")
+        self.assertEqual(len(plan["observe"]), 2)
+        self.assertIn("without", plan["observe"][1])
+        self.assertIn("falsification_condition", plan)
+
 
 if __name__ == "__main__":
     unittest.main()
