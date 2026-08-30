@@ -17,6 +17,7 @@ from japanese_boundaries_v18 import (
     JapaneseBoundaryAgent, JapaneseWikipedia, JapaneseWikisource, JapaneseWiktionary, _json,
 )
 from local_candidate_helper import OllamaCandidateHelper
+from kanjipedia_reference_v22 import KanjipediaReference
 from web_cache import WEB_CACHE
 
 
@@ -176,7 +177,8 @@ class ContextSenseLedger:
 
 def run(seed_concept: str, use_local_helper: bool = False) -> dict:
     story_source = JapaneseWikisource()
-    boundary_agent = JapaneseBoundaryAgent(story_source, [JapaneseWiktionary(), JapaneseWikipedia()])
+    boundary_agent = JapaneseBoundaryAgent(
+        story_source, [JapaneseWiktionary(), JapaneseWikipedia(), KanjipediaReference()])
     boundary = boundary_agent.learn(seed_concept, candidate_limit=15, target_words=2)
     ambiguous = next((item for item in boundary.get("accepted_words", [])
                       if item.get("meaning_status") == "ambiguous_reference"), None)

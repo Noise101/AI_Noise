@@ -213,16 +213,20 @@ python3 autonomous_controller_v20.py "fox grapes" --state controller-state.json 
 
 ## v21: Codexを使わないローカル運転
 
-日常の学習周期は`local_worker_v21.py`だけで実行できます。この経路はOpenAI APIやCodexを呼びません。通常のPython規則・証拠台帳・ウェブキャッシュで進み、状態、最新レポート、短いheartbeatを`.local/`へ保存します。
+日常の学習周期は`local_worker_v21.py`だけで実行できます。この経路はOpenAI APIやCodexを呼びません。通常のPython規則・証拠台帳・ウェブキャッシュで進み、状態、最新レポート、短いheartbeatを`.local/`へ保存します。現在のseedを学び切ると、読んだWikisourceページの未訪問リンクと証拠台帳の概念対から次のseed候補を生成し、選択理由と親URLを保存して自動遷移します。
 
 ```bash
 cd experiments
-python3 local_worker_v21.py run "fox grapes"
+python3 local_worker_v21.py start "fox grapes"
 python3 local_worker_v21.py status
 python3 local_worker_v21.py stop
 ```
 
-`status`の`heartbeat`が更新されていれば動作中です。`completed_gaps`、`remaining_gaps`、実通信数、停止理由も短いJSONで確認できます。終了後に同じ`run`を実行すれば保存地点から再開します。Codexは新しい学習機構の設計、失敗解析、節目のレビューだけに使う想定です。
+`start`はバックグラウンドで一度だけ起動します。`status`の`heartbeat`が更新されていれば動作中です。現在のseed、処理済みカリキュラム数、`completed_gaps`、`remaining_gaps`、実通信数、停止理由を確認できます。通信上限は周期ごとのレート制限として自動再開されます。Codexは新しい学習機構の設計、失敗解析、節目のレビューだけに使う想定です。
+
+## 漢字ペディア参照
+
+`experiments/kanjipedia_reference_v22.py`は、漢字ペディアを日本語の漢字・熟語候補の完全一致検証に使います。保存するのは項目の存在、URL、応答ハッシュだけです。著作権のある辞書本文は知識へコピーせず、意味の判断にはWiktionary、Wikipedia、児童文の観察証拠も別々に必要です。サイト障害時は証拠なしとして通常経路を継続します。
 
 ## ライセンス
 

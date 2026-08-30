@@ -48,6 +48,6 @@ ChatGPT Work and Codex share usage under the account plan, so unnecessary task r
 
 ## Local-first operating split
 
-Run routine learning with `python3 experiments/local_worker_v21.py run`. It invokes no Codex task and no remote model API. Inspect its compact heartbeat with `python3 experiments/local_worker_v21.py status`; do not ask Codex to poll ordinary progress. Request a safe stop with `python3 experiments/local_worker_v21.py stop`.
+Start routine learning once with `python3 experiments/local_worker_v21.py start`. It runs in the background, invokes no Codex task and no remote model API, and selects the next curriculum seed from observed evidence. Inspect its compact heartbeat with `python3 experiments/local_worker_v21.py status`; do not ask Codex to poll ordinary progress. Request a safe stop with `python3 experiments/local_worker_v21.py stop`.
 
 Use Codex only when the local worker reports an error, reaches a genuine architecture gap, needs a reviewed code change, or a milestone is ready to audit and push. Python evidence logic remains the decision-maker. Ollama 4B remains an optional zero-weight proposal generator, not a replacement judge.

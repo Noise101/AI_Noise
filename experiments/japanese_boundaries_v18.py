@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Protocol
 
 from story_web_curriculum_v13 import _TextExtractor
+from kanjipedia_reference_v22 import KanjipediaReference
 from web_cache import WEB_CACHE
 
 
@@ -213,7 +214,8 @@ def main() -> None:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--summary", action="store_true")
     args = parser.parse_args()
-    agent = JapaneseBoundaryAgent(JapaneseWikisource(), [JapaneseWiktionary(), JapaneseWikipedia()])
+    agent = JapaneseBoundaryAgent(
+        JapaneseWikisource(), [JapaneseWiktionary(), JapaneseWikipedia(), KanjipediaReference()])
     report = agent.learn(args.concept, args.candidate_limit, args.target_words)
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     if args.output:
