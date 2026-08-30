@@ -41,6 +41,25 @@ def read_json(path: Path) -> dict:
         return {}
 
 
+def is_transient_error(error: Exception) -> bool:
+    text = f"{type(error).__name__}: {error}".lower()
+    markers = ("timeout", "timed out", "temporarily unavailable", "connection reset",
+               "connection refused", "remote end closed", "http error 429", "http error 500",
+               "http error 502", "http error 503", "http error 504", "name or service not known")
+    return isinstance(error, (TimeoutError, ConnectionError, subprocess.TimeoutExpired)) or any(
+        marker in text for marker in markers)
+
+
+def wait_for_retry(stop_path: Path, seconds: float) -> bool:
+    """Return False when a safe stop is requested during backoff."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if stop_path.exists():
+            return False
+        time.sleep(min(1, deadline - time.monotonic()))
+    return True
+
+
 def seed_runtime(runtime: Path, seed: str) -> Path:
     legacy = read_json(runtime / "controller-state.json")
     if legacy.get("seed") == seed:
@@ -222,6 +241,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
     latest = status_record(seed, runtime, "starting", 0)
     write_json(status_path, latest)
     round_number = 0
+    consecutive_transient_errors = 0
     while max_rounds <= 0 or round_number < max_rounds:
         round_number += 1
         if stop_path.exists():
@@ -233,9 +253,23 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             prime_seed_curiosity(runtime, seed, curriculum)
             report = run_cycle(seed, runtime, steps, seconds, network)
         except Exception as error:
-            latest = status_record(seed, runtime, "error", round_number, error=str(error))
+            if not is_transient_error(error):
+                latest = status_record(seed, runtime, "error", round_number, error=str(error))
+                write_json(status_path, latest)
+                return latest
+            consecutive_transient_errors += 1
+            retry_seconds = min(30, max(2, 2 ** min(consecutive_transient_errors, 5)))
+            latest = status_record(seed, runtime, "transient_error_wait", round_number,
+                                   error=f"{type(error).__name__}: {error}")
+            latest["retry_in_seconds"] = retry_seconds
+            latest["consecutive_transient_errors"] = consecutive_transient_errors
             write_json(status_path, latest)
-            return latest
+            if not wait_for_retry(stop_path, retry_seconds):
+                latest["phase"] = "stopped_by_user"
+                write_json(status_path, latest)
+                return latest
+            continue
+        consecutive_transient_errors = 0
         reason = report.get("state", {}).get("stop_reason")
         mastery = assess_language_mastery(report)
         report["mastery"] = mastery

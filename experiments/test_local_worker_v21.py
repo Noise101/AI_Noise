@@ -4,10 +4,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from local_worker_v21 import _seed_from_title, merge_curiosity, read_json, work, write_json
+from local_worker_v21 import _seed_from_title, is_transient_error, merge_curiosity, read_json, work, write_json
 
 
 class LocalWorkerTest(unittest.TestCase):
+    def test_classifies_network_timeout_but_not_programming_error(self):
+        self.assertTrue(is_transient_error(TimeoutError("read timed out")))
+        self.assertFalse(is_transient_error(KeyError("broken schema")))
+
     def test_atomic_status_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "status.json"
@@ -86,6 +90,17 @@ class LocalWorkerTest(unittest.TestCase):
                 result = work("seed", runtime, 2, 0, 1, 1, 1, local_conversation=False)
             run_cycle.assert_not_called()
             self.assertEqual(result["phase"], "stopped_by_user")
+
+    @patch("local_worker_v21.wait_for_retry", return_value=True)
+    @patch("local_worker_v21.run_cycle")
+    def test_transient_timeout_retries_without_manual_restart(self, run_cycle, _wait):
+        run_cycle.side_effect = [TimeoutError("read operation timed out"), {
+            "state": {"completed_gap_ids": ["one"], "stop_reason": "step_budget_exhausted"},
+            "current_gaps": [], "knowledge": {}, "web_usage": {}}]
+        with tempfile.TemporaryDirectory() as directory:
+            result = work("seed", Path(directory), 2, 0, 1, 1, 1, local_conversation=False)
+        self.assertEqual(run_cycle.call_count, 2)
+        self.assertEqual(result["phase"], "round_budget_exhausted")
 
 
 if __name__ == "__main__":
