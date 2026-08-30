@@ -16,4 +16,4 @@ python3 -m unittest discover -v
 - `active_falsification_v7.py`: 能動反証と受動観測の比較
 - `constructive_concepts_v8.py`: 全仮説列挙なしの構造成長
 - `unified_agent_v9.py`: 統合評価
-
+- `probabilistic_agent_v10.py`: 確率的因果、ノイズ下の構造回収と校正

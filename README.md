@@ -56,6 +56,7 @@ python3 -m unittest discover -v
 | v7 | 自分を反証する実験の能動選択 |
 | v8 | 残差から概念構造を逐次成長 |
 | v9 | 上記機能を単一ループへ統合 |
+| v10 | 確率的因果・観測ノイズ・信念校正 |
 
 各版は`experiments/`内に独立した実行可能ファイルとして残しています。
 
@@ -67,7 +68,15 @@ python3 -m unittest discover -v
 - 概念の階層化と再利用
 - 玩具世界以外へ接続できる環境インターフェース
 
+## v10
+
+`experiments/probabilistic_agent_v10.py` は、各因果状態を0/1で確定せずBeta分布として保持します。確率的結果の下で、構造・遅延の探索、事前予測、Brier scoreによる校正評価、能動介入を行います。
+
+```bash
+cd experiments
+python3 probabilistic_agent_v10.py --trials 50
+```
+
 ## ライセンス
 
 未設定です。利用・再配布条件を決めてからLICENSEを追加します。
-
