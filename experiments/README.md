@@ -27,3 +27,4 @@ python3 -m unittest discover -v
 - `japanese_boundaries_v18.py`: 日本語児童文からの境界誘導、辞書・百科事典による検証
 - `japanese_sense_grounding_v19.py`: 日本語多義語の候補列挙、文脈接地、反証訂正
 - `autonomous_controller_v20.py`: 期待情報利得による課題選択、予算停止、状態・知識の永続化と再開
+- `local_worker_v21.py`: Codex/APIを呼ばないローカル反復実行、heartbeat、再開、安全停止

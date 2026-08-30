@@ -211,6 +211,19 @@ python3 autonomous_controller_v20.py "fox grapes" --state controller-state.json 
 
 同じコマンドを再実行すると、前回の知識から次の未解決課題へ進みます。これは常駐プロセスではなく、予算単位で安全に再開できる制御器です。
 
+## v21: Codexを使わないローカル運転
+
+日常の学習周期は`local_worker_v21.py`だけで実行できます。この経路はOpenAI APIやCodexを呼びません。通常のPython規則・証拠台帳・ウェブキャッシュで進み、状態、最新レポート、短いheartbeatを`.local/`へ保存します。
+
+```bash
+cd experiments
+python3 local_worker_v21.py run "fox grapes"
+python3 local_worker_v21.py status
+python3 local_worker_v21.py stop
+```
+
+`status`の`heartbeat`が更新されていれば動作中です。`completed_gaps`、`remaining_gaps`、実通信数、停止理由も短いJSONで確認できます。終了後に同じ`run`を実行すれば保存地点から再開します。Codexは新しい学習機構の設計、失敗解析、節目のレビューだけに使う想定です。
+
 ## ライセンス
 
 未設定です。利用・再配布条件を決めてからLICENSEを追加します。

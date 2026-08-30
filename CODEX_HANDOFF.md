@@ -30,6 +30,7 @@ Read `ARCHITECTURE.md` before changing the learning path. Its invariants are the
 - `v18`: Japanese word-boundary induction without a pretrained tokenizer, validated against exact Wiktionary/Wikipedia pages.
 - `v19`: ambiguous Japanese senses are enumerated from references, grounded in observable story features, cited, and revisable by counter-context.
 - `v20`: a persistent budgeted controller selects gaps by expected information gain, saves every cycle, restores learned beliefs, and stops cleanly at network/time/step boundaries.
+- `v21`: routine cycles run in a local Python worker with a compact heartbeat, resumable state, a safe stop file, and zero Codex/remote-LLM calls.
 
 The latest live v18 run generated the query `きつね つる`, selected `イソップ童話集/きつねとつる`, and induced many repeated chunks. Only `きつね` and `つる` were corroborated by both Japanese Wiktionary and an exact/redirected Japanese Wikipedia page. `つる` remains meaning-ambiguous even though its boundary is accepted.
 
@@ -51,6 +52,8 @@ python3 lexical_research_v16.py "fox grapes" --output report-v16.json
 python3 phrase_learning_v17.py "fox grapes" --max-phrases 4 --output report-v17.json
 python3 japanese_boundaries_v18.py "きつね つる" --candidate-limit 15 --output report-v18.json
 python3 autonomous_controller_v20.py "fox grapes" --state controller-state.json --max-steps 3 --max-network 8 --summary
+python3 local_worker_v21.py run "fox grapes"
+python3 local_worker_v21.py status
 ```
 
 ## Next concrete work

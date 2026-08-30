@@ -12,6 +12,7 @@ import unittest
 QUICK_MODULES = [
     "test_architecture_contract",
     "test_autonomous_controller_v20",
+    "test_local_worker_v21",
     "test_story_learning_v12", "test_story_web_curriculum_v13", "test_story_concepts_v14",
     "test_developmental_language_v15", "test_lexical_research_v16", "test_phrase_learning_v17",
     "test_japanese_boundaries_v18",
