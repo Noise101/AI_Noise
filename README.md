@@ -13,7 +13,7 @@
   → 再予測
 ```
 
-LLM、学習済みモデル、外部APIは使用していません。現在の実験はPython標準ライブラリだけで動作します。
+LLMと学習済みモデルは使用していません。実験はPython標準ライブラリだけで動作します。v11だけは読み取り専用のWikimedia APIへ接続します。
 
 ## 現在地
 
@@ -57,6 +57,8 @@ python3 -m unittest discover -v
 | v8 | 残差から概念構造を逐次成長 |
 | v9 | 上記機能を単一ループへ統合 |
 | v10 | 確率的因果・観測ノイズ・信念校正 |
+| v11 | 調査目標生成と読み取り専用ウェブ学習 |
+| v12 | 児童向け短文からの出来事予測・自己訂正・「なぜ？」生成 |
 
 各版は`experiments/`内に独立した実行可能ファイルとして残しています。
 
@@ -75,6 +77,27 @@ python3 -m unittest discover -v
 ```bash
 cd experiments
 python3 probabilistic_agent_v10.py --trials 50
+```
+
+## v11
+
+`experiments/web_learning_v11.py` は、与えられた話題を起点にWikidataを検索し、未探索の関連エンティティから次の調査目標を自ら生成します。APIアクセスは読み取り専用です。この版は既成の知識グラフに依存しすぎ、複数値を矛盾と誤認するため、完成版ではなく失敗を含む比較対象です。
+
+```bash
+cd experiments
+python3 web_learning_v11.py "causal inference" --steps 8 --output report.json
+```
+
+## v12
+
+`experiments/story_learning_v12.py` は、児童文学・絵本相当の単純な出来事列から始めます。短文を透明な規則で出来事へ変換し、次の出来事を予測します。予想外の結果は誤りとして保存され、反例が重なると古い予測が置き換わります。
+
+「なぜ？」は知識の暗唱ではありません。予想外の結果に対して自動生成され、ある文脈の後で結果が増えたかを他の文脈と比較します。比較証拠が足りなければ`unknown`、足りれば検証可能な候補原因として回答します。現段階では相関的な候補であり、原因の証明ではありません。
+
+```bash
+cd experiments
+python3 story_learning_v12.py
+python3 -m unittest -v test_story_learning_v12.py
 ```
 
 ## ライセンス
