@@ -77,6 +77,10 @@ class StoryLearner:
 
     def observe_story(self, sentences: list[str]) -> None:
         events = [event for sentence in sentences if (event := self.parser.parse(sentence))]
+        self.observe_events(events)
+
+    def observe_events(self, events: list[Event]) -> None:
+        """Learn from already-grounded events supplied by another transparent parser."""
         for event in events:
             self.event_counts[event.key] += 1
         for before, observed in zip(events, events[1:]):

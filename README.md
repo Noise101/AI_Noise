@@ -59,6 +59,7 @@ python3 -m unittest discover -v
 | v10 | 確率的因果・観測ノイズ・信念校正 |
 | v11 | 調査目標生成と読み取り専用ウェブ学習 |
 | v12 | 児童向け短文からの出来事予測・自己訂正・「なぜ？」生成 |
+| v13 | 知識不足から公開児童文学を自律検索する読み取り専用カリキュラム |
 
 各版は`experiments/`内に独立した実行可能ファイルとして残しています。
 
@@ -99,6 +100,20 @@ cd experiments
 python3 story_learning_v12.py
 python3 -m unittest -v test_story_learning_v12.py
 ```
+
+## v13
+
+`experiments/story_web_curriculum_v13.py` は、v12が持つ未解決のWhy質問または観察回数の少ない規則を知識不足として検出し、そこから検索語を生成します。固定の正解ページは持たず、WikisourceとProject Gutenbergを別々に読み取り専用検索します。
+
+取得本文からライセンス文・書誌情報・別作品を除外し、透明な動作語規則で出来事を抽出します。各資料についてURL、検索語、取得本文と使用箇所のSHA-256、抽出イベントを証拠台帳へ保存します。2つの独立リポジトリから本文を取得できない場合、結論は`uncertain`のままです。
+
+```bash
+cd experiments
+python3 story_web_curriculum_v13.py "fox grapes" --rounds 2 --output report.json
+python3 -m unittest -v test_story_web_curriculum_v13.py
+```
+
+現段階の文法は英語の単純な行動文に限定されています。代名詞の同一人物判定や、文章に明記されない原因・意図の理解は未実装です。
 
 ## ライセンス
 

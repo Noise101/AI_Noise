@@ -19,3 +19,4 @@ python3 -m unittest discover -v
 - `probabilistic_agent_v10.py`: 確率的因果、ノイズ下の構造回収と校正
 - `web_learning_v11.py`: 調査目標を生成する読み取り専用ウェブ学習
 - `story_learning_v12.py`: 児童向け短文による予測、驚き、自己訂正、「なぜ？」の生成
+- `story_web_curriculum_v13.py`: 不足から検索語を生成し、公開児童文学を複数資料から読むカリキュラム
