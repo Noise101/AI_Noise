@@ -64,6 +64,7 @@ python3 -m unittest discover -v
 | v15 | 文字・単語・句・意味役割・文因果の並行発達学習 |
 | v16 | 未知語の辞書・児童文用例調査と出典付きsense書き戻し |
 | v17 | 反復句の自律調査と構成的／非構成的意味の保留判定 |
+| v18 | 日本語児童文からのtokenizerなし境界誘導と参照資料検証 |
 
 各版は`experiments/`内に独立した実行可能ファイルとして残しています。
 
@@ -164,6 +165,18 @@ python3 -m unittest -v test_lexical_research_v16.py
 cd experiments
 python3 phrase_learning_v17.py "fox grapes" --max-phrases 4 --output report.json
 python3 -m unittest -v test_phrase_learning_v17.py
+```
+
+## v18
+
+`experiments/japanese_boundaries_v18.py` は、日本語Wikisourceを読み取り専用検索し、空白のない児童文から2〜6文字の反復列と左右文脈の多様性で語境界候補を作ります。日本語WiktionaryとWikipediaの完全ページ名／正式redirectで候補を検証し、部分一致検索による偽陽性は採用しません。
+
+実ウェブ例では『イソップ童話集/きつねとつる』を自律選択し、`きつね`と`つる`だけが2資料一致の境界になりました。`ました`は1資料、`てしまいまし`などは0資料なので不採用です。`つる`はWikipedia上で曖昧語のため、語境界は確認できても「鶴／蔓」の意味は未確定として残します。
+
+```bash
+cd experiments
+python3 japanese_boundaries_v18.py "きつね つる" --candidate-limit 15 --output report.json
+python3 -m unittest -v test_japanese_boundaries_v18.py
 ```
 
 ## ライセンス
