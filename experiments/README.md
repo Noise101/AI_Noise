@@ -25,3 +25,4 @@ python3 -m unittest discover -v
 - `lexical_research_v16.py`: 自己生成した未知語検索、複数sense評価、語彙記憶への書き戻し
 - `phrase_learning_v17.py`: 反復句の検索と構成的／非構成的意味の証拠評価
 - `japanese_boundaries_v18.py`: 日本語児童文からの境界誘導、辞書・百科事典による検証
+- `japanese_sense_grounding_v19.py`: 日本語多義語の候補列挙、文脈接地、反証訂正

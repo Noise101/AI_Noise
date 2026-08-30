@@ -14,6 +14,7 @@ QUICK_MODULES = [
     "test_story_learning_v12", "test_story_web_curriculum_v13", "test_story_concepts_v14",
     "test_developmental_language_v15", "test_lexical_research_v16", "test_phrase_learning_v17",
     "test_japanese_boundaries_v18",
+    "test_japanese_sense_grounding_v19",
     "test_local_candidate_helper", "test_web_cache",
 ]
 

@@ -28,6 +28,7 @@ Read `ARCHITECTURE.md` before changing the learning path. Its invariants are the
 - `v16`: unknown-word lookup using two Wiktionary projects plus observed story usage; sourced senses are written back.
 - `v17`: phrase research; a repeated phrase is not called an idiom until component meanings are grounded.
 - `v18`: Japanese word-boundary induction without a pretrained tokenizer, validated against exact Wiktionary/Wikipedia pages.
+- `v19`: ambiguous Japanese senses are enumerated from references, grounded in observable story features, cited, and revisable by counter-context.
 
 The latest live v18 run generated the query `きつね つる`, selected `イソップ童話集/きつねとつる`, and induced many repeated chunks. Only `きつね` and `つる` were corroborated by both Japanese Wiktionary and an exact/redirected Japanese Wikipedia page. `つる` remains meaning-ambiguous even though its boundary is accepted.
 
@@ -52,7 +53,7 @@ python3 japanese_boundaries_v18.py "きつね つる" --candidate-limit 15 --out
 
 ## Next concrete work
 
-The next version should resolve the ambiguous Japanese surface `つる` from child-story context without using an LLM. It should compare candidate senses such as 鶴 and 蔓 against observable predicates and neighboring entities, retain both if evidence is weak, cite the sources used for each sense, and record a revision if later context changes the winner.
+The next version should turn the separate v12-v19 stages into one persistent autonomous controller. It should choose among causal, concept, word, phrase, boundary, and sense gaps by expected information gain, obey explicit request and test budgets, resume from its evidence ledger, and prove the full loop on unseen seeds.
 
 After that, run an evaluation matrix with previously unseen English and Japanese seed concepts. The required end-to-end gates remain: autonomous gap detection, generated query, read-only retrieval, multiple-source evaluation, concept/causal update, cited conclusion, and demonstrated self-correction.
 

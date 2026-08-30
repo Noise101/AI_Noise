@@ -69,6 +69,7 @@ python3 -m unittest discover -v
 | v16 | 未知語の辞書・児童文用例調査と出典付きsense書き戻し |
 | v17 | 反復句の自律調査と構成的／非構成的意味の保留判定 |
 | v18 | 日本語児童文からのtokenizerなし境界誘導と参照資料検証 |
+| v19 | 日本語多義語の文脈接地・引用付き結論・反証訂正 |
 
 各版は`experiments/`内に独立した実行可能ファイルとして残しています。
 
@@ -181,6 +182,20 @@ python3 -m unittest -v test_phrase_learning_v17.py
 cd experiments
 python3 japanese_boundaries_v18.py "きつね つる" --candidate-limit 15 --output report.json
 python3 -m unittest -v test_japanese_boundaries_v18.py
+```
+
+## v19
+
+`experiments/japanese_sense_grounding_v19.py` は、v18が見つけた意味曖昧な語について、日本語Wiktionaryの見出しから候補senseを動的に列挙し、Wikipediaの正式ページで参照証拠を補います。定義中の内容特徴と児童文の観察特徴を比較し、弱ければ全候補を残し、強ければ文脈限定で暫定採用します。後の反対特徴が優勢になれば訂正履歴を残します。
+
+実ウェブ例では`つる`の候補として鶴・蔓・弦・鉉・動詞sense等を取得し、『きつねとつる』本文の`くちばし`反復から`鶴`を暫定採用しました。結論はWiktionaryとWikipediaを引用し、植物・茎・巻きつく等の新文脈で覆り得ることを保持します。
+
+`--local-helper`を付けるとOllama 4Bへ未検証候補だけを依頼します。候補は証拠スコア0で、通常のsense台帳には入りません。実測では4Bが区別可能な候補を返せず0件となりましたが、通常経路はそのまま成功しました。
+
+```bash
+cd experiments
+python3 japanese_sense_grounding_v19.py "きつね つる" --summary --output report.json
+python3 -m unittest -v test_japanese_sense_grounding_v19.py
 ```
 
 ## ライセンス
