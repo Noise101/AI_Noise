@@ -184,6 +184,7 @@ class StoryCurriculumAgent:
         self.documents: list[StoryDocument] = []
         self.search_history: list[dict] = []
         self.visited_urls: set[str] = set()
+        self.source_observations: list[dict] = []
 
     def detect_gap(self, seed_concept: str) -> dict:
         open_questions = [q for q in self.learner.why_questions if q.status == "open"]
@@ -281,6 +282,10 @@ class StoryCurriculumAgent:
                     self.learner.observe_events(parsed_events)
                     self.documents.append(document)
                     self.visited_urls.add(document.url)
+                    self.source_observations.append({
+                        "source": document.source, "title": document.title, "url": document.url,
+                        "source_score": document.source_score, "sentences": passage,
+                    })
                     found.append({
                         **document.evidence(),
                         "sentences_used": len(passage),

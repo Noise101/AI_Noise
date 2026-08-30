@@ -60,6 +60,8 @@ python3 -m unittest discover -v
 | v11 | 調査目標生成と読み取り専用ウェブ学習 |
 | v12 | 児童向け短文からの出来事予測・自己訂正・「なぜ？」生成 |
 | v13 | 知識不足から公開児童文学を自律検索する読み取り専用カリキュラム |
+| v14 | 資料間の表現統合・視点分離・反証による概念信念更新 |
+| v15 | 文字・単語・句・意味役割・文因果の並行発達学習 |
 
 各版は`experiments/`内に独立した実行可能ファイルとして残しています。
 
@@ -114,6 +116,29 @@ python3 -m unittest -v test_story_web_curriculum_v13.py
 ```
 
 現段階の文法は英語の単純な行動文に限定されています。代名詞の同一人物判定や、文章に明記されない原因・意図の理解は未実装です。
+
+## v14
+
+`experiments/story_concepts_v14.py` は、`tried / tricks / jumped`など異なる表現を少数の検証可能な概念へ統合します。支持と反対を独立資料ごとに加重し、単一資料、複数資料一致、係争中、反証側を暫定採用、を区別します。語り手の事実と登場人物の信念は別scopeなので、「熟した葡萄」と狐の「酸っぱい」は誤って矛盾扱いしません。結論にはURLと不確実性を付けます。
+
+## v15
+
+`experiments/developmental_language_v15.py` は、一文を読むたびに以下を並行更新します。
+
+- 文字の出現と隣接
+- 空白で観察された英語語形と語の隣接
+- 反復する句候補
+- 出来事に接地したagent/action/object-or-detail役割
+- 出来事の予測と資料横断概念
+- 意味未確定語または日本語の境界未確定文字列からの次の検索語
+
+日本語は事前tokenizerで分割せず、反復する2〜4文字列を境界候補として保持します。これは単語候補の発見であり、意味理解の完了ではありません。英語でも「見た語」と「役割が接地した語」を区別します。
+
+```bash
+cd experiments
+python3 developmental_language_v15.py "fox grapes" --output report.json
+python3 -m unittest -v test_developmental_language_v15.py
+```
 
 ## ライセンス
 
