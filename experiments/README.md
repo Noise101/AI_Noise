@@ -41,3 +41,4 @@ python3 -m unittest discover -v
 - `developmental_curriculum_v32.py`: 現在能力への適合度で資料の記憶採用・延期・派生停止を決定
 - `association_learning_v33.py`: 場面・役割・時間順の連想を形成し、未見予測の正誤で強化・弱化
 - `epistemic_scaffold_v34.py`: 人間科学の将来学習用に観測と未記入の解釈欄を分離保存
+- `error_memory_v35.py`: 誤予測・反証・訂正内容を重複なく保存する横断的な誤り記憶

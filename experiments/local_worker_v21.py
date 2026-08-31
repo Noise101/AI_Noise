@@ -27,6 +27,7 @@ from representation_learning_v31 import evaluate_representations, transform_tran
 from developmental_curriculum_v32 import assess_source_quality
 from association_learning_v33 import AssociationLearner
 from epistemic_scaffold_v34 import observe_report, rebuild_scaffold, summarize as summarize_scaffold
+from error_memory_v35 import empty_error_memory, update_error_memory
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -358,6 +359,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
     representation_memory = read_json(runtime / "representation-memory.json")
     association_memory = read_json(runtime / "association-memory.json")
     epistemic_scaffold = read_json(runtime / "epistemic-observations.json")
+    error_memory = read_json(runtime / "error-memory.json")
     return {
         "phase": phase,
         "seed": seed,
@@ -393,6 +395,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         },
         "epistemic_scaffold": report.get("epistemic_scaffold") or
                               epistemic_scaffold.get("summary", {}),
+        "error_memory": report.get("error_memory") or error_memory.get("summary", {}),
         "developmental_quality": report.get("developmental_quality"),
         "global_memory_admission": report.get("global_memory_admission"),
     }
@@ -513,6 +516,11 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                     memory.get("quality_event_transitions", {}),
                     memory.get("quality_event_counts", {})).run()
                 write_json(runtime / "association-memory.json", association_report)
+        error_path = runtime / "error-memory.json"
+        error_ledger = read_json(error_path) or empty_error_memory()
+        update_error_memory(error_ledger, association_report, causal_report,
+                            memory.get("totals", {}).get("curricula", 0))
+        write_json(error_path, error_ledger)
         mastery = assess_language_mastery(
             mastery_report(memory), causal_report, conversation_practice_summary(runtime),
             representation_report, association_report)
@@ -535,6 +543,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             "weakened": association_report.get("weakened", 0),
             "warning": association_report.get("warning"),
         }
+        report["error_memory"] = error_ledger.get("summary", {})
         report["causal_lab"] = run_lab(seed)
         write_json(runtime / "causal-lab.json", report["causal_lab"])
         write_json(runtime / "mastery.json", mastery)
