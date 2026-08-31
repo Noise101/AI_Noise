@@ -313,7 +313,9 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         new_global_experience = merge_report(memory, seed, report)
         write_json(memory_path, memory)
         if new_global_experience or not (runtime / "causal-memory.json").exists():
-            causal_report = CausalExperimentEngine(memory.get("event_transitions", {})).run()
+            # Legacy transitions predate extraction audits and remain quarantined from causal claims.
+            causal_report = CausalExperimentEngine(
+                memory.get("quality_event_transitions", {})).run()
             write_json(runtime / "causal-memory.json", causal_report)
         else:
             causal_report = read_json(runtime / "causal-memory.json")

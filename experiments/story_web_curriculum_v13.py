@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Protocol
 
 from story_learning_v12 import Event, StoryLearner
+from narrative_event_v29 import NarrativeEventExtractor
 from web_cache import WEB_CACHE
 
 
@@ -242,21 +243,7 @@ class StoryCurriculumAgent:
     @staticmethod
     def parse_child_event(sentence: str) -> Event | None:
         """Find an explicit action in prose without a statistical language model."""
-        words = [word.lower() for word in re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", sentence)]
-        if len(words) < 3 or any(" ".join(words).startswith(prefix) for prefix in METADATA_PREFIXES):
-            return None
-        verb_index = next((index for index, word in enumerate(words[1:], 1) if word in VERBS), None)
-        if verb_index is None:
-            verb_index = next((index for index, word in enumerate(words[2:], 2)
-                               if word.endswith(("ed", "ing"))), None)
-        if verb_index is None:
-            return None
-        subject = words[verb_index - 1]
-        if subject in {"a", "an", "the", "her", "his", "their"} and verb_index >= 2:
-            subject = words[verb_index - 2]
-        action = words[verb_index]
-        object_words = [word for word in words[verb_index + 1:] if word not in {"a", "an", "the"}]
-        return Event(subject, action, "_".join(object_words[:8]))
+        return NarrativeEventExtractor().extract(sentence).event
 
     def investigate(self, seed_concept: str) -> dict:
         gap = self.detect_gap(seed_concept)
@@ -268,10 +255,11 @@ class StoryCurriculumAgent:
             if document:
                 passage = self.select_passage(document.text, query)
                 if passage and document.url not in self.visited_urls:
-                    parsed_events = [self.parse_child_event(sentence) for sentence in passage]
+                    extractions = [NarrativeEventExtractor().extract(sentence) for sentence in passage]
+                    parsed_events = [item.event for item in extractions]
                     usable = [(sentence, event) for sentence, event in zip(passage, parsed_events)
                               if event and event.action not in NON_ACTIONS]
-                    passage = [sentence for sentence, _ in usable]
+                    accepted_passage = [sentence for sentence, _ in usable]
                     parsed_events = [event for _, event in usable]
                     learned_events = [event.key for event in parsed_events if event]
                     if not learned_events:
@@ -287,9 +275,10 @@ class StoryCurriculumAgent:
                     })
                     found.append({
                         **document.evidence(),
-                        "sentences_used": len(passage),
+                        "sentences_used": len(accepted_passage),
                         "learned_events": learned_events,
-                        "passage_sha256": hashlib.sha256("\n".join(passage).encode()).hexdigest(),
+                        "event_extraction_audit": [item.record() for item in extractions],
+                        "passage_sha256": hashlib.sha256("\n".join(accepted_passage).encode()).hexdigest(),
                     })
                     status = "learned"
                 elif document.url in self.visited_urls:

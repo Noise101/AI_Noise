@@ -12,11 +12,14 @@ from pathlib import Path
 def empty_memory() -> dict:
     return {"version": 27, "merged_seeds": [], "characters": {}, "words": {}, "phrases": {},
             "conversation_acts": {}, "event_transitions": {}, "event_counts": {},
+            "quality_event_transitions": {}, "quality_event_counts": {},
             "prediction": {"checked": 0, "mistakes": 0, "why_gaps": 0, "why_candidates": 0},
             "concepts": {}, "totals": {}}
 
 
 def merge_report(memory: dict, seed: str, report: dict) -> bool:
+    memory.setdefault("quality_event_transitions", {})
+    memory.setdefault("quality_event_counts", {})
     is_new_seed = seed not in set(memory.get("merged_seeds", []))
     knowledge = report.get("knowledge", {})
     lexicon = knowledge.get("lexicon", {})
@@ -71,6 +74,17 @@ def merge_report(memory: dict, seed: str, report: dict) -> bool:
         for source in knowledge.get("bootstrap", {}).get("sources", []):
             for event in source.get("learned_events", []):
                 memory["event_counts"][event] = memory["event_counts"].get(event, 0) + 1
+            previous = None
+            for item in source.get("event_extraction_audit", []):
+                event = item.get("event") if item.get("accepted") else None
+                if not event:
+                    previous = None
+                    continue
+                memory["quality_event_counts"][event] = memory["quality_event_counts"].get(event, 0) + 1
+                if previous:
+                    outcomes = memory["quality_event_transitions"].setdefault(previous, {})
+                    outcomes[event] = outcomes.get(event, 0) + 1
+                previous = event
         for belief in knowledge.get("concepts", {}).get("beliefs", []):
             key = "|".join(str(belief.get(name, "")) for name in ("subject", "relation", "object", "scope"))
             entry = memory["concepts"].setdefault(key, {"observations": 0, "curricula": 0,

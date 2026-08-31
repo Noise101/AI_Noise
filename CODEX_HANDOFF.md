@@ -35,6 +35,7 @@ Read `ARCHITECTURE.md` before changing the learning path. Its invariants are the
 - `v26`: global curiosity is referenced through one compact prior file rather than copied into every seed. A tested compactor preserves local cycles/evidence, and the worker enforces a default 1 GB runtime budget every 100 rounds.
 - `v27`: one canonical global language memory merges vocabulary, accepted lexical/phrase/dialogue beliefs, event transitions, and concepts. It is loaded before each new story; seed reports retain only local deltas, and global mastery is no longer reset per seed.
 - `v28`: deterministic holdout evaluation registers event predictions before comparison and requires independent contexts plus a conservative confidence bound. The live corpus produced zero supported candidates (accuracy 0.0959, equal to baseline), correctly blocking a causal claim until event extraction improves.
+- `v29`: transparent event extraction records acceptance/rejection reasons, normalizes auxiliary constructions, and rejects metadata or unresolved pronoun subjects. Legacy events remain available as language history but are quarantined from causal evidence; only audited contiguous events enter `quality_event_transitions`.
 
 The latest live v18 run generated the query `きつね つる`, selected `イソップ童話集/きつねとつる`, and induced many repeated chunks. Only `きつね` and `つる` were corroborated by both Japanese Wiktionary and an exact/redirected Japanese Wikipedia page. `つる` remains meaning-ambiguous even though its boundary is accepted.
 

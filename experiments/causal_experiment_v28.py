@@ -178,7 +178,9 @@ def main() -> None:
                         ".local/causal-memory.json")
     args = parser.parse_args()
     memory = json.loads(args.memory.read_text(encoding="utf-8"))
-    report = CausalExperimentEngine(memory.get("event_transitions", {})).run()
+    # Only v29 quality-audited observations may be causal evidence. Older events are retained
+    # for language history but cannot silently contaminate this evaluation.
+    report = CausalExperimentEngine(memory.get("quality_event_transitions", {})).run()
     args.output.write_text(json.dumps(report, ensure_ascii=False, separators=(",", ":")) + "\n",
                            encoding="utf-8")
     print(json.dumps({"supported_hypotheses": report["supported_hypotheses"],

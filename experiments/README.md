@@ -35,3 +35,4 @@ python3 -m unittest discover -v
 - `compact_runtime_v26.py`: seed固有知識を保った冗長台帳の除去とストレージ回収
 - `global_memory_v27.py`: 全題材の語彙・会話・出来事・概念を一つの正本へ統合
 - `causal_experiment_v28.py`: 独立文脈と未見holdoutで因果候補を事前予測・反証
+- `narrative_event_v29.py`: 書誌・曖昧文を棄却理由付きで隔離する透明な出来事抽出
