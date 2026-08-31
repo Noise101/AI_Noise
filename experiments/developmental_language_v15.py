@@ -49,6 +49,7 @@ class DevelopmentalLexicon:
         self.conversation_cues: Counter[str] = Counter()
         self.conversation_contexts: dict[str, Counter[str]] = defaultdict(Counter)
         self.conversation_hypotheses: dict[str, dict] = {}
+        self.conversation_patterns: dict[str, Counter[str]] = defaultdict(Counter)
         self.sentences_seen = 0
 
     @staticmethod
@@ -73,6 +74,8 @@ class DevelopmentalLexicon:
                 self.conversation_cues[word] += 1
                 window = " ".join(words[max(0, index - 2):index + 4])
                 self.conversation_contexts[word][window] += 1
+                pattern = "question_form" if "?" in sentence else "utterance_form"
+                self.conversation_patterns[word][pattern] += 1
         for size in (2, 3):
             self.word_ngrams.update(tuple(words[index:index + size])
                                     for index in range(len(words) - size + 1))
@@ -188,6 +191,7 @@ class DevelopmentalLexicon:
         return None
 
     def conversation_gap(self) -> dict | None:
+        self._induce_conversation_hypotheses()
         unknown = [(count, cue) for cue, count in self.conversation_cues.items()
                    if not self.conversation_hypotheses.get(cue, {}).get("accepted_sense")]
         if not unknown:
@@ -205,7 +209,24 @@ class DevelopmentalLexicon:
             "alternatives": belief.get("alternatives", []),
         }
 
+    def _induce_conversation_hypotheses(self) -> None:
+        for cue, patterns in self.conversation_patterns.items():
+            total = sum(patterns.values())
+            if total < 2 or self.conversation_hypotheses.get(cue, {}).get("accepted_sense"):
+                continue
+            dominant, count = patterns.most_common(1)[0]
+            if count / total >= 0.7:
+                self.conversation_hypotheses[cue] = {
+                    "status": "grounded_observation_pattern",
+                    "accepted_sense": f"introduces_{dominant}",
+                    "confidence_margin": round(count / total, 3),
+                    "alternatives": [{"pattern": name, "observations": value}
+                                     for name, value in patterns.most_common()],
+                    "warning": "structural dialogue pattern, not a dictionary definition",
+                }
+
     def report(self) -> dict:
+        self._induce_conversation_hypotheses()
         grounded = []
         for word, role_counts in sorted(self.roles.items()):
             total = sum(role_counts.values())

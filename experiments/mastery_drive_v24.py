@@ -11,7 +11,8 @@ def ratio(numerator: int, denominator: int) -> float:
 
 
 def assess_language_mastery(report: dict, causal_evaluation: dict | None = None,
-                            conversation_practice: dict | None = None) -> dict:
+                            conversation_practice: dict | None = None,
+                            representation_evaluation: dict | None = None) -> dict:
     knowledge = report.get("knowledge", {})
     lexicon = knowledge.get("lexicon", {})
     story = knowledge.get("story", {})
@@ -31,8 +32,13 @@ def assess_language_mastery(report: dict, causal_evaluation: dict | None = None,
                         lexicon.get("researched_conversation_acts", {}).values())
     causal_evaluation = causal_evaluation or {}
     evaluation = causal_evaluation.get("evaluation", {})
-    predictions = evaluation.get("total", 0)
-    correct = evaluation.get("correct", 0)
+    representation_evaluation = representation_evaluation or {}
+    predictive = representation_evaluation.get("selected_evaluation", {})
+    predictions = predictive.get("total", 0)
+    correct = predictive.get("correct", 0)
+    predictive_baseline = predictive.get("baseline_correct", 0)
+    causal_total = evaluation.get("total", 0)
+    causal_correct = evaluation.get("correct", 0)
     baseline_correct = evaluation.get("baseline_correct", 0)
     supported = causal_evaluation.get("supported_hypotheses", 0)
     beliefs = concepts.get("beliefs", [])
@@ -50,11 +56,12 @@ def assess_language_mastery(report: dict, causal_evaluation: dict | None = None,
                     "evidence": f"{researched_phrases}/{len(phrases)} repeated phrases grounded"},
         "conversation": {"score": (0.0 if practice_turns < 3 else ratio(practice_successes, practice_turns)),
                          "evidence": f"{practice_successes}/{practice_turns} self-generated followups usable; partner claims excluded"},
-        "prediction": {"score": (0.0 if predictions < 20 else ratio(correct, predictions)),
-                       "evidence": f"{predictions} audited holdout checks, {correct} correct"},
-        "causality": {"score": (0.0 if predictions < 20 or correct <= baseline_correct
+        "prediction": {"score": (0.0 if predictions < 20 or correct <= predictive_baseline
+                                  else ratio(correct, predictions)),
+                       "evidence": f"{predictions} representation holdout checks, {correct} correct versus baseline {predictive_baseline}"},
+        "causality": {"score": (0.0 if causal_total < 20 or causal_correct <= baseline_correct
                                   else ratio(supported, max(5, supported))),
-                     "evidence": f"{supported} candidates; {correct}/{predictions} versus baseline {baseline_correct}/{predictions}"},
+                     "evidence": f"{supported} candidates; {causal_correct}/{causal_total} versus baseline {baseline_correct}/{causal_total}"},
         "concepts": {"score": ratio(corroborated, max(3, len(beliefs))),
                     "evidence": f"{corroborated}/{len(beliefs)} beliefs corroborated"},
     }

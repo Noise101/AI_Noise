@@ -5,6 +5,13 @@ from story_learning_v12 import Event
 
 
 class DevelopmentalLanguageTest(unittest.TestCase):
+    def test_dialogue_function_is_induced_from_repeated_form_not_cue_dictionary(self):
+        lexicon = DevelopmentalLexicon()
+        lexicon.observe('Owl said, "Where are you?"')
+        lexicon.observe('Fox said, "Why wait?"')
+        belief = lexicon.report()["researched_conversation_acts"]["said"]
+        self.assertEqual(belief["accepted_sense"], "introduces_question_form")
+        self.assertEqual(belief["status"], "grounded_observation_pattern")
     def test_learns_characters_words_phrase_and_meaning_in_parallel(self):
         lexicon = DevelopmentalLexicon()
         for _ in range(2):
@@ -63,7 +70,7 @@ class DevelopmentalLanguageTest(unittest.TestCase):
     def test_repeated_dialogue_cue_becomes_its_own_unknown(self):
         lexicon = DevelopmentalLexicon()
         lexicon.observe('Fox said, "I am hungry."')
-        lexicon.observe('Crow said, "I have food."')
+        lexicon.observe('Crow said, "Do you want food?"')
         gap = lexicon.conversation_gap()
         self.assertEqual(gap["kind"], "unknown_conversation_act")
         self.assertEqual(gap["form"], "said")

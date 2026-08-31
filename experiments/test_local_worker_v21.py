@@ -114,6 +114,14 @@ class LocalWorkerTest(unittest.TestCase):
         }]}}}
         self.assertEqual(developmental_source_quality(report)["status"], "low_narrative_value")
 
+    @patch("local_worker_v21.WEB_CACHE.get_json")
+    def test_low_narrative_page_cannot_spawn_more_web_curricula(self, get_json):
+        report = {"knowledge": {"bootstrap": {"sources": [{
+            "url": "https://en.wikisource.org/wiki/Index_Page",
+            "event_extraction_audit": [{"accepted": False}] * 3}]}}}
+        self.assertEqual(discover_curriculum(report, set(), 4), [])
+        get_json.assert_not_called()
+
     def test_same_unknown_across_curricula_builds_global_pressure(self):
         curriculum = {}
         def report(encounters):

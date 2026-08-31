@@ -10,6 +10,7 @@ import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from representation_learning_v31 import evaluate_representations, transform_transitions
 
 
 AUXILIARIES = {"is", "was", "were", "are", "be", "been", "being", "has", "have", "had",
@@ -180,7 +181,11 @@ def main() -> None:
     memory = json.loads(args.memory.read_text(encoding="utf-8"))
     # Only v29 quality-audited observations may be causal evidence. Older events are retained
     # for language history but cannot silently contaminate this evaluation.
-    report = CausalExperimentEngine(memory.get("quality_event_transitions", {})).run()
+    representation = evaluate_representations(memory.get("quality_event_transitions", {}))
+    transitions = transform_transitions(memory.get("quality_event_transitions", {}), representation)
+    report = CausalExperimentEngine(transitions).run()
+    report["representation"] = {"selected_scheme": representation["selected_scheme"],
+                                "selection_status": representation["selection_status"]}
     args.output.write_text(json.dumps(report, ensure_ascii=False, separators=(",", ":")) + "\n",
                            encoding="utf-8")
     print(json.dumps({"supported_hypotheses": report["supported_hypotheses"],

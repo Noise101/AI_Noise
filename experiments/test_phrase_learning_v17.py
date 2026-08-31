@@ -15,6 +15,13 @@ class FakeDefinitions:
 
 
 class PhraseLearningTest(unittest.TestCase):
+    def test_composes_phrase_only_after_each_component_is_grounded(self):
+        gap = {"form": "red moon", "query": "red moon", "contexts": [], "observations": 2}
+        agent = PhraseResearchAgent([])
+        report = agent.investigate(gap, {
+            "red": {"accepted_sense": "a color"}, "moon": {"accepted_sense": "a satellite"}})
+        self.assertEqual(report["meaning_belief"]["status"], "composed_from_grounded_parts")
+        self.assertIn("red:a color", report["meaning_belief"]["accepted_sense"])
     def test_discovers_bigrams_and_trigrams_without_fixed_phrase_list(self):
         lexicon = DevelopmentalLexicon()
         lexicon.observe("He tried again and again.")

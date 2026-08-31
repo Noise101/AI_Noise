@@ -22,6 +22,7 @@ QUICK_MODULES = [
     "test_causal_experiment_v28",
     "test_narrative_event_v29",
     "test_causal_lab_v30",
+    "test_representation_learning_v31",
     "test_story_learning_v12", "test_story_web_curriculum_v13", "test_story_concepts_v14",
     "test_developmental_language_v15", "test_lexical_research_v16", "test_phrase_learning_v17",
     "test_japanese_boundaries_v18",

@@ -59,6 +59,14 @@ class PhraseResearchAgent:
                         hashlib.sha256(definition.encode()).hexdigest(),
                     ))
         belief = self.ledger.belief()
+        component_beliefs = {part: word_meanings.get(part, {}).get("accepted_sense")
+                             for part in phrase.split()}
+        if not belief.get("accepted_sense") and component_beliefs and all(component_beliefs.values()):
+            belief = {**belief, "status": "composed_from_grounded_parts",
+                      "accepted_sense": " + ".join(
+                          f"{part}:{component_beliefs[part]}" for part in phrase.split()),
+                      "confidence_margin": 0.0,
+                      "warning": "provisional composition; phrase-level counterevidence may revise it"}
         return {
             "detected_gap": gap, "executed_query": gap["query"], "phrase": phrase,
             "definition_sources": documents, "meaning_belief": belief,

@@ -22,6 +22,7 @@ from compact_runtime_v26 import compact_runtime
 from global_memory_v27 import empty_memory, mastery_report, merge_report
 from causal_experiment_v28 import CausalExperimentEngine
 from causal_lab_v30 import run_lab
+from representation_learning_v31 import evaluate_representations, transform_transitions
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -206,8 +207,9 @@ def discover_curriculum(report: dict, visited: set[str], network: int) -> list[d
     """Generate next seeds from observed evidence links and learned concepts."""
     candidates: dict[str, dict] = {}
     sources = report.get("knowledge", {}).get("bootstrap", {}).get("sources", [])
+    source_quality = developmental_source_quality(report)
     WEB_CACHE.set_network_budget(network)
-    for source in sources:
+    for source in sources if source_quality["status"] == "developmental_passage" else []:
         url = source.get("url", "")
         if "en.wikisource.org/wiki/" not in url:
             continue
@@ -290,6 +292,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
     state = report.get("state", read_json(runtime / "controller-state.json"))
     mastery = report.get("mastery") or read_json(runtime / "mastery.json")
     causal_memory = read_json(runtime / "causal-memory.json")
+    representation_memory = read_json(runtime / "representation-memory.json")
     return {
         "phase": phase,
         "seed": seed,
@@ -314,6 +317,9 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
             key: causal_memory.get(key)
             for key in ("supported_hypotheses", "evaluation", "limitations")},
         "causal_lab": report.get("causal_lab") or read_json(runtime / "causal-lab.json"),
+        "representation": report.get("representation") or {
+            key: representation_memory.get(key) for key in
+            ("selected_scheme", "selection_status", "selected_evaluation", "revisions")},
     }
 
 
@@ -379,20 +385,44 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         new_global_experience = merge_report(memory, seed, report)
         write_json(memory_path, memory)
         if new_global_experience or not (runtime / "causal-memory.json").exists():
+            previous_representation = read_json(runtime / "representation-memory.json")
+            representation_report = evaluate_representations(
+                memory.get("quality_event_transitions", {}))
+            selected_evaluation = next((item for item in representation_report["evaluations"]
+                if item["scheme"] == representation_report["selected_scheme"]), {})
+            representation_report["selected_evaluation"] = selected_evaluation
+            revisions = previous_representation.get("revisions", [])
+            before_scheme = previous_representation.get("selected_scheme")
+            if before_scheme and before_scheme != representation_report["selected_scheme"]:
+                revisions.append({"before": before_scheme,
+                    "after": representation_report["selected_scheme"],
+                    "reason": "new holdout evidence changed predictive ranking",
+                    "at_curricula": memory.get("totals", {}).get("curricula", 0)})
+            representation_report["revisions"] = revisions[-100:]
+            write_json(runtime / "representation-memory.json", representation_report)
+            abstract_transitions = transform_transitions(
+                memory.get("quality_event_transitions", {}), representation_report)
             # Legacy transitions predate extraction audits and remain quarantined from causal claims.
-            causal_report = CausalExperimentEngine(
-                memory.get("quality_event_transitions", {})).run()
+            causal_report = CausalExperimentEngine(abstract_transitions).run()
             write_json(runtime / "causal-memory.json", causal_report)
         else:
             causal_report = read_json(runtime / "causal-memory.json")
+            representation_report = read_json(runtime / "representation-memory.json")
         mastery = assess_language_mastery(
-            mastery_report(memory), causal_report, conversation_practice_summary(runtime))
+            mastery_report(memory), causal_report, conversation_practice_summary(runtime),
+            representation_report)
         report["mastery"] = mastery
         report["global_memory"] = memory.get("totals", {})
         report["causal_evaluation"] = {
             "supported_hypotheses": causal_report.get("supported_hypotheses", 0),
             "evaluation": causal_report.get("evaluation", {}),
             "limitations": causal_report.get("limitations", []),
+        }
+        report["representation"] = {
+            "selected_scheme": representation_report.get("selected_scheme"),
+            "selection_status": representation_report.get("selection_status"),
+            "selected_evaluation": representation_report.get("selected_evaluation", {}),
+            "revisions": representation_report.get("revisions", []),
         }
         report["causal_lab"] = run_lab(seed)
         write_json(runtime / "causal-lab.json", report["causal_lab"])

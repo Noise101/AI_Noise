@@ -27,7 +27,9 @@ class MasteryDriveTest(unittest.TestCase):
                                              "mistakes_detected": 0,
                                              "why_questions": [{"status": "candidate_found"}]}}}
         assessment = assess_language_mastery(report, {"supported_hypotheses": 0,
-            "evaluation": {"total": 0, "correct": 0, "baseline_correct": 0}})
+            "evaluation": {"total": 0, "correct": 0, "baseline_correct": 0}},
+            representation_evaluation={"selected_evaluation": {
+                "total": 0, "correct": 0, "baseline_correct": 0}})
         self.assertEqual(assessment["dimensions"]["prediction"]["score"], 0)
         self.assertEqual(assessment["dimensions"]["causality"]["score"], 0)
 
