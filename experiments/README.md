@@ -42,3 +42,4 @@ python3 -m unittest discover -v
 - `association_learning_v33.py`: 場面・役割・時間順の連想を形成し、未見予測の正誤で強化・弱化
 - `epistemic_scaffold_v34.py`: 人間科学の将来学習用に観測と未記入の解釈欄を分離保存
 - `error_memory_v35.py`: 誤予測・反証・訂正内容を重複なく保存する横断的な誤り記憶
+- `visual_memory_v36.py`: 出典付き縮小画像を視覚特徴として観測し、言語との未検証連想を保存

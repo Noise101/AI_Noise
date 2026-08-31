@@ -28,6 +28,7 @@ from developmental_curriculum_v32 import assess_source_quality
 from association_learning_v33 import AssociationLearner
 from epistemic_scaffold_v34 import observe_report, rebuild_scaffold, summarize as summarize_scaffold
 from error_memory_v35 import empty_error_memory, update_error_memory
+from visual_memory_v36 import acquire_one as acquire_visual, empty_visual_memory, enqueue as enqueue_visual
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -360,6 +361,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
     association_memory = read_json(runtime / "association-memory.json")
     epistemic_scaffold = read_json(runtime / "epistemic-observations.json")
     error_memory = read_json(runtime / "error-memory.json")
+    visual_memory = read_json(runtime / "visual-memory.json")
     return {
         "phase": phase,
         "seed": seed,
@@ -396,6 +398,8 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "epistemic_scaffold": report.get("epistemic_scaffold") or
                               epistemic_scaffold.get("summary", {}),
         "error_memory": report.get("error_memory") or error_memory.get("summary", {}),
+        "visual_memory": report.get("visual_memory") or visual_memory.get("summary", {}),
+        "visual_observation": report.get("visual_observation"),
         "developmental_quality": report.get("developmental_quality"),
         "global_memory_admission": report.get("global_memory_admission"),
     }
@@ -482,6 +486,13 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         scaffold["summary"] = summarize_scaffold(scaffold)
         write_json(scaffold_path, scaffold)
         report["epistemic_scaffold"] = scaffold["summary"]
+        visual_path = runtime / "visual-memory.json"
+        visual = read_json(visual_path) or empty_visual_memory()
+        enqueue_visual(visual, list(memory.get("merged_seeds", [])))
+        visual_result = acquire_visual(visual, runtime / "visual" / "images")
+        write_json(visual_path, visual)
+        report["visual_memory"] = visual.get("summary", {})
+        report["visual_observation"] = visual_result
         if new_global_experience or not (runtime / "causal-memory.json").exists():
             previous_representation = read_json(runtime / "representation-memory.json")
             representation_report = evaluate_representations(
