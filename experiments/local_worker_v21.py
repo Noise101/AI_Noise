@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import time
+import traceback
 import urllib.parse
 from pathlib import Path
 
@@ -579,6 +580,40 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
     return latest
 
 
+def supervise(seed: str, runtime: Path, max_rounds: int, interval: float,
+              steps: int, seconds: float, network: int, local_conversation: bool = True,
+              max_runtime_mb: int = 1024) -> dict:
+    """Keep autonomous work alive unless STOP is explicitly requested."""
+    stop_path = runtime / "STOP"
+    retry_count = 0
+    while True:
+        try:
+            result = work(seed, runtime, max_rounds, interval, steps, seconds, network,
+                          local_conversation, max_runtime_mb)
+        except Exception as error:
+            curriculum = read_json(runtime / "curriculum-state.json")
+            current_seed = curriculum.get("current_seed", seed)
+            result = status_record(current_seed, runtime, "worker_error_wait", 0,
+                                   error=f"{type(error).__name__}: {error}")
+            result["traceback"] = traceback.format_exc()[-4000:]
+        if result.get("phase") == "stopped_by_user" or stop_path.exists():
+            return result
+        if max_rounds > 0:
+            return result
+        retry_count += 1
+        retry_seconds = min(300, max(10, 2 ** min(retry_count, 8)))
+        waiting = dict(result)
+        waiting["previous_phase"] = result.get("phase")
+        waiting["phase"] = "supervisor_retry_wait"
+        waiting["retry_in_seconds"] = retry_seconds
+        waiting["supervisor_retries"] = retry_count
+        write_json(runtime / "status.json", waiting)
+        if not wait_for_retry(stop_path, retry_seconds):
+            waiting["phase"] = "stopped_by_user"
+            write_json(runtime / "status.json", waiting)
+            return waiting
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -597,6 +632,8 @@ def main() -> None:
     add_work_arguments(run_parser)
     start_parser = subparsers.add_parser("start", help="start once and keep working in the background")
     add_work_arguments(start_parser)
+    supervise_parser = subparsers.add_parser("supervise", help=argparse.SUPPRESS)
+    add_work_arguments(supervise_parser)
     status_parser = subparsers.add_parser("status", help="show the last local heartbeat")
     status_parser.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
     stop_parser = subparsers.add_parser("stop", help="request a safe stop between cycles")
@@ -621,22 +658,26 @@ def main() -> None:
                 return
             except OSError:
                 pass
-        command = [sys.executable, str(Path(__file__).resolve()), "run", args.seed,
+        command = [sys.executable, str(Path(__file__).resolve()), "supervise", args.seed,
                    "--runtime", str(args.runtime), "--max-rounds", str(args.max_rounds),
                    "--interval", str(args.interval), "--steps", str(args.steps),
                    "--seconds", str(args.seconds), "--network", str(args.network)]
         command.extend(["--max-runtime-mb", str(args.max_runtime_mb)])
         if args.no_local_conversation:
             command.append("--no-local-conversation")
+        log_path = args.runtime / "worker.log"
+        args.runtime.mkdir(parents=True, exist_ok=True)
+        log = log_path.open("a", encoding="utf-8")
         process = subprocess.Popen(command, cwd=Path(__file__).parent, stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                   start_new_session=True)
+                                   stdout=log, stderr=log, start_new_session=True)
+        log.close()
         print(json.dumps({"status": "started", "pid": process.pid,
                           "progress": str(args.runtime / "status.json")}, ensure_ascii=False))
         return
-    result = work(args.seed, args.runtime, args.max_rounds, args.interval,
-                  args.steps, args.seconds, args.network, not args.no_local_conversation,
-                  args.max_runtime_mb)
+    runner = supervise if args.command == "supervise" else work
+    result = runner(args.seed, args.runtime, args.max_rounds, args.interval,
+                    args.steps, args.seconds, args.network, not args.no_local_conversation,
+                    args.max_runtime_mb)
     print(json.dumps(result, ensure_ascii=False))
 
 

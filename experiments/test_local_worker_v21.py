@@ -8,7 +8,7 @@ from unittest.mock import patch
 from local_worker_v21 import (_seed_from_title, developmental_source_quality, discover_curriculum,
                               discover_from_developmental_shelves, enforce_storage_budget, is_transient_error,
                               compact_learning_history, merge_curiosity, read_json, status_record,
-                              work, write_json)
+                              supervise, work, write_json)
 
 
 class LocalWorkerTest(unittest.TestCase):
@@ -232,6 +232,28 @@ class LocalWorkerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             result = work("seed", Path(directory), 2, 0, 1, 1, 1, local_conversation=False)
         self.assertEqual(run_cycle.call_count, 2)
+        self.assertEqual(result["phase"], "round_budget_exhausted")
+
+    @patch("local_worker_v21.wait_for_retry", return_value=True)
+    @patch("local_worker_v21.work")
+    def test_supervisor_restarts_after_exhaustion_and_error(self, work_loop, _wait):
+        work_loop.side_effect = [
+            {"phase": "curriculum_exhausted", "seed": "one"},
+            RuntimeError("unexpected parser failure"),
+            {"phase": "stopped_by_user", "seed": "two"},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            result = supervise("one", Path(directory), 0, 0, 1, 1, 1,
+                               local_conversation=False)
+        self.assertEqual(work_loop.call_count, 3)
+        self.assertEqual(result["phase"], "stopped_by_user")
+
+    @patch("local_worker_v21.work", return_value={"phase": "round_budget_exhausted"})
+    def test_supervisor_respects_explicit_round_limit(self, work_loop):
+        with tempfile.TemporaryDirectory() as directory:
+            result = supervise("one", Path(directory), 2, 0, 1, 1, 1,
+                               local_conversation=False)
+        self.assertEqual(work_loop.call_count, 1)
         self.assertEqual(result["phase"], "round_budget_exhausted")
 
 
