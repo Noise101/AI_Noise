@@ -25,6 +25,7 @@ from causal_experiment_v28 import CausalExperimentEngine
 from causal_lab_v30 import run_lab
 from representation_learning_v31 import evaluate_representations, transform_transitions
 from developmental_curriculum_v32 import assess_source_quality
+from association_learning_v33 import AssociationLearner
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -354,6 +355,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
     mastery = report.get("mastery") or read_json(runtime / "mastery.json")
     causal_memory = read_json(runtime / "causal-memory.json")
     representation_memory = read_json(runtime / "representation-memory.json")
+    association_memory = read_json(runtime / "association-memory.json")
     return {
         "phase": phase,
         "seed": seed,
@@ -381,6 +383,12 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "representation": report.get("representation") or {
             key: representation_memory.get(key) for key in
             ("selected_scheme", "selection_status", "selected_evaluation", "revisions")},
+        "association": report.get("association") or {
+            "evaluation": association_memory.get("evaluation", {}),
+            "reinforced": association_memory.get("reinforced", 0),
+            "weakened": association_memory.get("weakened", 0),
+            "warning": association_memory.get("warning"),
+        },
         "developmental_quality": report.get("developmental_quality"),
         "global_memory_admission": report.get("global_memory_admission"),
     }
@@ -479,12 +487,22 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             # Legacy transitions predate extraction audits and remain quarantined from causal claims.
             causal_report = CausalExperimentEngine(abstract_transitions).run()
             write_json(runtime / "causal-memory.json", causal_report)
+            association_report = AssociationLearner(
+                memory.get("quality_event_transitions", {}),
+                memory.get("quality_event_counts", {})).run()
+            write_json(runtime / "association-memory.json", association_report)
         else:
             causal_report = read_json(runtime / "causal-memory.json")
             representation_report = read_json(runtime / "representation-memory.json")
+            association_report = read_json(runtime / "association-memory.json")
+            if not association_report:
+                association_report = AssociationLearner(
+                    memory.get("quality_event_transitions", {}),
+                    memory.get("quality_event_counts", {})).run()
+                write_json(runtime / "association-memory.json", association_report)
         mastery = assess_language_mastery(
             mastery_report(memory), causal_report, conversation_practice_summary(runtime),
-            representation_report)
+            representation_report, association_report)
         report["mastery"] = mastery
         report["global_memory"] = memory.get("totals", {})
         report["causal_evaluation"] = {
@@ -497,6 +515,12 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             "selection_status": representation_report.get("selection_status"),
             "selected_evaluation": representation_report.get("selected_evaluation", {}),
             "revisions": representation_report.get("revisions", []),
+        }
+        report["association"] = {
+            "evaluation": association_report.get("evaluation", {}),
+            "reinforced": association_report.get("reinforced", 0),
+            "weakened": association_report.get("weakened", 0),
+            "warning": association_report.get("warning"),
         }
         report["causal_lab"] = run_lab(seed)
         write_json(runtime / "causal-lab.json", report["causal_lab"])

@@ -12,7 +12,8 @@ def ratio(numerator: int, denominator: int) -> float:
 
 def assess_language_mastery(report: dict, causal_evaluation: dict | None = None,
                             conversation_practice: dict | None = None,
-                            representation_evaluation: dict | None = None) -> dict:
+                            representation_evaluation: dict | None = None,
+                            association_evaluation: dict | None = None) -> dict:
     knowledge = report.get("knowledge", {})
     lexicon = knowledge.get("lexicon", {})
     story = knowledge.get("story", {})
@@ -41,6 +42,11 @@ def assess_language_mastery(report: dict, causal_evaluation: dict | None = None,
     causal_correct = evaluation.get("correct", 0)
     baseline_correct = evaluation.get("baseline_correct", 0)
     supported = causal_evaluation.get("supported_hypotheses", 0)
+    association_evaluation = association_evaluation or {}
+    association_result = association_evaluation.get("evaluation", {})
+    association_total = association_result.get("total", 0)
+    association_correct = association_result.get("correct", 0)
+    association_baseline = association_result.get("baseline_correct", 0)
     beliefs = concepts.get("beliefs", [])
     corroborated = sum(item.get("status") == "corroborated" for item in beliefs)
 
@@ -62,6 +68,12 @@ def assess_language_mastery(report: dict, causal_evaluation: dict | None = None,
         "causality": {"score": (0.0 if causal_total < 20 or causal_correct <= baseline_correct
                                   else ratio(supported, max(5, supported))),
                      "evidence": f"{supported} candidates; {causal_correct}/{causal_total} versus baseline {baseline_correct}/{causal_total}"},
+        "associations": {"score": (0.0 if association_total < 20
+                                      or association_correct <= association_baseline
+                                      else ratio(association_correct, association_total)),
+                         "evidence": f"{association_correct}/{association_total} unseen predictions versus baseline {association_baseline}/{association_total}; "
+                                     f"{association_evaluation.get('reinforced', 0)} links reinforced, "
+                                     f"{association_evaluation.get('weakened', 0)} weakened"},
         "concepts": {"score": ratio(corroborated, max(3, len(beliefs))),
                     "evidence": f"{corroborated}/{len(beliefs)} beliefs corroborated"},
     }
