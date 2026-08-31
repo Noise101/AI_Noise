@@ -113,7 +113,7 @@ class LocalWorkerTest(unittest.TestCase):
         report = {"knowledge": {"bootstrap": {"sources": [{
             "event_extraction_audit": [{"accepted": False}] * 4 + [{"accepted": True}]
         }]}}}
-        self.assertEqual(developmental_source_quality(report)["status"], "low_narrative_value")
+        self.assertEqual(developmental_source_quality(report)["status"], "outside_current_level")
 
     @patch("local_worker_v21.WEB_CACHE.get_json")
     def test_low_narrative_page_cannot_spawn_more_web_curricula(self, get_json):

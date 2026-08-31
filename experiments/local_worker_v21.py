@@ -23,6 +23,7 @@ from global_memory_v27 import empty_memory, mastery_report, merge_report
 from causal_experiment_v28 import CausalExperimentEngine
 from causal_lab_v30 import run_lab
 from representation_learning_v31 import evaluate_representations, transform_transitions
+from developmental_curriculum_v32 import assess_source_quality
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -193,15 +194,7 @@ def compact_learning_history(curriculum: dict) -> None:
 
 
 def developmental_source_quality(report: dict) -> dict:
-    audits = [item for source in report.get("knowledge", {}).get("bootstrap", {}).get("sources", [])
-              for item in source.get("event_extraction_audit", [])]
-    if not audits:
-        return {"status": "not_yet_audited", "accepted": 0, "total": 0, "ratio": 0.0}
-    accepted = sum(bool(item.get("accepted")) for item in audits)
-    ratio = accepted / len(audits)
-    return {"status": "developmental_passage" if accepted >= 2 and ratio >= 0.3
-            else "low_narrative_value", "accepted": accepted, "total": len(audits),
-            "ratio": round(ratio, 3)}
+    return assess_source_quality(report)
 
 
 def discover_curriculum(report: dict, visited: set[str], network: int) -> list[dict]:
@@ -321,6 +314,8 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "representation": report.get("representation") or {
             key: representation_memory.get(key) for key in
             ("selected_scheme", "selection_status", "selected_evaluation", "revisions")},
+        "developmental_quality": report.get("developmental_quality"),
+        "global_memory_admission": report.get("global_memory_admission"),
     }
 
 
@@ -380,10 +375,21 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             continue
         consecutive_transient_errors = 0
         reason = report.get("state", {}).get("stop_reason")
-        report["developmental_quality"] = developmental_source_quality(report)
         memory_path = runtime / "global-language-memory.json"
         memory = read_json(memory_path) or empty_memory()
-        new_global_experience = merge_report(memory, seed, report)
+        developmentally_known_words = {form for form, item in memory.get("words", {}).items()
+                                       if item.get("curricula", 0) >= 3}
+        report["developmental_quality"] = assess_source_quality(
+            report, developmentally_known_words)
+        japanese_grounded = bool(JAPANESE.search(seed) and report.get("knowledge", {}).get(
+            "lexicon", {}).get("grounded_meanings"))
+        admitted = report["developmental_quality"].get("admit_to_global_memory") or japanese_grounded
+        report["global_memory_admission"] = {
+            "admitted": bool(admitted),
+            "reason": ("audited developmental passage" if report["developmental_quality"].get(
+                "admit_to_global_memory") else ("grounded Japanese boundary path" if japanese_grounded
+                else "outside current developmental level; raw report retained"))}
+        new_global_experience = merge_report(memory, seed, report) if admitted else False
         write_json(memory_path, memory)
         if new_global_experience or not (runtime / "causal-memory.json").exists():
             previous_representation = read_json(runtime / "representation-memory.json")
@@ -451,11 +457,15 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         })
         exhausted = reason in {"no_unresolved_executable_gap", "no_new_evidence_for_unresolved_gap"}
         if exhausted:
-            low_quality = report["developmental_quality"]["status"] == "low_narrative_value"
+            low_quality = not admitted
             bucket = ("deferred_seeds" if low_quality or
                       reason == "no_new_evidence_for_unresolved_gap" else "completed_seeds")
             if seed not in curriculum[bucket]:
                 curriculum[bucket].append(seed)
+            quality_urls = report["developmental_quality"].get("source_urls", [])
+            url_bucket = "trusted_parent_urls" if admitted else "blocked_parent_urls"
+            curriculum.setdefault(url_bucket, [])
+            curriculum[url_bucket] = sorted(set(curriculum[url_bucket]) | set(quality_urls))
             visited = set(curriculum["completed_seeds"]) | set(curriculum["deferred_seeds"])
             discovered = discover_curriculum(report, visited, network)
             known = {item["seed"] for item in curriculum["frontier"]}
@@ -463,7 +473,9 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             curriculum["frontier"] = [item for item in curriculum["frontier"]
                                       if item["seed"] not in visited
                                       and valid_curriculum_seed(
-                                          item["seed"], item.get("linked_title"))]
+                                          item["seed"], item.get("linked_title"))
+                                      and item.get("parent_url") not in set(
+                                          curriculum.get("blocked_parent_urls", []))]
             curriculum["frontier"] = sorted(
                 curriculum["frontier"], key=lambda item: (-item.get("score", 0), item["seed"]))[:MAX_FRONTIER]
             if not curriculum["frontier"]:

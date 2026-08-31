@@ -38,3 +38,4 @@ python3 -m unittest discover -v
 - `narrative_event_v29.py`: 書誌・曖昧文を棄却理由付きで隔離する透明な出来事抽出
 - `causal_lab_v30.py`: 操作可能な未知小世界で能動介入能力だけを検査（世界知識には加算しない）
 - `representation_learning_v31.py`: 表現候補をtrain内で形成し未見予測が改善した場合だけ採用・改訂
+- `developmental_curriculum_v32.py`: 現在能力への適合度で資料の記憶採用・延期・派生停止を決定
