@@ -14,12 +14,13 @@ def empty_memory() -> dict:
             "conversation_acts": {}, "event_transitions": {}, "event_counts": {},
             "quality_event_transitions": {}, "quality_event_counts": {},
             "prediction": {"checked": 0, "mistakes": 0, "why_gaps": 0, "why_candidates": 0},
-            "concepts": {}, "totals": {}}
+            "concepts": {}, "quality_concepts": {}, "totals": {}}
 
 
 def merge_report(memory: dict, seed: str, report: dict) -> bool:
     memory.setdefault("quality_event_transitions", {})
     memory.setdefault("quality_event_counts", {})
+    memory.setdefault("quality_concepts", {})
     is_new_seed = seed not in set(memory.get("merged_seeds", []))
     knowledge = report.get("knowledge", {})
     lexicon = knowledge.get("lexicon", {})
@@ -94,6 +95,14 @@ def merge_report(memory: dict, seed: str, report: dict) -> bool:
             status = belief.get("status", "unknown")
             entry["statuses"][status] = entry["statuses"].get(status, 0) + 1
             entry["citations"] = sorted(set(entry["citations"]) | set(belief.get("citations", [])))
+            if belief.get("scope") == "observed_event":
+                quality = memory["quality_concepts"].setdefault(
+                    key, {"observations": 0, "curricula": 0, "statuses": {}, "citations": []})
+                quality["observations"] += 1
+                quality["curricula"] += 1
+                quality["statuses"][status] = quality["statuses"].get(status, 0) + 1
+                quality["citations"] = sorted(set(quality["citations"]) |
+                                              set(belief.get("citations", [])))
         memory["merged_seeds"].append(seed)
     memory["totals"] = summarize(memory)
     return is_new_seed
@@ -112,7 +121,10 @@ def summarize(memory: dict) -> dict:
                                               for item in memory.get("conversation_acts", {}).values()),
             "event_contexts": len(memory.get("event_transitions", {})),
             "events": len(memory.get("event_counts", {})),
-            "concepts": len(memory.get("concepts", {}))}
+            "concepts": len(memory.get("concepts", {})),
+            "quality_concepts": len(memory.get("quality_concepts", {})),
+            "quality_events": len(memory.get("quality_event_counts", {})),
+            "quality_event_contexts": len(memory.get("quality_event_transitions", {}))}
 
 
 def mastery_report(memory: dict) -> dict:
@@ -121,7 +133,7 @@ def mastery_report(memory: dict) -> dict:
     conversations = memory.get("conversation_acts", {})
     concept_beliefs = [{"status": max(item.get("statuses", {"unknown": 0}),
                                        key=item.get("statuses", {"unknown": 0}).get)}
-                       for item in memory.get("concepts", {}).values()]
+                       for item in memory.get("quality_concepts", {}).values()]
     prediction = memory.get("prediction", {})
     return {"knowledge": {"lexicon": {
         "characters": memory.get("characters", {}),

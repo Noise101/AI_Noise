@@ -22,6 +22,15 @@ class MasteryDriveTest(unittest.TestCase):
         self.assertEqual(assessment["dimensions"]["prediction"]["score"], 0)
         self.assertNotEqual(assessment["status"], "current_curriculum_mastered")
 
+    def test_legacy_story_counts_do_not_inflate_audited_causality(self):
+        report = {"knowledge": {"story": {"predictions_checked": 999,
+                                             "mistakes_detected": 0,
+                                             "why_questions": [{"status": "candidate_found"}]}}}
+        assessment = assess_language_mastery(report, {"supported_hypotheses": 0,
+            "evaluation": {"total": 0, "correct": 0, "baseline_correct": 0}})
+        self.assertEqual(assessment["dimensions"]["prediction"]["score"], 0)
+        self.assertEqual(assessment["dimensions"]["causality"]["score"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

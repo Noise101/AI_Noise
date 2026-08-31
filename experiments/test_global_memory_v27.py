@@ -20,6 +20,18 @@ class GlobalMemoryTest(unittest.TestCase):
         # Rejected sentences break a narrative sequence; no adjacency is invented across them.
         self.assertEqual(memory["quality_event_transitions"], {})
 
+    def test_legacy_story_specific_concepts_do_not_inflate_generic_mastery(self):
+        memory = empty_memory()
+        report = {"knowledge": {"concepts": {"beliefs": [
+            {"subject": "fox", "relation": "obtains", "object": "grapes",
+             "scope": "narrator_fact", "status": "corroborated", "citations": ["old"]},
+            {"subject": "rabbit", "relation": "saw", "object": "moon",
+             "scope": "observed_event", "status": "single_source", "citations": ["new"]},
+        ]}}}
+        merge_report(memory, "one", report)
+        self.assertEqual(len(memory["concepts"]), 2)
+        self.assertEqual(len(memory["quality_concepts"]), 1)
+
     def report(self, word_count, transition_count=1):
         return {"knowledge": {"lexicon": {"word_forms": {"fox": word_count},
             "grounded_meanings": [{"form": "fox", "roles": {"agent": word_count}}],

@@ -1,9 +1,11 @@
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
-from autonomous_controller_v20 import AutonomousController, EnglishDevelopmentEnvironment, LearningGap, PersistentState
+from autonomous_controller_v20 import (AutonomousController, EnglishDevelopmentEnvironment,
+                                       JapaneseDevelopmentEnvironment, LearningGap, PersistentState)
 
 
 class FakeEnvironment:
@@ -33,6 +35,13 @@ class FakeEnvironment:
 
 
 class AutonomousControllerTest(unittest.TestCase):
+    @patch("autonomous_controller_v20.run_japanese_learning")
+    def test_japanese_path_uses_existing_boundary_learner_without_local_llm(self, run):
+        run.return_value = {"boundary_learning": {"accepted_words": [
+            {"form": "きつね", "count": 2}]}, "sense_grounding": None}
+        environment = JapaneseDevelopmentEnvironment("きつね つる")
+        self.assertEqual(environment.snapshot()["lexicon"]["word_forms"]["きつね"], 2)
+        run.assert_called_once_with("きつね つる", use_local_helper=False)
     def test_global_transition_prior_is_used_but_not_duplicated_in_local_report(self):
         environment = EnglishDevelopmentEnvironment.__new__(EnglishDevelopmentEnvironment)
         class Story:

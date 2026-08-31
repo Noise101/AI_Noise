@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from story_web_curriculum_v13 import GutenbergStories, StoryCurriculumAgent, WikisourceStories
+from narrative_event_v29 import NarrativeEventExtractor
 
 
 @dataclass(frozen=True)
@@ -32,46 +33,17 @@ class ConceptEvidence:
 
 
 class ConceptExtractor:
-    """Small explicit semantic vocabulary; every mapping is inspectable."""
-
-    @staticmethod
-    def _has(text: str, terms: tuple[str, ...]) -> bool:
-        return any(term in text for term in terms)
+    """Derive reusable propositions from events, without story-specific entities."""
 
     def extract(self, sentence: str, source: str, url: str, score: float,
                 context_entities: set[str] | None = None) -> list[ConceptEvidence]:
-        text = " ".join(re.findall(r"[a-z]+", sentence.lower()))
         digest = hashlib.sha256(sentence.encode()).hexdigest()
-        context_entities = context_entities or set()
-        words = set(text.split())
-        if "fox" in context_entities and words & {"he", "she", "him", "her", "herself", "himself"}:
-            text += " fox"
-        if "grapes" in context_entities and words & {"them", "bunch", "morsel", "they", "it"}:
-            text += " grapes"
-        evidence = []
-
-        def add(relation: str, obj: str, polarity: bool = True, scope: str = "narrator_fact") -> None:
-            evidence.append(ConceptEvidence("fox", relation, obj, polarity, scope,
-                                            source, url, score, digest))
-
-        mentions_grapes = "grape" in text
-        if "fox" in text and mentions_grapes and self._has(text, ("saw", "came to", "found")):
-            add("encounters", "grapes")
-        if mentions_grapes and self._has(text, ("tried", "tricks", "jump", "reach", "get at")):
-            add("attempts_to_obtain", "grapes")
-        if mentions_grapes and self._has(text, ("could not reach", "missed", "in vain", "no greater success", "had to give up")):
-            add("obtains", "grapes", False)
-        if mentions_grapes and self._has(text, ("got the grapes", "reached the grapes", "ate the grapes")):
-            add("obtains", "grapes", True)
-        if mentions_grapes and self._has(text, ("ripe", "ripening")):
-            evidence.append(ConceptEvidence("grapes", "quality", "ripe", True, "narrator_fact",
-                                            source, url, score, digest))
-        if mentions_grapes and "sour" in text:
-            evidence.append(ConceptEvidence("grapes", "quality", "sour", True, "fox_belief",
-                                            source, url, score, digest))
-        if self._has(text, ("despise what", "sour")):
-            add("devalues_after_failure", "grapes", True, "interpretation")
-        return evidence
+        event = NarrativeEventExtractor().extract(sentence).event
+        if not event:
+            return []
+        obj = event.object.split("_")[-1] if event.object else "self"
+        return [ConceptEvidence(event.subject, event.action, obj, True, "observed_event",
+                                source, url, score, digest)]
 
 
 class ConceptLedger:
@@ -125,9 +97,29 @@ class ConceptLedger:
         propositions = sorted({item.proposition for item in self.evidence})
         return {
             "beliefs": [self.belief(proposition) for proposition in propositions],
+            "learned_relation_groups": self.learn_relation_groups(),
             "revisions": self.revisions,
             "evidence_count": len(self.evidence),
         }
+
+    def learn_relation_groups(self) -> list[dict]:
+        """Propose relation equivalence from shared use, never from a built-in synonym list."""
+        contexts: dict[str, set[tuple[str, str]]] = {}
+        for item in self.evidence:
+            contexts.setdefault(item.relation, set()).add((item.subject, item.object))
+        groups = []
+        relations = sorted(contexts)
+        for index, left in enumerate(relations):
+            for right in relations[index + 1:]:
+                shared = contexts[left] & contexts[right]
+                union = contexts[left] | contexts[right]
+                similarity = len(shared) / len(union) if union else 0.0
+                if len(shared) >= 2 and similarity >= 0.5:
+                    groups.append({"relations": [left, right], "shared_contexts": len(shared),
+                                   "similarity": round(similarity, 3),
+                                   "status": "distributional_candidate",
+                                   "warning": "similar use is not identical meaning; countercontexts may split this group"})
+        return sorted(groups, key=lambda item: (-item["similarity"], item["relations"]))
 
 
 class StoryConceptAgent:
@@ -136,15 +128,16 @@ class StoryConceptAgent:
         self.ledger = ConceptLedger()
 
     def ingest(self, source: str, url: str, score: float, sentences: list[str]) -> None:
-        context_entities: set[str] = set()
-        for sentence in sentences:
-            lowered = sentence.lower()
-            if "fox" in lowered:
-                context_entities.add("fox")
-            if "grape" in lowered:
-                context_entities.add("grapes")
-            for item in self.extractor.extract(sentence, source, url, score, context_entities):
-                self.ledger.add(item)
+        extractions = NarrativeEventExtractor().extract_sequence(sentences)
+        for sentence, extraction in zip(sentences, extractions):
+            if not extraction.event:
+                continue
+            event = extraction.event
+            digest = hashlib.sha256(sentence.encode()).hexdigest()
+            obj = event.object.split("_")[-1] if event.object else "self"
+            self.ledger.add(ConceptEvidence(
+                event.subject, event.action, obj, True,
+                "observed_event", source, url, score, digest))
 
     def learn_from_web(self, concept: str) -> dict:
         curriculum = StoryCurriculumAgent([WikisourceStories(), GutenbergStories()])

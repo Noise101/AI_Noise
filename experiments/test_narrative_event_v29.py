@@ -26,6 +26,12 @@ class NarrativeEventExtractorTest(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertEqual(result.reason, "unresolved_pronoun_subject")
 
+    def test_resolves_only_a_recent_explicit_subject(self):
+        results = self.extractor.extract_sequence([
+            "A fox saw a stream.", "He jumped over it."])
+        self.assertEqual(results[1].event.subject, "fox")
+        self.assertEqual(results[1].reason, "accepted_with_local_coreference")
+
     def test_rejection_is_serializable_for_audit(self):
         record = self.extractor.extract("The Complete Index:").record()
         self.assertFalse(record["accepted"])

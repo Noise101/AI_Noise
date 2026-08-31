@@ -52,7 +52,8 @@ class EventExtraction:
 class NarrativeEventExtractor:
     """Rule-based baseline: conservative, inspectable, and independent of an LLM."""
 
-    def extract(self, sentence: str) -> EventExtraction:
+    def extract(self, sentence: str, recent_subject: str | None = None,
+                recent_object: str | None = None) -> EventExtraction:
         words = [word.lower() for word in WORD.findall(sentence)]
         if len(words) < 3:
             return EventExtraction(sentence, False, None, "too_short", 0.0)
@@ -86,9 +87,29 @@ class NarrativeEventExtractor:
             return EventExtraction(sentence, False, None, "missing_subject", 0.0, verb_index)
         subject = subject_candidates[-1]
         if subject in PRONOUNS:
-            return EventExtraction(sentence, False, None, "unresolved_pronoun_subject", 0.0,
-                                   verb_index)
+            if not recent_subject:
+                return EventExtraction(sentence, False, None, "unresolved_pronoun_subject", 0.0,
+                                       verb_index)
+            subject = recent_subject
         object_words = [word for word in words[action_index + 1:] if word not in ARTICLES]
+        if object_words and object_words[-1] in {"it", "them", "him", "her"} and recent_object:
+            object_words[-1] = recent_object
         event = Event(subject, words[action_index], "_".join(object_words[:8]))
-        quality = 1.0 if object_words else 0.8
-        return EventExtraction(sentence, True, event, "accepted", quality, verb_index)
+        quality = 0.85 if subject_candidates[-1] in PRONOUNS else (1.0 if object_words else 0.8)
+        reason = "accepted_with_local_coreference" if subject_candidates[-1] in PRONOUNS else "accepted"
+        return EventExtraction(sentence, True, event, reason, quality, verb_index)
+
+    def extract_sequence(self, sentences: list[str]) -> list[EventExtraction]:
+        results = []
+        recent_subject = recent_object = None
+        for sentence in sentences:
+            result = self.extract(sentence, recent_subject, recent_object)
+            results.append(result)
+            if result.accepted and result.event:
+                recent_subject = result.event.subject
+                object_tokens = result.event.object.split("_")
+                recent_object = next((token for token in reversed(object_tokens)
+                                      if token not in {"him", "her", "it", "them"}), recent_object)
+            elif result.reason.startswith("metadata") or result.reason == "heading":
+                recent_subject = recent_object = None
+        return results

@@ -10,7 +10,8 @@ def ratio(numerator: int, denominator: int) -> float:
     return 0.0 if denominator <= 0 else round(min(1.0, numerator / denominator), 3)
 
 
-def assess_language_mastery(report: dict) -> dict:
+def assess_language_mastery(report: dict, causal_evaluation: dict | None = None,
+                            conversation_practice: dict | None = None) -> dict:
     knowledge = report.get("knowledge", {})
     lexicon = knowledge.get("lexicon", {})
     story = knowledge.get("story", {})
@@ -28,13 +29,18 @@ def assess_language_mastery(report: dict) -> dict:
     cues = lexicon.get("conversation_cues", {})
     grounded_cues = sum(bool(item.get("accepted_sense")) for item in
                         lexicon.get("researched_conversation_acts", {}).values())
-    predictions = story.get("predictions_checked", 0)
-    mistakes = story.get("mistakes_detected", 0)
-    why = story.get("why_questions", [])
-    explained = sum(item.get("status") == "candidate_found" for item in why)
+    causal_evaluation = causal_evaluation or {}
+    evaluation = causal_evaluation.get("evaluation", {})
+    predictions = evaluation.get("total", 0)
+    correct = evaluation.get("correct", 0)
+    baseline_correct = evaluation.get("baseline_correct", 0)
+    supported = causal_evaluation.get("supported_hypotheses", 0)
     beliefs = concepts.get("beliefs", [])
     corroborated = sum(item.get("status") == "corroborated" for item in beliefs)
 
+    conversation_practice = conversation_practice or {}
+    practice_turns = conversation_practice.get("evaluated_turns", 0)
+    practice_successes = conversation_practice.get("successful_followups", 0)
     dimensions = {
         "characters": {"score": ratio(stable_characters, max(10, len(characters))),
                        "evidence": f"{stable_characters}/{len(characters)} characters repeated"},
@@ -42,12 +48,13 @@ def assess_language_mastery(report: dict) -> dict:
                   "evidence": f"{len(grounded_words | researched_words)}/{len(words)} forms grounded"},
         "phrases": {"score": ratio(researched_phrases, max(1, len(phrases))),
                     "evidence": f"{researched_phrases}/{len(phrases)} repeated phrases grounded"},
-        "conversation": {"score": ratio(grounded_cues, max(1, len(cues))),
-                         "evidence": f"{grounded_cues}/{len(cues)} dialogue acts grounded"},
-        "prediction": {"score": (0.0 if predictions < 3 else ratio(predictions - mistakes, predictions)),
-                       "evidence": f"{predictions} checked, {mistakes} mistakes"},
-        "causality": {"score": ratio(explained, max(1, len(why))),
-                     "evidence": f"{explained}/{len(why)} why gaps have candidates"},
+        "conversation": {"score": (0.0 if practice_turns < 3 else ratio(practice_successes, practice_turns)),
+                         "evidence": f"{practice_successes}/{practice_turns} self-generated followups usable; partner claims excluded"},
+        "prediction": {"score": (0.0 if predictions < 20 else ratio(correct, predictions)),
+                       "evidence": f"{predictions} audited holdout checks, {correct} correct"},
+        "causality": {"score": (0.0 if predictions < 20 or correct <= baseline_correct
+                                  else ratio(supported, max(5, supported))),
+                     "evidence": f"{supported} candidates; {correct}/{predictions} versus baseline {baseline_correct}/{predictions}"},
         "concepts": {"score": ratio(corroborated, max(3, len(beliefs))),
                     "evidence": f"{corroborated}/{len(beliefs)} beliefs corroborated"},
     }

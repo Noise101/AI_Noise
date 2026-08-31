@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import time
+import re
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -17,6 +18,9 @@ from lexical_research_v16 import LexicalResearchAgent, WiktionaryDefinitions
 from phrase_learning_v17 import PhraseResearchAgent
 from curiosity_drive_v23 import observe_unknown, resolve_unknown, result_is_grounded
 from web_cache import WEB_CACHE, NetworkBudgetExceeded
+from japanese_sense_grounding_v19 import run as run_japanese_learning
+
+JAPANESE_TEXT = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
 
 
 @dataclass
@@ -186,6 +190,43 @@ class EnglishDevelopmentEnvironment:
         return report
 
 
+class JapaneseDevelopmentEnvironment:
+    """Adapter that puts the existing Japanese self-learning path under the same controller."""
+
+    def __init__(self, seed: str, global_memory: dict | None = None):
+        self.seed = seed
+        try:
+            self.result = run_japanese_learning(seed, use_local_helper=False)
+        except NetworkBudgetExceeded as error:
+            self.result = {"status": "network_budget_exhausted", "error": str(error)}
+
+    def restore(self, cycles: list[dict]) -> None:
+        return None
+
+    def gaps(self) -> list[LearningGap]:
+        return []
+
+    def execute(self, gap: LearningGap) -> dict:
+        raise ValueError("Japanese observations are acquired during boundary/sense bootstrap")
+
+    def snapshot(self) -> dict:
+        boundary = self.result.get("boundary_learning", {})
+        accepted = boundary.get("accepted_words", [])
+        grounded = self.result.get("sense_grounding") or {}
+        belief = grounded.get("belief", {})
+        form = grounded.get("surface")
+        researched = ({form: belief} if form and belief.get("accepted_sense") else {})
+        return {"bootstrap": self.result, "lexicon": {
+            "characters": {}, "word_forms": {item["form"]: item.get("count", 1) for item in accepted},
+            "grounded_meanings": [{"form": item["form"]} for item in accepted],
+            "researched_meanings": researched, "phrase_candidates": [],
+            "researched_phrase_meanings": {}, "conversation_cues": {},
+            "researched_conversation_acts": {}},
+            "story": {"predictions_checked": 0, "mistakes_detected": 0,
+                      "why_questions": [], "rules": [], "events_seen": 0},
+            "concepts": {"beliefs": []}}
+
+
 class AutonomousController:
     def __init__(self, environment: LearningEnvironment, state: PersistentState,
                  state_path: Path | None = None, curiosity_priors: dict | None = None):
@@ -300,7 +341,9 @@ def main() -> None:
     global_memory = {}
     if args.global_memory and args.global_memory.exists():
         global_memory = json.loads(args.global_memory.read_text(encoding="utf-8"))
-    environment = EnglishDevelopmentEnvironment(args.seed, global_memory)
+    environment = (JapaneseDevelopmentEnvironment(args.seed, global_memory)
+                   if JAPANESE_TEXT.search(args.seed)
+                   else EnglishDevelopmentEnvironment(args.seed, global_memory))
     priors = {}
     if args.curiosity_priors and args.curiosity_priors.exists():
         priors = json.loads(args.curiosity_priors.read_text(encoding="utf-8"))

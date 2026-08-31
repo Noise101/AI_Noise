@@ -22,6 +22,8 @@ class LocalConversationTest(unittest.TestCase):
         self.assertEqual(turn["evidence_score"], 0.0)
         self.assertFalse(turn["verified"])
         self.assertIn("vine", turn["observed_forms"])
+        self.assertTrue(turn["practice_metrics"]["formed_followup"])
+        self.assertFalse(turn["practice_metrics"]["independent_evidence_added"])
 
 
 if __name__ == "__main__":

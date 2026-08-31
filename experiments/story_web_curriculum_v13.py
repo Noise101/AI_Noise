@@ -255,7 +255,7 @@ class StoryCurriculumAgent:
             if document:
                 passage = self.select_passage(document.text, query)
                 if passage and document.url not in self.visited_urls:
-                    extractions = [NarrativeEventExtractor().extract(sentence) for sentence in passage]
+                    extractions = NarrativeEventExtractor().extract_sequence(passage)
                     parsed_events = [item.event for item in extractions]
                     usable = [(sentence, event) for sentence, event in zip(passage, parsed_events)
                               if event and event.action not in NON_ACTIONS]

@@ -4,8 +4,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from local_worker_v21 import (_seed_from_title, enforce_storage_budget, is_transient_error,
-                              merge_curiosity, read_json, status_record, work, write_json)
+from local_worker_v21 import (_seed_from_title, discover_curriculum, enforce_storage_budget, is_transient_error,
+                              compact_learning_history, merge_curiosity, read_json, status_record,
+                              work, write_json)
 
 
 class LocalWorkerTest(unittest.TestCase):
@@ -86,6 +87,24 @@ class LocalWorkerTest(unittest.TestCase):
     def test_derives_seed_from_an_observed_story_link(self):
         self.assertEqual(_seed_from_title("Three Hundred Æsop's Fables/The Fox and the Crow"),
                          "fox crow")
+
+    def test_rejects_metadata_as_a_curriculum_seed(self):
+        self.assertIsNone(_seed_from_title("Ivory Carving: Historical Notes"))
+
+    @patch("local_worker_v21.WEB_CACHE.get_json", return_value={})
+    def test_repeated_japanese_chunks_can_enter_the_same_curriculum(self, _get):
+        report = {"knowledge": {"lexicon": {"phrase_candidates": [
+            {"phrase": "きつね", "kind": "unsegmented_chunk_candidate"},
+            {"phrase": "つる", "kind": "unsegmented_chunk_candidate"}]}}}
+        candidates = discover_curriculum(report, set(), 0)
+        self.assertEqual(candidates[0]["seed"], "きつね つる")
+
+    def test_compacts_mastery_history_without_losing_summary(self):
+        curriculum = {"mastery_history": [{"overall_score": 0.2,
+            "weakest_dimension": "words"} for _ in range(510)]}
+        compact_learning_history(curriculum)
+        self.assertEqual(len(curriculum["mastery_history"]), 500)
+        self.assertEqual(curriculum["mastery_history_summary"]["records"], 10)
 
     def test_same_unknown_across_curricula_builds_global_pressure(self):
         curriculum = {}

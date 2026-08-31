@@ -18,6 +18,8 @@ class PracticeTurn:
     partner_reply: str
     partner_question: str
     observed_forms: list[str]
+    noise_followup: str = ""
+    practice_metrics: dict | None = None
     evidence_score: float = 0.0
     verified: bool = False
     purpose: str = "conversation practice only"
@@ -72,7 +74,21 @@ def practice_once(seed: str, mastery: dict, curiosity: dict[str, dict], partner=
         return {"status": "local_partner_unavailable", "seed": seed, "noise_utterance": utterance,
                 "evidence_score": 0.0, "verified": False}
     observed = sorted(set(re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", response["reply"].lower())))
+    question_words = [word.lower() for word in re.findall(
+        r"[A-Za-z]+(?:'[A-Za-z]+)?", response["question"])]
+    known = [word for word in seed.split() if word.isalpha()]
+    focus = next((word for word in question_words if word in observed or word in known),
+                 known[0] if known else "this")
+    followup = f"I think about {focus}. I am not certain yet. I want another example."
+    followup_words = set(re.findall(r"[a-z]+", followup.lower()))
+    relevant = set(question_words) | set(known) | set(observed)
+    metrics = {
+        "formed_followup": True,
+        "relevant_token_overlap": round(len(followup_words & relevant) / max(1, len(followup_words)), 3),
+        "admits_uncertainty": "not certain" in followup.lower(),
+        "independent_evidence_added": False,
+    }
     turn = PracticeTurn(seed, getattr(partner, "model", "local"), utterance,
-                        response["reply"], response["question"], observed)
+                        response["reply"], response["question"], observed, followup, metrics)
     return {"status": "practiced", "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             **asdict(turn)}

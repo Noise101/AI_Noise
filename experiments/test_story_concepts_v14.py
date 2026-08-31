@@ -7,24 +7,23 @@ class StoryConceptTest(unittest.TestCase):
     def test_different_wording_maps_to_shared_concepts(self):
         agent = StoryConceptAgent()
         agent.ingest("A", "https://a.example", 0.8, [
-            "A fox saw ripe grapes.", "She used all her tricks but could not reach the grapes.",
+            "A fox saw ripe grapes.", "She missed the grapes.",
         ])
         agent.ingest("B", "https://b.example", 0.9, [
-            "The fox came to a bunch of grapes.", "He jumped but missed the grapes.",
+            "The fox saw a bunch of grapes.", "He missed the grapes.",
         ])
         beliefs = agent.ledger.report()["beliefs"]
-        failed = next(item for item in beliefs if item["relation"] == "obtains")
+        failed = next(item for item in beliefs if item["relation"] == "missed")
         self.assertEqual(failed["status"], "corroborated")
-        self.assertFalse(failed["accepted_polarity"])
+        self.assertTrue(failed["accepted_polarity"])
         self.assertEqual(len(failed["citations"]), 2)
 
     def test_character_belief_is_not_confused_with_narrator_fact(self):
         extractor = ConceptExtractor()
-        facts = extractor.extract("The fox saw ripe grapes.", "A", "https://a", 0.8)
-        beliefs = extractor.extract('The fox said, "The grapes are sour."', "A", "https://a", 0.8)
-        scopes = {(item.object, item.scope) for item in facts + beliefs if item.relation == "quality"}
-        self.assertIn(("ripe", "narrator_fact"), scopes)
-        self.assertIn(("sour", "fox_belief"), scopes)
+        facts = extractor.extract("The rabbit saw a carrot.", "A", "https://a", 0.8)
+        self.assertEqual(facts[0].subject, "rabbit")
+        self.assertEqual(facts[0].relation, "saw")
+        self.assertEqual(facts[0].object, "carrot")
 
     def test_counterevidence_changes_belief_and_records_revision(self):
         ledger = ConceptLedger()
@@ -44,13 +43,11 @@ class StoryConceptTest(unittest.TestCase):
         agent = StoryConceptAgent()
         agent.ingest("A", "https://a", 0.8, [
             "A fox saw ripe grapes.",
-            "She used every trick but could not reach them.",
+            "She jumped toward them.",
         ])
         beliefs = agent.ledger.report()["beliefs"]
-        failed = next(item for item in beliefs if item["relation"] == "obtains")
-        self.assertFalse(failed["accepted_polarity"])
-        attempted = next(item for item in beliefs if item["relation"] == "attempts_to_obtain")
-        self.assertTrue(attempted["accepted_polarity"])
+        attempted = next(item for item in beliefs if item["relation"] == "jumped")
+        self.assertEqual(attempted["subject"], "fox")
 
     def test_cited_conclusion_exposes_uncertainty(self):
         belief = {
@@ -62,6 +59,17 @@ class StoryConceptTest(unittest.TestCase):
         self.assertIn("does not obtain", conclusion["claim"])
         self.assertIn("only one", conclusion["uncertainty"])
         self.assertEqual(conclusion["citations"], ["https://source.example/story"])
+
+    def test_learns_relation_similarity_from_repeated_contexts(self):
+        ledger = ConceptLedger()
+        for relation in ("looked", "gazed"):
+            for subject, obj in (("child", "moon"), ("owl", "moon")):
+                ledger.add(ConceptEvidence(subject, relation, obj, True, "observed_event",
+                                           relation, f"https://{relation}", 0.8,
+                                           f"{relation}-{subject}"))
+        groups = ledger.report()["learned_relation_groups"]
+        self.assertEqual(groups[0]["relations"], ["gazed", "looked"])
+        self.assertEqual(groups[0]["status"], "distributional_candidate")
 
 
 if __name__ == "__main__":

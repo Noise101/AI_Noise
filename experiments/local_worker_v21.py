@@ -21,13 +21,20 @@ from local_conversation_v25 import practice_once
 from compact_runtime_v26 import compact_runtime
 from global_memory_v27 import empty_memory, mastery_report, merge_report
 from causal_experiment_v28 import CausalExperimentEngine
+from causal_lab_v30 import run_lab
 
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RUNTIME = ROOT / ".local"
 WORD = re.compile(r"[A-Za-z]+")
+JAPANESE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
 TITLE_STOP = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "with", "three",
               "hundred", "aesop", "s", "fables"}
+CURRICULUM_METADATA = {"index", "preface", "introduction", "appendix", "volume", "chapter",
+                       "translator", "bibliography", "edition", "notes", "contents", "carving",
+                       "history", "dictionary", "encyclopedia"}
+MAX_FRONTIER = 300
+MAX_MASTERY_HISTORY = 500
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -79,6 +86,15 @@ def enforce_storage_budget(runtime: Path, max_bytes: int) -> dict:
               "bytes_reclaimed": 0 if not compacted else compacted["bytes_reclaimed"]}
     write_json(runtime / "storage-status.json", record)
     return record
+
+
+def conversation_practice_summary(runtime: Path) -> dict:
+    turns = read_json(runtime / "dialogue-ledger.json").get("turns", [])
+    evaluated = [turn for turn in turns if turn.get("practice_metrics")]
+    successful = sum(turn["practice_metrics"].get("formed_followup")
+                     and turn["practice_metrics"].get("relevant_token_overlap", 0) > 0
+                     for turn in evaluated)
+    return {"evaluated_turns": len(evaluated), "successful_followups": successful}
 
 
 def seed_runtime(runtime: Path, seed: str) -> Path:
@@ -145,7 +161,32 @@ def _seed_from_title(title: str) -> str | None:
     words = [word.lower() for word in WORD.findall(leaf)
              if word.lower() not in TITLE_STOP and len(word) > 2]
     unique = list(dict.fromkeys(words))
-    return " ".join(unique[:3]) if len(unique) >= 2 else None
+    if not 2 <= len(unique) <= 5 or set(unique) & CURRICULUM_METADATA:
+        return None
+    return " ".join(unique[:3])
+
+
+def valid_curriculum_seed(seed: str, linked_title: str | None = None) -> bool:
+    if JAPANESE.search(seed):
+        parts = seed.split()
+        return 1 <= len(parts) <= 3 and all(1 <= len(part) <= 12 for part in parts)
+    return _seed_from_title(linked_title or seed) is not None
+
+
+def compact_learning_history(curriculum: dict) -> None:
+    history = curriculum.setdefault("mastery_history", [])
+    if len(history) <= MAX_MASTERY_HISTORY:
+        return
+    removed = history[:-MAX_MASTERY_HISTORY]
+    summary = curriculum.setdefault("mastery_history_summary", {
+        "records": 0, "score_sum": 0.0, "weakest_dimensions": {}})
+    for item in removed:
+        summary["records"] += 1
+        summary["score_sum"] += item.get("overall_score", 0.0)
+        name = item.get("weakest_dimension", "unknown")
+        summary["weakest_dimensions"][name] = summary["weakest_dimensions"].get(name, 0) + 1
+    summary["mean_score"] = round(summary["score_sum"] / max(1, summary["records"]), 4)
+    curriculum["mastery_history"] = history[-MAX_MASTERY_HISTORY:]
 
 
 def discover_curriculum(report: dict, visited: set[str], network: int) -> list[dict]:
@@ -203,7 +244,17 @@ def discover_curriculum(report: dict, visited: set[str], network: int) -> list[d
         candidates.setdefault(seed, {"seed": seed, "score": 0.5,
                                      "reason": "unvisited concept pair from evidence ledger",
                                      "parent_url": (belief.get("citations") or [None])[0]})
-    return sorted(candidates.values(), key=lambda item: (-item["score"], item["seed"]))
+    chunks = [item for item in report.get("knowledge", {}).get("lexicon", {}).get(
+        "phrase_candidates", []) if item.get("kind") == "unsegmented_chunk_candidate"
+        and JAPANESE.search(item.get("phrase", ""))]
+    if chunks:
+        forms = list(dict.fromkeys(item["phrase"] for item in chunks[:2]))
+        seed = " ".join(forms)
+        if seed not in visited and valid_curriculum_seed(seed):
+            candidates.setdefault(seed, {"seed": seed, "score": 1.5,
+                "reason": "repeated unsegmented Japanese chunks require boundary grounding",
+                "parent_url": None})
+    return sorted(candidates.values(), key=lambda item: (-item["score"], item["seed"]))[:MAX_FRONTIER]
 
 
 def rediscover_from_history(runtime: Path, visited: set[str], network: int) -> list[dict]:
@@ -249,6 +300,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "causal_evaluation": report.get("causal_evaluation") or {
             key: causal_memory.get(key)
             for key in ("supported_hypotheses", "evaluation", "limitations")},
+        "causal_lab": report.get("causal_lab") or read_json(runtime / "causal-lab.json"),
     }
 
 
@@ -319,7 +371,8 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             write_json(runtime / "causal-memory.json", causal_report)
         else:
             causal_report = read_json(runtime / "causal-memory.json")
-        mastery = assess_language_mastery(mastery_report(memory))
+        mastery = assess_language_mastery(
+            mastery_report(memory), causal_report, conversation_practice_summary(runtime))
         report["mastery"] = mastery
         report["global_memory"] = memory.get("totals", {})
         report["causal_evaluation"] = {
@@ -327,11 +380,14 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             "evaluation": causal_report.get("evaluation", {}),
             "limitations": causal_report.get("limitations", []),
         }
+        report["causal_lab"] = run_lab(seed)
+        write_json(runtime / "causal-lab.json", report["causal_lab"])
         write_json(runtime / "mastery.json", mastery)
         curriculum["mastery_history"].append({"seed": seed, "round": round_number,
                                                "overall_score": mastery["overall_score"],
                                                "weakest_dimension": mastery["weakest_dimension"],
                                                "next_mastery_goal": mastery["next_mastery_goal"]})
+        compact_learning_history(curriculum)
         if local_conversation and seed not in curriculum["conversation_practiced_seeds"]:
             turn = practice_once(seed, mastery, curriculum["curiosity_ledger"])
             dialogue_path = runtime / "dialogue-ledger.json"
@@ -358,7 +414,11 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             known = {item["seed"] for item in curriculum["frontier"]}
             curriculum["frontier"].extend(item for item in discovered if item["seed"] not in known)
             curriculum["frontier"] = [item for item in curriculum["frontier"]
-                                      if item["seed"] not in visited]
+                                      if item["seed"] not in visited
+                                      and valid_curriculum_seed(
+                                          item["seed"], item.get("linked_title"))]
+            curriculum["frontier"] = sorted(
+                curriculum["frontier"], key=lambda item: (-item.get("score", 0), item["seed"]))[:MAX_FRONTIER]
             if not curriculum["frontier"]:
                 curriculum["frontier"].extend(rediscover_from_history(runtime, visited, network))
             if curriculum["frontier"]:
