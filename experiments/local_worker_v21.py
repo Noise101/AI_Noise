@@ -18,6 +18,7 @@ from web_cache import WEB_CACHE, NetworkBudgetExceeded
 from curiosity_drive_v23 import curiosity_pressure
 from mastery_drive_v24 import assess_language_mastery
 from local_conversation_v25 import practice_once
+from compact_runtime_v26 import compact_runtime
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -60,6 +61,24 @@ def wait_for_retry(stop_path: Path, seconds: float) -> bool:
     return True
 
 
+def runtime_bytes(runtime: Path) -> int:
+    return sum(path.stat().st_size for path in runtime.rglob("*") if path.is_file())
+
+
+def enforce_storage_budget(runtime: Path, max_bytes: int) -> dict:
+    before = runtime_bytes(runtime)
+    compacted = None
+    if before > max_bytes:
+        compacted = compact_runtime(runtime, True)
+    after = runtime_bytes(runtime)
+    record = {"checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+              "before_bytes": before, "after_bytes": after, "limit_bytes": max_bytes,
+              "compacted": compacted is not None,
+              "bytes_reclaimed": 0 if not compacted else compacted["bytes_reclaimed"]}
+    write_json(runtime / "storage-status.json", record)
+    return record
+
+
 def seed_runtime(runtime: Path, seed: str) -> Path:
     legacy = read_json(runtime / "controller-state.json")
     if legacy.get("seed") == seed:
@@ -68,7 +87,8 @@ def seed_runtime(runtime: Path, seed: str) -> Path:
     return runtime / "seeds" / identity
 
 
-def run_cycle(seed: str, runtime: Path, steps: int, seconds: float, network: int) -> dict:
+def run_cycle(seed: str, runtime: Path, steps: int, seconds: float, network: int,
+              curiosity_priors: Path | None = None) -> dict:
     runtime = seed_runtime(runtime, seed)
     runtime.mkdir(parents=True, exist_ok=True)
     state = runtime / "controller-state.json"
@@ -78,6 +98,8 @@ def run_cycle(seed: str, runtime: Path, steps: int, seconds: float, network: int
         "--state", str(state), "--output", str(report), "--max-steps", str(steps),
         "--max-seconds", str(seconds), "--max-network", str(network), "--summary",
     ]
+    if curiosity_priors:
+        command.extend(["--curiosity-priors", str(curiosity_priors)])
     completed = subprocess.run(command, cwd=Path(__file__).parent, capture_output=True,
                                text=True, timeout=max(10, seconds + 30))
     if completed.returncode:
@@ -85,29 +107,27 @@ def run_cycle(seed: str, runtime: Path, steps: int, seconds: float, network: int
     return read_json(report)
 
 
-def prime_seed_curiosity(runtime: Path, seed: str, curriculum: dict) -> None:
-    path = seed_runtime(runtime, seed) / "controller-state.json"
-    if path.exists() or not curriculum.get("curiosity_ledger"):
-        return
-    write_json(path, {"seed": seed, "curiosity_ledger": curriculum["curiosity_ledger"]})
-
-
 def merge_curiosity(curriculum: dict, seed: str, report: dict, cycle: int) -> None:
     global_ledger = curriculum.setdefault("curiosity_ledger", {})
+    if curriculum.get("curiosity_merge_seed") != seed:
+        curriculum["curiosity_merge_seed"] = seed
+        curriculum["curiosity_merge_offsets"] = {}
+    offsets = curriculum.setdefault("curiosity_merge_offsets", {})
     local_ledger = report.get("state", {}).get("curiosity_ledger", {})
     for gap_id, local in local_ledger.items():
         entry = global_ledger.setdefault(gap_id, {
             "layer": local.get("layer"), "query": local.get("query"),
             "first_seen_cycle": cycle, "last_seen_cycle": cycle,
-            "encounters": 0, "contexts_seen": 0, "seed_encounters": {},
+            "encounters": 0, "contexts_seen": 0,
             "status": "wanting_to_know", "resolution": None,
         })
-        previous = entry["seed_encounters"].get(seed, 0)
+        previous = offsets.get(gap_id, 0)
         observed = local.get("encounters", 0)
         if observed > previous:
             entry["encounters"] += observed - previous
-            entry["seed_encounters"][seed] = observed
-            entry["contexts_seen"] = len(entry["seed_encounters"])
+            if gap_id not in offsets:
+                entry["contexts_seen"] += 1
+            offsets[gap_id] = observed
             entry["last_seen_cycle"] = cycle
         if local.get("status") == "satisfied_for_now":
             entry.update({"status": "satisfied_for_now", "resolution": local.get("resolution"),
@@ -218,11 +238,13 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
                     "weakest_dimension": mastery.get("weakest_dimension"),
                     "next_goal": mastery.get("next_mastery_goal")},
         "local_conversation": report.get("local_conversation"),
+        "storage": read_json(runtime / "storage-status.json"),
     }
 
 
 def work(seed: str, runtime: Path, max_rounds: int, interval: float,
-         steps: int, seconds: float, network: int, local_conversation: bool = True) -> dict:
+         steps: int, seconds: float, network: int, local_conversation: bool = True,
+         max_runtime_mb: int = 1024) -> dict:
     runtime.mkdir(parents=True, exist_ok=True)
     status_path = runtime / "status.json"
     stop_path = runtime / "STOP"
@@ -238,20 +260,24 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
     curriculum.setdefault("conversation_practiced_seeds", [])
     seed = curriculum["current_seed"]
     write_json(curriculum_path, curriculum)
+    enforce_storage_budget(runtime, max_runtime_mb * 1024 * 1024)
     latest = status_record(seed, runtime, "starting", 0)
     write_json(status_path, latest)
     round_number = 0
     consecutive_transient_errors = 0
     while max_rounds <= 0 or round_number < max_rounds:
         round_number += 1
+        if round_number > 1 and round_number % 100 == 0:
+            write_json(status_path, status_record(seed, runtime, "storage_check", round_number - 1))
+            enforce_storage_budget(runtime, max_runtime_mb * 1024 * 1024)
         if stop_path.exists():
             latest = status_record(seed, runtime, "stopped_by_user", round_number - 1)
             write_json(status_path, latest)
             return latest
         write_json(status_path, status_record(seed, runtime, "learning", round_number - 1))
         try:
-            prime_seed_curiosity(runtime, seed, curriculum)
-            report = run_cycle(seed, runtime, steps, seconds, network)
+            report = run_cycle(seed, runtime, steps, seconds, network,
+                               runtime / "curiosity-priors.json")
         except Exception as error:
             if not is_transient_error(error):
                 latest = status_record(seed, runtime, "error", round_number, error=str(error))
@@ -290,6 +316,10 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                                              "evidence_score": 0.0}
         write_json(curriculum_path, curriculum)
         merge_curiosity(curriculum, seed, report, round_number)
+        write_json(runtime / "curiosity-priors.json", {
+            gap_id: {"pressure": item.get("pressure", 0.0), "status": item.get("status")}
+            for gap_id, item in curriculum["curiosity_ledger"].items()
+        })
         exhausted = reason in {"no_unresolved_executable_gap", "no_new_evidence_for_unresolved_gap"}
         if exhausted:
             bucket = "completed_seeds" if reason == "no_unresolved_executable_gap" else "deferred_seeds"
@@ -342,6 +372,7 @@ def main() -> None:
         work_parser.add_argument("--seconds", type=float, default=60)
         work_parser.add_argument("--network", type=int, default=8)
         work_parser.add_argument("--no-local-conversation", action="store_true")
+        work_parser.add_argument("--max-runtime-mb", type=int, default=1024)
     run_parser = subparsers.add_parser("run", help="run in the foreground")
     add_work_arguments(run_parser)
     start_parser = subparsers.add_parser("start", help="start once and keep working in the background")
@@ -374,6 +405,7 @@ def main() -> None:
                    "--runtime", str(args.runtime), "--max-rounds", str(args.max_rounds),
                    "--interval", str(args.interval), "--steps", str(args.steps),
                    "--seconds", str(args.seconds), "--network", str(args.network)]
+        command.extend(["--max-runtime-mb", str(args.max_runtime_mb)])
         if args.no_local_conversation:
             command.append("--no-local-conversation")
         process = subprocess.Popen(command, cwd=Path(__file__).parent, stdin=subprocess.DEVNULL,
@@ -383,7 +415,8 @@ def main() -> None:
                           "progress": str(args.runtime / "status.json")}, ensure_ascii=False))
         return
     result = work(args.seed, args.runtime, args.max_rounds, args.interval,
-                  args.steps, args.seconds, args.network, not args.no_local_conversation)
+                  args.steps, args.seconds, args.network, not args.no_local_conversation,
+                  args.max_runtime_mb)
     print(json.dumps(result, ensure_ascii=False))
 
 

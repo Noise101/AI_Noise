@@ -146,13 +146,16 @@ class EnglishDevelopmentEnvironment:
 
 
 class AutonomousController:
-    def __init__(self, environment: LearningEnvironment, state: PersistentState, state_path: Path | None = None):
+    def __init__(self, environment: LearningEnvironment, state: PersistentState,
+                 state_path: Path | None = None, curiosity_priors: dict | None = None):
         self.environment = environment
         self.state = state
         self.state_path = state_path
+        self.curiosity_priors = curiosity_priors or {}
 
     @classmethod
-    def load(cls, environment: LearningEnvironment, seed: str, state_path: Path | None):
+    def load(cls, environment: LearningEnvironment, seed: str, state_path: Path | None,
+             curiosity_priors: dict | None = None):
         if state_path and state_path.exists():
             data = json.loads(state_path.read_text(encoding="utf-8"))
             if data.get("seed") != seed:
@@ -163,7 +166,7 @@ class AutonomousController:
         restore = getattr(environment, "restore", None)
         if restore:
             restore(state.cycles)
-        return cls(environment, state, state_path)
+        return cls(environment, state, state_path, curiosity_priors)
 
     def save(self) -> None:
         self.state.updated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -183,7 +186,9 @@ class AutonomousController:
             gaps = self.environment.gaps()
             cycle_number = len(self.state.cycles)
             for gap in gaps:
-                observe_unknown(self.state.curiosity_ledger, gap, cycle_number)
+                entry = observe_unknown(self.state.curiosity_ledger, gap, cycle_number)
+                prior = self.curiosity_priors.get(gap.gap_id, {})
+                entry["global_pressure_prior"] = prior.get("pressure", 0.0)
             available = [gap for gap in gaps
                          if gap.gap_id not in self.state.completed_gap_ids
                          and self.state.curiosity_ledger[gap.gap_id].get("last_attempt_encounters", -1)
@@ -199,9 +204,12 @@ class AutonomousController:
                 )
                 break
             selected = max(available, key=lambda gap: (
-                self.state.curiosity_ledger[gap.gap_id]["pressure"],
+                self.state.curiosity_ledger[gap.gap_id]["pressure"]
+                + self.state.curiosity_ledger[gap.gap_id].get("global_pressure_prior", 0.0),
                 gap.expected_information_gain, gap.gap_id))
-            selected_pressure = self.state.curiosity_ledger[selected.gap_id]["pressure"]
+            selected_pressure = (self.state.curiosity_ledger[selected.gap_id]["pressure"]
+                                 + self.state.curiosity_ledger[selected.gap_id].get(
+                                     "global_pressure_prior", 0.0))
             before = WEB_CACHE.stats()["network_requests"]
             try:
                 result = self.environment.execute(selected)
@@ -244,10 +252,14 @@ def main() -> None:
     parser.add_argument("--max-seconds", type=float, default=60)
     parser.add_argument("--max-network", type=int, default=8)
     parser.add_argument("--summary", action="store_true")
+    parser.add_argument("--curiosity-priors", type=Path)
     args = parser.parse_args()
     WEB_CACHE.set_network_budget(args.max_network)
     environment = EnglishDevelopmentEnvironment(args.seed)
-    controller = AutonomousController.load(environment, args.seed, args.state)
+    priors = {}
+    if args.curiosity_priors and args.curiosity_priors.exists():
+        priors = json.loads(args.curiosity_priors.read_text(encoding="utf-8"))
+    controller = AutonomousController.load(environment, args.seed, args.state, priors)
     report = controller.run(args.max_steps, args.max_seconds)
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     if args.output:

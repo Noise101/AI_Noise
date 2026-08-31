@@ -4,10 +4,23 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from local_worker_v21 import _seed_from_title, is_transient_error, merge_curiosity, read_json, work, write_json
+from local_worker_v21 import (_seed_from_title, enforce_storage_budget, is_transient_error,
+                              merge_curiosity, read_json, work, write_json)
 
 
 class LocalWorkerTest(unittest.TestCase):
+    def test_storage_guard_compacts_redundant_curiosity_over_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            state = {"seed": "one", "cycles": [], "completed_gap_ids": [],
+                     "curiosity_ledger": {"copied": {"pressure": 2, "padding": "x" * 5000}}}
+            write_json(runtime / "controller-state.json", state)
+            write_json(runtime / "latest-report.json", {"state": state})
+            write_json(runtime / "curriculum-state.json", {"curiosity_ledger": {},
+                                                             "completed_seeds": [], "mastery_history": []})
+            result = enforce_storage_budget(runtime, 1000)
+            self.assertTrue(result["compacted"])
+            self.assertLess(result["after_bytes"], result["before_bytes"])
     def test_classifies_network_timeout_but_not_programming_error(self):
         self.assertTrue(is_transient_error(TimeoutError("read timed out")))
         self.assertFalse(is_transient_error(KeyError("broken schema")))
