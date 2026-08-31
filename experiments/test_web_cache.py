@@ -1,4 +1,5 @@
 import json
+import http.client
 import tempfile
 import unittest
 from pathlib import Path
@@ -41,6 +42,16 @@ class WebCacheTest(unittest.TestCase):
                 with self.assertRaises(NetworkBudgetExceeded):
                     cache.get_bytes("https://example.test/new", "test")
             mocked.assert_not_called()
+
+    def test_incomplete_download_is_retried_and_only_complete_payload_is_cached(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = ReadOnlyWebCache(Path(directory))
+            complete = FakeResponse(b"complete")
+            with patch("urllib.request.urlopen", side_effect=[
+                    http.client.IncompleteRead(b"partial", 3), complete]) as mocked:
+                self.assertEqual(cache.get_bytes("https://example.test/book", "test"), b"complete")
+            self.assertEqual(mocked.call_count, 2)
+            self.assertEqual(cache.stats()["network_requests"], 2)
 
 
 if __name__ == "__main__":

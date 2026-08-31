@@ -25,6 +25,7 @@ class LocalWorkerTest(unittest.TestCase):
             self.assertLess(result["after_bytes"], result["before_bytes"])
     def test_classifies_network_timeout_but_not_programming_error(self):
         self.assertTrue(is_transient_error(TimeoutError("read timed out")))
+        self.assertTrue(is_transient_error(RuntimeError("IncompleteRead(100 bytes read)")))
         self.assertFalse(is_transient_error(KeyError("broken schema")))
 
     def test_atomic_status_round_trip(self):

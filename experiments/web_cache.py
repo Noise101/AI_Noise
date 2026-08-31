@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import time
 import urllib.request
+import urllib.error
 from pathlib import Path
 
 
@@ -48,12 +50,24 @@ class ReadOnlyWebCache:
             except (OSError, ValueError, KeyError):
                 pass
         self.misses += 1
-        if self.network_limit is not None and self.network_requests - self.budget_start >= self.network_limit:
-            raise NetworkBudgetExceeded(f"network request budget exhausted before {url}")
         request = urllib.request.Request(url, headers={"User-Agent": user_agent, "Accept": accept})
-        with urllib.request.urlopen(request, timeout=25) as response:
-            payload = response.read()
-        self.network_requests += 1
+        payload = None
+        last_error = None
+        for attempt in range(3):
+            if self.network_limit is not None and self.network_requests - self.budget_start >= self.network_limit:
+                raise NetworkBudgetExceeded(f"network request budget exhausted before {url}")
+            self.network_requests += 1
+            try:
+                with urllib.request.urlopen(request, timeout=25) as response:
+                    payload = response.read()
+                break
+            except (http.client.IncompleteRead, TimeoutError, ConnectionResetError,
+                    urllib.error.URLError) as error:
+                last_error = error
+                if attempt < 2:
+                    time.sleep(0.25 * (2 ** attempt))
+        if payload is None:
+            raise last_error or RuntimeError(f"empty network response for {url}")
         if cache_enabled:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             data_path.write_bytes(payload)

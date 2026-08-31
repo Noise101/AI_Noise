@@ -54,6 +54,7 @@ def read_json(path: Path) -> dict:
 def is_transient_error(error: Exception) -> bool:
     text = f"{type(error).__name__}: {error}".lower()
     markers = ("timeout", "timed out", "temporarily unavailable", "connection reset",
+               "incompleteread", "incomplete read",
                "connection refused", "remote end closed", "http error 429", "http error 500",
                "http error 502", "http error 503", "http error 504", "name or service not known")
     return isinstance(error, (TimeoutError, ConnectionError, subprocess.TimeoutExpired)) or any(
