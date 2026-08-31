@@ -305,18 +305,34 @@ def discover_from_developmental_shelves(visited: set[str], network: int) -> list
     """
     WEB_CACHE.set_network_budget(network)
     found: dict[str, dict] = {}
-    for shelf, shelf_score in DEVELOPMENTAL_SHELVES:
+    queue = [(shelf, score, 0, None) for shelf, score in DEVELOPMENTAL_SHELVES]
+    seen_pages: set[tuple[str, str | None]] = set()
+    seen_shelves: set[str] = set()
+    while queue and len(found) < MAX_FRONTIER:
+        shelf, shelf_score, depth, continuation = queue.pop(0)
+        page_key = (shelf, continuation)
+        if page_key in seen_pages or depth > 2:
+            continue
+        seen_pages.add(page_key)
+        seen_shelves.add(shelf)
         params = urllib.parse.urlencode({"action": "query", "list": "categorymembers",
-                                         "cmtitle": shelf, "cmnamespace": 0,
-                                         "cmtype": "page", "cmlimit": 100,
-                                         "format": "json", "formatversion": 2})
+                                         "cmtitle": shelf, "cmtype": "page|subcat",
+                                         "cmlimit": 100, "format": "json", "formatversion": 2,
+                                         **({"cmcontinue": continuation} if continuation else {})})
         try:
             data = WEB_CACHE.get_json("https://en.wikisource.org/w/api.php?" + params,
                                       "AI_Noise/0.32 (read-only developmental shelf)")
         except Exception:
             continue
+        next_page = data.get("continue", {}).get("cmcontinue")
+        if next_page:
+            queue.append((shelf, shelf_score, depth, next_page))
         for page in data.get("query", {}).get("categorymembers", []):
             title = page.get("title", "")
+            if page.get("ns") == 14 or title.startswith("Category:"):
+                if title not in seen_shelves:
+                    queue.append((title, max(0.5, shelf_score - 0.25), depth + 1, None))
+                continue
             if title.count("/") > 1:
                 continue
             seed = _seed_from_title(title)

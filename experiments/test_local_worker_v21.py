@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
 
@@ -151,6 +152,26 @@ class LocalWorkerTest(unittest.TestCase):
         candidates = discover_from_developmental_shelves({"fox crow"}, 4)
         self.assertEqual([item["seed"] for item in candidates], ["hare tortoise"])
         self.assertTrue(all(item["reason"].startswith("unread title") for item in candidates))
+
+    @patch("local_worker_v21.WEB_CACHE.get_json")
+    def test_developmental_shelf_follows_pages_and_subcategories(self, get_json):
+        def response(url, _agent):
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+            shelf = query["cmtitle"][0]
+            continuation = query.get("cmcontinue", [None])[0]
+            if shelf == "Category:Fables" and continuation is None:
+                return {"continue": {"cmcontinue": "next"}, "query": {"categorymembers": [
+                    {"ns": 14, "title": "Category:Animal fables"}]}}
+            if shelf == "Category:Fables" and continuation == "next":
+                return {"query": {"categorymembers": [{"ns": 0, "title": "The Fox and Crow"}]}}
+            if shelf == "Category:Animal fables":
+                return {"query": {"categorymembers": [
+                    {"ns": 0, "title": "The Wolf and Lamb"}]}}
+            return {"query": {"categorymembers": []}}
+        get_json.side_effect = response
+        candidates = discover_from_developmental_shelves(set(), 20)
+        self.assertIn("fox crow", {item["seed"] for item in candidates})
+        self.assertIn("wolf lamb", {item["seed"] for item in candidates})
 
     def test_compacts_mastery_history_without_losing_summary(self):
         curriculum = {"mastery_history": [{"overall_score": 0.2,
