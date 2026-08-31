@@ -26,6 +26,7 @@ from causal_lab_v30 import run_lab
 from representation_learning_v31 import evaluate_representations, transform_transitions
 from developmental_curriculum_v32 import assess_source_quality
 from association_learning_v33 import AssociationLearner
+from epistemic_scaffold_v34 import observe_report, rebuild_scaffold, summarize as summarize_scaffold
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -356,6 +357,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
     causal_memory = read_json(runtime / "causal-memory.json")
     representation_memory = read_json(runtime / "representation-memory.json")
     association_memory = read_json(runtime / "association-memory.json")
+    epistemic_scaffold = read_json(runtime / "epistemic-observations.json")
     return {
         "phase": phase,
         "seed": seed,
@@ -389,6 +391,8 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
             "weakened": association_memory.get("weakened", 0),
             "warning": association_memory.get("warning"),
         },
+        "epistemic_scaffold": report.get("epistemic_scaffold") or
+                              epistemic_scaffold.get("summary", {}),
         "developmental_quality": report.get("developmental_quality"),
         "global_memory_admission": report.get("global_memory_admission"),
     }
@@ -466,6 +470,15 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                 else "outside current developmental level; raw report retained"))}
         new_global_experience = merge_report(memory, seed, report) if admitted else False
         write_json(memory_path, memory)
+        scaffold_path = runtime / "epistemic-observations.json"
+        scaffold = read_json(scaffold_path)
+        if not scaffold:
+            scaffold = rebuild_scaffold(runtime, set(memory.get("merged_seeds", [])))
+        if admitted:
+            observe_report(scaffold, seed, report)
+        scaffold["summary"] = summarize_scaffold(scaffold)
+        write_json(scaffold_path, scaffold)
+        report["epistemic_scaffold"] = scaffold["summary"]
         if new_global_experience or not (runtime / "causal-memory.json").exists():
             previous_representation = read_json(runtime / "representation-memory.json")
             representation_report = evaluate_representations(
