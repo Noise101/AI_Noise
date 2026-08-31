@@ -22,6 +22,7 @@ This principle outranks convenience, benchmark appearance, fluent output, and sh
 12. **Mastery is self-assessed, never declared globally.** The learner measures character stability, grounded vocabulary and phrases, dialogue acts, tested predictions, causal gaps, and corroborated concepts. It pursues its weakest measured dimension and may claim mastery only within observed curricula and explicit evidence gates.
 13. **A local model may be a conversation environment, not a teacher.** Noise constructs its own utterance from its mastery goal and curiosity ledger. Local-model replies create turn-taking and language observations with evidence score zero; they cannot satisfy lexical, conceptual, or causal gates without independent evidence.
 14. **Global knowledge has one canonical owner.** Cross-curriculum curiosity and future shared beliefs live once in a global ledger. Per-seed states store only local observations and references to global priors; copying the entire global ledger into every experience is forbidden.
+15. **Experiences are local; learned capability is global.** A seed report preserves what happened in one curriculum. Accepted lexical beliefs and accumulated event transitions live in one cross-curriculum memory, are loaded before the next experience, and are evaluated globally. Reports store only the delta from that prior.
 
 ## Forbidden substitutions
 

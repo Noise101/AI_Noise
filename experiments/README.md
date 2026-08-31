@@ -33,3 +33,4 @@ python3 -m unittest discover -v
 - `mastery_drive_v24.py`: 言語能力の自己評価と最弱層からの次の習得目標
 - `local_conversation_v25.py`: 自作した問いによるOllamaとの短い会話練習（証拠スコア0）
 - `compact_runtime_v26.py`: seed固有知識を保った冗長台帳の除去とストレージ回収
+- `global_memory_v27.py`: 全題材の語彙・会話・出来事・概念を一つの正本へ統合

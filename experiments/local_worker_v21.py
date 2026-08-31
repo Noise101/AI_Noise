@@ -19,6 +19,7 @@ from curiosity_drive_v23 import curiosity_pressure
 from mastery_drive_v24 import assess_language_mastery
 from local_conversation_v25 import practice_once
 from compact_runtime_v26 import compact_runtime
+from global_memory_v27 import empty_memory, mastery_report, merge_report
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -88,7 +89,7 @@ def seed_runtime(runtime: Path, seed: str) -> Path:
 
 
 def run_cycle(seed: str, runtime: Path, steps: int, seconds: float, network: int,
-              curiosity_priors: Path | None = None) -> dict:
+              curiosity_priors: Path | None = None, global_memory: Path | None = None) -> dict:
     runtime = seed_runtime(runtime, seed)
     runtime.mkdir(parents=True, exist_ok=True)
     state = runtime / "controller-state.json"
@@ -100,6 +101,8 @@ def run_cycle(seed: str, runtime: Path, steps: int, seconds: float, network: int
     ]
     if curiosity_priors:
         command.extend(["--curiosity-priors", str(curiosity_priors)])
+    if global_memory:
+        command.extend(["--global-memory", str(global_memory)])
     completed = subprocess.run(command, cwd=Path(__file__).parent, capture_output=True,
                                text=True, timeout=max(10, seconds + 30))
     if completed.returncode:
@@ -239,6 +242,8 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
                     "next_goal": mastery.get("next_mastery_goal")},
         "local_conversation": report.get("local_conversation"),
         "storage": read_json(runtime / "storage-status.json"),
+        "global_memory": report.get("global_memory") or read_json(
+            runtime / "global-language-memory.json").get("totals", {}),
     }
 
 
@@ -277,7 +282,8 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         write_json(status_path, status_record(seed, runtime, "learning", round_number - 1))
         try:
             report = run_cycle(seed, runtime, steps, seconds, network,
-                               runtime / "curiosity-priors.json")
+                               runtime / "curiosity-priors.json",
+                               runtime / "global-language-memory.json")
         except Exception as error:
             if not is_transient_error(error):
                 latest = status_record(seed, runtime, "error", round_number, error=str(error))
@@ -297,8 +303,13 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             continue
         consecutive_transient_errors = 0
         reason = report.get("state", {}).get("stop_reason")
-        mastery = assess_language_mastery(report)
+        memory_path = runtime / "global-language-memory.json"
+        memory = read_json(memory_path) or empty_memory()
+        merge_report(memory, seed, report)
+        write_json(memory_path, memory)
+        mastery = assess_language_mastery(mastery_report(memory))
         report["mastery"] = mastery
+        report["global_memory"] = memory.get("totals", {})
         write_json(runtime / "mastery.json", mastery)
         curriculum["mastery_history"].append({"seed": seed, "round": round_number,
                                                "overall_score": mastery["overall_score"],

@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -53,18 +54,43 @@ class LearningEnvironment(Protocol):
 
 
 class EnglishDevelopmentEnvironment:
-    def __init__(self, seed: str):
+    def __init__(self, seed: str, global_memory: dict | None = None):
         self.seed = seed
         self.agent = MultiLevelLearningAgent()
+        self.apply_global_memory(global_memory or {})
+        self.global_transition_baseline = {
+            context: dict(outcomes) for context, outcomes in self.agent.story.transitions.items()}
+        self.global_event_baseline = sum(self.agent.story.event_counts.values())
         try:
             self.bootstrap = self.agent.learn_from_web(seed)
         except NetworkBudgetExceeded as error:
             # Preserve any observations collected before the hard budget boundary.
             self.bootstrap = {"status": "network_budget_exhausted", "error": str(error)}
+        parallel = self.bootstrap.get("parallel_learning", {})
+        if parallel:
+            parallel["event_predictions"] = self.local_story_report()
         self.sources = [
             WiktionaryDefinitions("en.wiktionary.org", "English Wiktionary", 0.82, True),
             WiktionaryDefinitions("simple.wiktionary.org", "Simple English Wiktionary", 0.78, False),
         ]
+
+    def apply_global_memory(self, memory: dict) -> None:
+        for form, item in memory.get("words", {}).items():
+            belief = item.get("accepted_belief")
+            if belief:
+                self.agent.lexicon.update_meaning_hypothesis(form, belief)
+        for phrase, item in memory.get("phrases", {}).items():
+            belief = item.get("accepted_belief")
+            if belief:
+                self.agent.lexicon.update_phrase_hypothesis(
+                    phrase, belief, belief.get("compositionality", {}))
+        for cue, item in memory.get("conversation_acts", {}).items():
+            belief = item.get("accepted_belief")
+            if belief:
+                self.agent.lexicon.update_conversation_hypothesis(cue, belief)
+        for context, outcomes in memory.get("event_transitions", {}).items():
+            self.agent.story.transitions[context].update(outcomes)
+        self.agent.story.event_counts.update(memory.get("event_counts", {}))
 
     def restore(self, cycles: list[dict]) -> None:
         """Replay accepted learning updates, not merely completed task IDs."""
@@ -141,8 +167,23 @@ class EnglishDevelopmentEnvironment:
 
     def snapshot(self) -> dict:
         return {"bootstrap": self.bootstrap,
-                "lexicon": self.agent.lexicon.report(), "story": self.agent.story.report(),
+                "lexicon": self.agent.lexicon.report(), "story": self.local_story_report(),
                 "concepts": self.agent.concepts.ledger.report()}
+
+    def local_story_report(self) -> dict:
+        report = self.agent.story.report()
+        local_rules = []
+        for rule in report.get("rules", []):
+            baseline = self.global_transition_baseline.get(rule["when"], {}).get(rule["expect"], 0)
+            local_count = rule["observations"] - baseline
+            if local_count > 0:
+                local_rules.append({**rule, "observations": local_count})
+        report["rules"] = local_rules
+        report["events_seen"] = max(0, report.get("events_seen", 0) - self.global_event_baseline)
+        report["global_prior"] = {"transition_contexts": len(self.global_transition_baseline),
+                                  "events": self.global_event_baseline,
+                                  "included_in_local_rules": False}
+        return report
 
 
 class AutonomousController:
@@ -253,9 +294,13 @@ def main() -> None:
     parser.add_argument("--max-network", type=int, default=8)
     parser.add_argument("--summary", action="store_true")
     parser.add_argument("--curiosity-priors", type=Path)
+    parser.add_argument("--global-memory", type=Path)
     args = parser.parse_args()
     WEB_CACHE.set_network_budget(args.max_network)
-    environment = EnglishDevelopmentEnvironment(args.seed)
+    global_memory = {}
+    if args.global_memory and args.global_memory.exists():
+        global_memory = json.loads(args.global_memory.read_text(encoding="utf-8"))
+    environment = EnglishDevelopmentEnvironment(args.seed, global_memory)
     priors = {}
     if args.curiosity_priors and args.curiosity_priors.exists():
         priors = json.loads(args.curiosity_priors.read_text(encoding="utf-8"))

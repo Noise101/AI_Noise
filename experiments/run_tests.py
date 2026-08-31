@@ -18,6 +18,7 @@ QUICK_MODULES = [
     "test_mastery_drive_v24",
     "test_local_conversation_v25",
     "test_compact_runtime_v26",
+    "test_global_memory_v27",
     "test_story_learning_v12", "test_story_web_curriculum_v13", "test_story_concepts_v14",
     "test_developmental_language_v15", "test_lexical_research_v16", "test_phrase_learning_v17",
     "test_japanese_boundaries_v18",

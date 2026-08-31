@@ -33,6 +33,7 @@ Read `ARCHITECTURE.md` before changing the learning path. Its invariants are the
 - `v21-v22`: routine cycles run in a local background worker with a compact heartbeat, resumable per-seed state, evidence-derived curriculum transitions, a safe stop file, and zero Codex/remote-LLM calls. Kanjipedia exact-entry existence is an additional structural reference; its definition prose is not copied.
 - `v23-v25`: persistent curiosity grows across repeated unresolved encounters; mastery self-assessment targets the weakest measured language dimension; one bounded local-Ollama conversation per new curriculum supplies practice observations but always has evidence score zero.
 - `v26`: global curiosity is referenced through one compact prior file rather than copied into every seed. A tested compactor preserves local cycles/evidence, and the worker enforces a default 1 GB runtime budget every 100 rounds.
+- `v27`: one canonical global language memory merges vocabulary, accepted lexical/phrase/dialogue beliefs, event transitions, and concepts. It is loaded before each new story; seed reports retain only local deltas, and global mastery is no longer reset per seed.
 
 The latest live v18 run generated the query `きつね つる`, selected `イソップ童話集/きつねとつる`, and induced many repeated chunks. Only `きつね` and `つる` were corroborated by both Japanese Wiktionary and an exact/redirected Japanese Wikipedia page. `つる` remains meaning-ambiguous even though its boundary is accepted.
 
