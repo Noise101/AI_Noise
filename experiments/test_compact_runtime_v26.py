@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from compact_runtime_v26 import compact_curriculum, compact_runtime, compact_state
+from compact_runtime_v26 import compact_curriculum, compact_runtime, compact_state, rebuild_global_curiosity
 from local_worker_v21 import read_json, write_json
 
 
@@ -16,6 +16,18 @@ class CompactRuntimeTest(unittest.TestCase):
         self.assertEqual(list(compacted["curiosity_ledger"]), ["word:one"])
         self.assertEqual(compacted["cycles"][0]["result"], {"learned": True})
         self.assertEqual(counts["curiosity_before"], 2)
+        self.assertEqual(compacted["curiosity_ledger"]["word:one"]["encounters"], 1)
+
+    def test_rebuilds_real_counts_instead_of_propagating_corrupt_global_counts(self):
+        one, _ = compact_state({"seed": "one", "cycles": [{
+            "gap": {"gap_id": "word:x", "layer": "word", "query": "x", "observations": 2},
+            "grounded": False}], "curiosity_ledger": {"word:x": {"encounters": 10 ** 50}}})
+        two, _ = compact_state({"seed": "two", "cycles": [{
+            "gap": {"gap_id": "word:x", "layer": "word", "query": "x", "observations": 3},
+            "grounded": False}], "curiosity_ledger": {"word:x": {"encounters": 10 ** 60}}})
+        global_ledger = rebuild_global_curiosity([one, two], 2)
+        self.assertEqual(global_ledger["word:x"]["encounters"], 5)
+        self.assertEqual(global_ledger["word:x"]["contexts_seen"], 2)
 
     def test_global_ledger_keeps_aggregates_without_per_seed_map(self):
         curriculum = {"curiosity_ledger": {"word:x": {
