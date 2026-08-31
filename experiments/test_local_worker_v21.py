@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from local_worker_v21 import (_seed_from_title, developmental_source_quality, discover_curriculum,
-                              enforce_storage_budget, is_transient_error,
+                              discover_from_developmental_shelves, enforce_storage_budget, is_transient_error,
                               compact_learning_history, merge_curiosity, read_json, status_record,
                               work, write_json)
 
@@ -48,10 +48,12 @@ class LocalWorkerTest(unittest.TestCase):
             self.assertEqual(status["causal_evaluation"]["supported_hypotheses"], 0)
             self.assertEqual(status["causal_evaluation"]["evaluation"]["accuracy"], 0.1)
 
+    @patch("local_worker_v21.discover_from_developmental_shelves", return_value=[])
     @patch("local_worker_v21.rediscover_from_history", return_value=[])
     @patch("local_worker_v21.discover_curriculum", return_value=[])
     @patch("local_worker_v21.run_cycle")
-    def test_repeats_step_budgets_then_exhausts_frontier(self, run_cycle, _discover, _history):
+    def test_repeats_step_budgets_then_exhausts_frontier(
+            self, run_cycle, _discover, _history, _shelves):
         run_cycle.side_effect = [
             {"state": {"completed_gap_ids": ["one"], "stop_reason": "step_budget_exhausted"},
              "current_gaps": [{"gap_id": "two"}], "web_usage": {"network_requests": 1}},
@@ -138,6 +140,17 @@ class LocalWorkerTest(unittest.TestCase):
         candidates = discover_curriculum(report, set(), 0)
         self.assertEqual(candidates[0]["seed"], "fox moon")
         self.assertEqual(candidates[0]["independent_sources"], 2)
+
+    @patch("local_worker_v21.WEB_CACHE.get_json")
+    def test_developmental_shelf_supplies_unread_titles_only(self, get_json):
+        get_json.return_value = {"query": {"categorymembers": [
+            {"title": "The Fox and the Crow"},
+            {"title": "The Hare and the Tortoise"},
+            {"title": "Index"},
+        ]}}
+        candidates = discover_from_developmental_shelves({"fox crow"}, 4)
+        self.assertEqual([item["seed"] for item in candidates], ["hare tortoise"])
+        self.assertTrue(all(item["reason"].startswith("unread title") for item in candidates))
 
     def test_compacts_mastery_history_without_losing_summary(self):
         curriculum = {"mastery_history": [{"overall_score": 0.2,

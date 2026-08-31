@@ -38,6 +38,12 @@ CURRICULUM_METADATA = {"index", "preface", "introduction", "appendix", "volume",
                        "act", "scene"}
 MAX_FRONTIER = 300
 MAX_MASTERY_HISTORY = 500
+DEVELOPMENTAL_SHELVES = (
+    ("Category:Fables", 4.0),
+    ("Category:Fairy tales", 3.0),
+    ("Category:Children's literature", 2.0),
+    ("Category:Folklore", 1.0),
+)
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -291,6 +297,39 @@ def rediscover_from_history(runtime: Path, visited: set[str], network: int) -> l
     return sorted(found.values(), key=lambda item: (-item["score"], item["seed"]))
 
 
+def discover_from_developmental_shelves(visited: set[str], network: int) -> list[dict]:
+    """Find unread child-level titles after the evidence-linked frontier is empty.
+
+    Shelves provide titles only. Text still has to pass the developmental audit
+    before it enters global memory or generates further curriculum.
+    """
+    WEB_CACHE.set_network_budget(network)
+    found: dict[str, dict] = {}
+    for shelf, shelf_score in DEVELOPMENTAL_SHELVES:
+        params = urllib.parse.urlencode({"action": "query", "list": "categorymembers",
+                                         "cmtitle": shelf, "cmnamespace": 0,
+                                         "cmtype": "page", "cmlimit": 100,
+                                         "format": "json", "formatversion": 2})
+        try:
+            data = WEB_CACHE.get_json("https://en.wikisource.org/w/api.php?" + params,
+                                      "AI_Noise/0.32 (read-only developmental shelf)")
+        except Exception:
+            continue
+        for page in data.get("query", {}).get("categorymembers", []):
+            title = page.get("title", "")
+            if title.count("/") > 1:
+                continue
+            seed = _seed_from_title(title)
+            if not seed or seed in visited or seed in found:
+                continue
+            found[seed] = {"seed": seed, "score": shelf_score,
+                           "reason": "unread title selected from a developmental shelf",
+                           "parent_url": "https://en.wikisource.org/wiki/" +
+                                         urllib.parse.quote(shelf.replace(" ", "_"), safe=":'_"),
+                           "linked_title": title}
+    return sorted(found.values(), key=lambda item: (-item["score"], item["seed"]))[:MAX_FRONTIER]
+
+
 def status_record(seed: str, runtime: Path, phase: str, rounds: int,
                   report: dict | None = None, error: str | None = None) -> dict:
     report = report or {}
@@ -495,6 +534,9 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                 curriculum["frontier"], key=lambda item: (-item.get("score", 0), item["seed"]))[:MAX_FRONTIER]
             if not curriculum["frontier"]:
                 curriculum["frontier"].extend(rediscover_from_history(runtime, visited, network))
+            if not curriculum["frontier"]:
+                curriculum["frontier"].extend(
+                    discover_from_developmental_shelves(visited, network))
             if curriculum["frontier"]:
                 selected = curriculum["frontier"].pop(0)
                 curriculum["transitions"].append({"from": seed, "to": selected["seed"],
