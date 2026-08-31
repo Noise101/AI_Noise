@@ -189,6 +189,18 @@ def compact_learning_history(curriculum: dict) -> None:
     curriculum["mastery_history"] = history[-MAX_MASTERY_HISTORY:]
 
 
+def developmental_source_quality(report: dict) -> dict:
+    audits = [item for source in report.get("knowledge", {}).get("bootstrap", {}).get("sources", [])
+              for item in source.get("event_extraction_audit", [])]
+    if not audits:
+        return {"status": "not_yet_audited", "accepted": 0, "total": 0, "ratio": 0.0}
+    accepted = sum(bool(item.get("accepted")) for item in audits)
+    ratio = accepted / len(audits)
+    return {"status": "developmental_passage" if accepted >= 2 and ratio >= 0.3
+            else "low_narrative_value", "accepted": accepted, "total": len(audits),
+            "ratio": round(ratio, 3)}
+
+
 def discover_curriculum(report: dict, visited: set[str], network: int) -> list[dict]:
     """Generate next seeds from observed evidence links and learned concepts."""
     candidates: dict[str, dict] = {}
@@ -360,6 +372,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             continue
         consecutive_transient_errors = 0
         reason = report.get("state", {}).get("stop_reason")
+        report["developmental_quality"] = developmental_source_quality(report)
         memory_path = runtime / "global-language-memory.json"
         memory = read_json(memory_path) or empty_memory()
         new_global_experience = merge_report(memory, seed, report)
@@ -406,7 +419,9 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         })
         exhausted = reason in {"no_unresolved_executable_gap", "no_new_evidence_for_unresolved_gap"}
         if exhausted:
-            bucket = "completed_seeds" if reason == "no_unresolved_executable_gap" else "deferred_seeds"
+            low_quality = report["developmental_quality"]["status"] == "low_narrative_value"
+            bucket = ("deferred_seeds" if low_quality or
+                      reason == "no_new_evidence_for_unresolved_gap" else "completed_seeds")
             if seed not in curriculum[bucket]:
                 curriculum[bucket].append(seed)
             visited = set(curriculum["completed_seeds"]) | set(curriculum["deferred_seeds"])

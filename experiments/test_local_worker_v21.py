@@ -4,7 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from local_worker_v21 import (_seed_from_title, discover_curriculum, enforce_storage_budget, is_transient_error,
+from local_worker_v21 import (_seed_from_title, developmental_source_quality, discover_curriculum,
+                              enforce_storage_budget, is_transient_error,
                               compact_learning_history, merge_curiosity, read_json, status_record,
                               work, write_json)
 
@@ -105,6 +106,12 @@ class LocalWorkerTest(unittest.TestCase):
         compact_learning_history(curriculum)
         self.assertEqual(len(curriculum["mastery_history"]), 500)
         self.assertEqual(curriculum["mastery_history_summary"]["records"], 10)
+
+    def test_rejects_a_page_whose_text_is_mostly_not_narrative(self):
+        report = {"knowledge": {"bootstrap": {"sources": [{
+            "event_extraction_audit": [{"accepted": False}] * 4 + [{"accepted": True}]
+        }]}}}
+        self.assertEqual(developmental_source_quality(report)["status"], "low_narrative_value")
 
     def test_same_unknown_across_curricula_builds_global_pressure(self):
         curriculum = {}
