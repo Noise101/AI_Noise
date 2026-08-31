@@ -92,6 +92,7 @@ class LocalWorkerTest(unittest.TestCase):
 
     def test_rejects_metadata_as_a_curriculum_seed(self):
         self.assertIsNone(_seed_from_title("Ivory Carving: Historical Notes"))
+        self.assertIsNone(_seed_from_title("Book VII"))
 
     @patch("local_worker_v21.WEB_CACHE.get_json", return_value={})
     def test_repeated_japanese_chunks_can_enter_the_same_curriculum(self, _get):

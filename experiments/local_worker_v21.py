@@ -33,7 +33,8 @@ TITLE_STOP = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "with", "th
               "hundred", "aesop", "s", "fables"}
 CURRICULUM_METADATA = {"index", "preface", "introduction", "appendix", "volume", "chapter",
                        "translator", "bibliography", "edition", "notes", "contents", "carving",
-                       "history", "dictionary", "encyclopedia"}
+                       "history", "dictionary", "encyclopedia", "book", "part", "section",
+                       "act", "scene"}
 MAX_FRONTIER = 300
 MAX_MASTERY_HISTORY = 500
 
