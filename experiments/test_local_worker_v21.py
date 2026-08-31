@@ -97,7 +97,7 @@ class LocalWorkerTest(unittest.TestCase):
 
     @patch("local_worker_v21.WEB_CACHE.get_json", return_value={})
     def test_repeated_japanese_chunks_can_enter_the_same_curriculum(self, _get):
-        report = {"knowledge": {"lexicon": {"phrase_candidates": [
+        report = {"state": {"seed": "きつね つる"}, "knowledge": {"lexicon": {"phrase_candidates": [
             {"phrase": "きつね", "kind": "unsegmented_chunk_candidate"},
             {"phrase": "つる", "kind": "unsegmented_chunk_candidate"}]}}}
         candidates = discover_curriculum(report, set(), 0)
@@ -107,6 +107,13 @@ class LocalWorkerTest(unittest.TestCase):
     def test_function_word_concept_pair_cannot_become_a_seed(self, _get):
         report = {"knowledge": {"concepts": {"beliefs": [
             {"subject": "of", "object": "and", "citations": []}]}}}
+        self.assertEqual(discover_curriculum(report, set(), 0), [])
+
+    @patch("local_worker_v21.WEB_CACHE.get_json", return_value={})
+    def test_rejected_source_cannot_spawn_concept_seed(self, _get):
+        report = {"knowledge": {"bootstrap": {"sources": [{
+            "event_extraction_audit": [{"accepted": False}] * 3}]},
+            "concepts": {"beliefs": [{"subject": "became", "object": "moon"}]}}}
         self.assertEqual(discover_curriculum(report, set(), 0), [])
 
     def test_compacts_mastery_history_without_losing_summary(self):

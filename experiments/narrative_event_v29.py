@@ -26,7 +26,10 @@ VERBS = {
     "place", "placed", "hang", "hung", "resort", "resorted", "push", "pushed", "sing",
     "sang", "shine", "shone", "sees", "jumps", "waits", "pushes", "eats", "falls",
     "grows", "shines", "sings",
+    "become", "became", "change", "changed",
 }
+SUBJECT_STOP = {"at", "by", "for", "from", "in", "into", "of", "on", "over", "to", "under",
+                "upon", "with", "and", "but", "or"}
 METADATA_TERMS = {
     "author", "translator", "translated", "illustrated", "illustrator", "editor", "edition",
     "ebook", "copyright", "license", "gutenberg", "wikisource", "proofread", "transcription",
@@ -86,6 +89,9 @@ class NarrativeEventExtractor:
         if not subject_candidates:
             return EventExtraction(sentence, False, None, "missing_subject", 0.0, verb_index)
         subject = subject_candidates[-1]
+        if subject in SUBJECT_STOP:
+            return EventExtraction(sentence, False, None, "invalid_structural_subject", 0.0,
+                                   verb_index)
         if subject in PRONOUNS:
             if not recent_subject:
                 return EventExtraction(sentence, False, None, "unresolved_pronoun_subject", 0.0,

@@ -247,7 +247,8 @@ def discover_curriculum(report: dict, visited: set[str], network: int) -> list[d
                 candidates.setdefault(seed, {"seed": seed, "score": 2.5,
                                               "reason": "unvisited page in an observed story collection",
                                               "parent_url": url, "linked_title": linked_title})
-    beliefs = report.get("knowledge", {}).get("concepts", {}).get("beliefs", [])
+    beliefs = (report.get("knowledge", {}).get("concepts", {}).get("beliefs", [])
+               if source_quality["status"] == "developmental_passage" else [])
     for belief in beliefs:
         seed = f"{belief.get('subject', '')} {belief.get('object', '')}".strip().lower()
         if seed in visited or len(seed.split()) < 2 or not valid_curriculum_seed(seed):
@@ -257,7 +258,9 @@ def discover_curriculum(report: dict, visited: set[str], network: int) -> list[d
                                      "parent_url": (belief.get("citations") or [None])[0]})
     chunks = [item for item in report.get("knowledge", {}).get("lexicon", {}).get(
         "phrase_candidates", []) if item.get("kind") == "unsegmented_chunk_candidate"
-        and JAPANESE.search(item.get("phrase", ""))]
+        and JAPANESE.search(item.get("phrase", ""))
+        and (source_quality["status"] == "developmental_passage"
+             or JAPANESE.search(report.get("state", {}).get("seed", "")))]
     if chunks:
         forms = list(dict.fromkeys(item["phrase"] for item in chunks[:2]))
         seed = " ".join(forms)

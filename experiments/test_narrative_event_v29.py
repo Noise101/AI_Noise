@@ -37,6 +37,11 @@ class NarrativeEventExtractorTest(unittest.TestCase):
         self.assertFalse(record["accepted"])
         self.assertIsNone(record["event"])
 
+    def test_preposition_cannot_be_promoted_to_subject(self):
+        result = self.extractor.extract("At changed moon near water.")
+        self.assertFalse(result.accepted)
+        self.assertEqual(result.reason, "invalid_structural_subject")
+
 
 if __name__ == "__main__":
     unittest.main()

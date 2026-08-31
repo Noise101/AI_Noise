@@ -29,6 +29,26 @@ class DevelopmentalCurriculumTest(unittest.TestCase):
         self.assertFalse(result["admit_to_global_memory"])
         self.assertTrue(result["reasons"])
 
+    def test_short_fable_with_novel_words_is_not_penalized_for_learning(self):
+        sentences = ["Young turkeys saw a fox near the tree.",
+                     "The turkeys waited under the leaves.",
+                     "The turkeys ran when the fox moved."]
+        item = report(sentences, [True, True, True])
+        result = assess_source_quality(item, {"the", "a", "near", "under", "when"})
+        self.assertEqual(result["status"], "developmental_passage")
+        self.assertGreaterEqual(result["metrics"]["subject_recurrence"], 0.15)
+
+    def test_short_biographical_fragments_without_recurrence_are_rejected(self):
+        item = {"knowledge": {"bootstrap": {"sources": [{"url": "https://bio",
+            "event_extraction_audit": [
+                {"sentence": "John painted a wall.", "accepted": True, "event": "john|painted|wall"},
+                {"sentence": "Mary wrote a book.", "accepted": True, "event": "mary|wrote|book"},
+                {"sentence": "Thomas built a house.", "accepted": True, "event": "thomas|built|house"},
+            ]}]}}}
+        result = assess_source_quality(item, {"a", "wall", "book", "house"})
+        self.assertEqual(result["status"], "outside_current_level")
+        self.assertIn("no recurring subject or dialogue structure", result["reasons"])
+
     def test_unaudited_legacy_source_cannot_enter_new_memory(self):
         result = assess_source_quality({"knowledge": {"bootstrap": {"sources": []}}})
         self.assertEqual(result["status"], "not_yet_audited")

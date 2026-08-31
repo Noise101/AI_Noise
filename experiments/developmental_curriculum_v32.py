@@ -31,12 +31,13 @@ def assess_source_quality(report: dict, known_words: set[str] | None = None) -> 
     known_words = known_words or set()
     known_ratio = (sum(word in known_words for word in all_words) / len(all_words)
                    if all_words and known_words else 0.5)
+    vocabulary_fit = max(0.0, 1 - abs(known_ratio - 0.65) / 0.65)
     subjects = [item["event"].split("|", 1)[0] for item in accepted_items]
     recurrence = 0.0 if not subjects else 1 - len(set(subjects)) / len(subjects)
     dialogue_ratio = sum(('"' in sentence or "“" in sentence or "?" in sentence)
                          for sentence in sentences) / max(1, accepted)
-    score = (0.35 * narrative_ratio + 0.25 * short_ratio + 0.15 * known_ratio
-             + 0.15 * recurrence + 0.10 * dialogue_ratio)
+    score = (0.35 * narrative_ratio + 0.30 * short_ratio + 0.20 * vocabulary_fit
+             + 0.15 * recurrence + 0.05 * dialogue_ratio)
     reasons = []
     if accepted < 2:
         reasons.append("fewer than two accepted events")
@@ -44,15 +45,19 @@ def assess_source_quality(report: dict, known_words: set[str] | None = None) -> 
         reasons.append("most audited sentences are not narrative events")
     if short_ratio < 0.5:
         reasons.append("sentences exceed the current child-level length")
+    if recurrence < 0.15 and dialogue_ratio < 0.15:
+        reasons.append("no recurring subject or dialogue structure")
     if score < 0.58:
         reasons.append("combined developmental score below 0.58")
-    admitted = accepted >= 2 and narrative_ratio >= 0.3 and short_ratio >= 0.5 and score >= 0.58
+    admitted = (accepted >= 2 and narrative_ratio >= 0.3 and short_ratio >= 0.5
+                and (recurrence >= 0.15 or dialogue_ratio >= 0.15) and score >= 0.58)
     return {"status": "developmental_passage" if admitted else "outside_current_level",
             "admit_to_global_memory": admitted, "score": round(score, 3),
             "accepted": accepted, "total": len(audits),
             "metrics": {"narrative_ratio": round(narrative_ratio, 3),
                         "short_sentence_ratio": round(short_ratio, 3),
                         "known_word_ratio": round(known_ratio, 3),
+                        "vocabulary_fit": round(vocabulary_fit, 3),
                         "subject_recurrence": round(recurrence, 3),
                         "dialogue_ratio": round(dialogue_ratio, 3)},
             "source_urls": source_urls, "reasons": reasons}
