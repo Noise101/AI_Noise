@@ -116,6 +116,29 @@ class LocalWorkerTest(unittest.TestCase):
             "concepts": {"beliefs": [{"subject": "became", "object": "moon"}]}}}
         self.assertEqual(discover_curriculum(report, set(), 0), [])
 
+    @patch("local_worker_v21.WEB_CACHE.get_json", return_value={})
+    def test_single_source_concept_cannot_become_curriculum(self, _get):
+        report = {"knowledge": {"bootstrap": {"sources": [{
+            "event_extraction_audit": [
+                {"accepted": True, "event": "brain|said|right", "sentence": "Brain said right."},
+                {"accepted": True, "event": "brain|said|night", "sentence": "Brain said night."},
+            ]}]}, "concepts": {"beliefs": [{"subject": "brain", "object": "right",
+                "status": "single_source", "accepted_polarity": True,
+                "citations": ["https://one"]}]}}}
+        self.assertEqual(discover_curriculum(report, set(), 0), [])
+
+    @patch("local_worker_v21.WEB_CACHE.get_json", return_value={})
+    def test_corroborated_concept_can_become_curriculum(self, _get):
+        audit = [{"accepted": True, "event": "fox|saw|moon", "sentence": "Fox saw moon."},
+                 {"accepted": True, "event": "fox|waited|moon", "sentence": "Fox waited moon."}]
+        report = {"knowledge": {"bootstrap": {"sources": [
+            {"event_extraction_audit": audit}]}, "concepts": {"beliefs": [{
+                "subject": "fox", "object": "moon", "status": "corroborated",
+                "accepted_polarity": True, "citations": ["https://one", "https://two"]}]}}}
+        candidates = discover_curriculum(report, set(), 0)
+        self.assertEqual(candidates[0]["seed"], "fox moon")
+        self.assertEqual(candidates[0]["independent_sources"], 2)
+
     def test_compacts_mastery_history_without_losing_summary(self):
         curriculum = {"mastery_history": [{"overall_score": 0.2,
             "weakest_dimension": "words"} for _ in range(510)]}

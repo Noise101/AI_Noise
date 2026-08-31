@@ -250,12 +250,18 @@ def discover_curriculum(report: dict, visited: set[str], network: int) -> list[d
     beliefs = (report.get("knowledge", {}).get("concepts", {}).get("beliefs", [])
                if source_quality["status"] == "developmental_passage" else [])
     for belief in beliefs:
+        citations = set(belief.get("citations") or [])
+        if (belief.get("status") != "corroborated" or belief.get("accepted_polarity") is not True
+                or len(citations) < 2):
+            continue
         seed = f"{belief.get('subject', '')} {belief.get('object', '')}".strip().lower()
         if seed in visited or len(seed.split()) < 2 or not valid_curriculum_seed(seed):
             continue
         candidates.setdefault(seed, {"seed": seed, "score": 0.5,
                                      "reason": "unvisited concept pair from evidence ledger",
-                                     "parent_url": (belief.get("citations") or [None])[0]})
+                                     "parent_url": sorted(citations)[0],
+                                     "evidence_status": "corroborated",
+                                     "independent_sources": len(citations)})
     chunks = [item for item in report.get("knowledge", {}).get("lexicon", {}).get(
         "phrase_candidates", []) if item.get("kind") == "unsegmented_chunk_candidate"
         and JAPANESE.search(item.get("phrase", ""))
@@ -480,7 +486,11 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                                       and valid_curriculum_seed(
                                           item["seed"], item.get("linked_title"))
                                       and item.get("parent_url") not in set(
-                                          curriculum.get("blocked_parent_urls", []))]
+                                          curriculum.get("blocked_parent_urls", []))
+                                      and (item.get("reason") !=
+                                           "unvisited concept pair from evidence ledger"
+                                           or (item.get("evidence_status") == "corroborated"
+                                               and item.get("independent_sources", 0) >= 2))]
             curriculum["frontier"] = sorted(
                 curriculum["frontier"], key=lambda item: (-item.get("score", 0), item["seed"]))[:MAX_FRONTIER]
             if not curriculum["frontier"]:
