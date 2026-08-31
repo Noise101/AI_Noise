@@ -56,6 +56,8 @@ def read_json(path: Path) -> dict:
 
 def is_transient_error(error: Exception) -> bool:
     text = f"{type(error).__name__}: {error}".lower()
+    if any(marker in text for marker in ("http error 403", "http error 404", "http error 410")):
+        return False
     markers = ("timeout", "timed out", "temporarily unavailable", "connection reset",
                "incompleteread", "incomplete read",
                "connection refused", "remote end closed", "http error 429", "http error 500",
@@ -248,7 +250,7 @@ def discover_curriculum(report: dict, visited: set[str], network: int) -> list[d
     beliefs = report.get("knowledge", {}).get("concepts", {}).get("beliefs", [])
     for belief in beliefs:
         seed = f"{belief.get('subject', '')} {belief.get('object', '')}".strip().lower()
-        if seed in visited or len(seed.split()) < 2:
+        if seed in visited or len(seed.split()) < 2 or not valid_curriculum_seed(seed):
             continue
         candidates.setdefault(seed, {"seed": seed, "score": 0.5,
                                      "reason": "unvisited concept pair from evidence ledger",

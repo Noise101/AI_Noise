@@ -26,6 +26,7 @@ class LocalWorkerTest(unittest.TestCase):
     def test_classifies_network_timeout_but_not_programming_error(self):
         self.assertTrue(is_transient_error(TimeoutError("read timed out")))
         self.assertTrue(is_transient_error(RuntimeError("IncompleteRead(100 bytes read)")))
+        self.assertFalse(is_transient_error(RuntimeError("HTTP Error 403: Forbidden")))
         self.assertFalse(is_transient_error(KeyError("broken schema")))
 
     def test_atomic_status_round_trip(self):
@@ -101,6 +102,12 @@ class LocalWorkerTest(unittest.TestCase):
             {"phrase": "つる", "kind": "unsegmented_chunk_candidate"}]}}}
         candidates = discover_curriculum(report, set(), 0)
         self.assertEqual(candidates[0]["seed"], "きつね つる")
+
+    @patch("local_worker_v21.WEB_CACHE.get_json", return_value={})
+    def test_function_word_concept_pair_cannot_become_a_seed(self, _get):
+        report = {"knowledge": {"concepts": {"beliefs": [
+            {"subject": "of", "object": "and", "citations": []}]}}}
+        self.assertEqual(discover_curriculum(report, set(), 0), [])
 
     def test_compacts_mastery_history_without_losing_summary(self):
         curriculum = {"mastery_history": [{"overall_score": 0.2,

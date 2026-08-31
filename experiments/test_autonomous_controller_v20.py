@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import patch
 from pathlib import Path
 
@@ -35,6 +36,12 @@ class FakeEnvironment:
 
 
 class AutonomousControllerTest(unittest.TestCase):
+    @patch("autonomous_controller_v20.MultiLevelLearningAgent.learn_from_web")
+    def test_permanent_403_defers_source_instead_of_crashing_controller(self, learn):
+        learn.side_effect = urllib.error.HTTPError("https://denied", 403, "Forbidden", {}, None)
+        environment = EnglishDevelopmentEnvironment("denied story")
+        self.assertEqual(environment.bootstrap["status"], "permanent_source_unavailable")
+        self.assertEqual(environment.gaps(), [])
     @patch("autonomous_controller_v20.run_japanese_learning")
     def test_japanese_path_uses_existing_boundary_learner_without_local_llm(self, run):
         run.return_value = {"boundary_learning": {"accepted_words": [

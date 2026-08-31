@@ -61,6 +61,9 @@ class ReadOnlyWebCache:
                 with urllib.request.urlopen(request, timeout=25) as response:
                     payload = response.read()
                 break
+            except urllib.error.HTTPError:
+                # 4xx/5xx policy belongs to the caller; blindly repeating a permanent 403 is harmful.
+                raise
             except (http.client.IncompleteRead, TimeoutError, ConnectionResetError,
                     urllib.error.URLError) as error:
                 last_error = error

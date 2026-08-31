@@ -2,6 +2,7 @@ import json
 import http.client
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -52,6 +53,16 @@ class WebCacheTest(unittest.TestCase):
                 self.assertEqual(cache.get_bytes("https://example.test/book", "test"), b"complete")
             self.assertEqual(mocked.call_count, 2)
             self.assertEqual(cache.stats()["network_requests"], 2)
+
+    def test_permanent_http_denial_is_not_retried(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = ReadOnlyWebCache(Path(directory))
+            denial = urllib.error.HTTPError("https://example.test/denied", 403,
+                                            "Forbidden", {}, None)
+            with patch("urllib.request.urlopen", side_effect=denial) as mocked:
+                with self.assertRaises(urllib.error.HTTPError):
+                    cache.get_bytes("https://example.test/denied", "test")
+            self.assertEqual(mocked.call_count, 1)
 
 
 if __name__ == "__main__":

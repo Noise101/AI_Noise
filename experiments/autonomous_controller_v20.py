@@ -8,6 +8,7 @@ import json
 import math
 import time
 import re
+import urllib.error
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -67,6 +68,12 @@ class EnglishDevelopmentEnvironment:
         self.global_event_baseline = sum(self.agent.story.event_counts.values())
         try:
             self.bootstrap = self.agent.learn_from_web(seed)
+        except urllib.error.HTTPError as error:
+            if error.code not in {403, 404, 410}:
+                raise
+            self.bootstrap = {"status": "permanent_source_unavailable",
+                              "http_status": error.code, "url": error.url,
+                              "reason": "source denied or removed; defer this curriculum"}
         except NetworkBudgetExceeded as error:
             # Preserve any observations collected before the hard budget boundary.
             self.bootstrap = {"status": "network_budget_exhausted", "error": str(error)}
@@ -197,6 +204,11 @@ class JapaneseDevelopmentEnvironment:
         self.seed = seed
         try:
             self.result = run_japanese_learning(seed, use_local_helper=False)
+        except urllib.error.HTTPError as error:
+            if error.code not in {403, 404, 410}:
+                raise
+            self.result = {"status": "permanent_source_unavailable",
+                           "http_status": error.code, "url": error.url}
         except NetworkBudgetExceeded as error:
             self.result = {"status": "network_budget_exhausted", "error": str(error)}
 
