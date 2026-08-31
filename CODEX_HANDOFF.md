@@ -34,6 +34,7 @@ Read `ARCHITECTURE.md` before changing the learning path. Its invariants are the
 - `v23-v25`: persistent curiosity grows across repeated unresolved encounters; mastery self-assessment targets the weakest measured language dimension; one bounded local-Ollama conversation per new curriculum supplies practice observations but always has evidence score zero.
 - `v26`: global curiosity is referenced through one compact prior file rather than copied into every seed. A tested compactor preserves local cycles/evidence, and the worker enforces a default 1 GB runtime budget every 100 rounds.
 - `v27`: one canonical global language memory merges vocabulary, accepted lexical/phrase/dialogue beliefs, event transitions, and concepts. It is loaded before each new story; seed reports retain only local deltas, and global mastery is no longer reset per seed.
+- `v28`: deterministic holdout evaluation registers event predictions before comparison and requires independent contexts plus a conservative confidence bound. The live corpus produced zero supported candidates (accuracy 0.0959, equal to baseline), correctly blocking a causal claim until event extraction improves.
 
 The latest live v18 run generated the query `きつね つる`, selected `イソップ童話集/きつねとつる`, and induced many repeated chunks. Only `きつね` and `つる` were corroborated by both Japanese Wiktionary and an exact/redirected Japanese Wikipedia page. `つる` remains meaning-ambiguous even though its boundary is accepted.
 
@@ -61,7 +62,7 @@ python3 local_worker_v21.py status
 
 ## Next concrete work
 
-Extend v20 beyond its current English word/phrase/Why execution paths to Japanese boundary/sense and concept gaps. Then run an evaluation matrix with previously unseen English and Japanese seed concepts. The required end-to-end gates remain: autonomous gap detection, generated query, read-only retrieval, multiple-source evaluation, concept/causal update, cited conclusion, and demonstrated self-correction.
+Replace the shallow event parser with a generic, transparent narrative-event representation that rejects metadata, normalizes auxiliaries, and keeps provenance. Evaluate it on unseen child-level English and Japanese sentences before rerunning v28. Do not loosen v28 thresholds merely to obtain a positive causal result.
 
 ## Safety and integrity
 

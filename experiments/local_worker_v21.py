@@ -20,6 +20,7 @@ from mastery_drive_v24 import assess_language_mastery
 from local_conversation_v25 import practice_once
 from compact_runtime_v26 import compact_runtime
 from global_memory_v27 import empty_memory, mastery_report, merge_report
+from causal_experiment_v28 import CausalExperimentEngine
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -224,6 +225,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
     report = report or {}
     state = report.get("state", read_json(runtime / "controller-state.json"))
     mastery = report.get("mastery") or read_json(runtime / "mastery.json")
+    causal_memory = read_json(runtime / "causal-memory.json")
     return {
         "phase": phase,
         "seed": seed,
@@ -244,6 +246,9 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "storage": read_json(runtime / "storage-status.json"),
         "global_memory": report.get("global_memory") or read_json(
             runtime / "global-language-memory.json").get("totals", {}),
+        "causal_evaluation": report.get("causal_evaluation") or {
+            key: causal_memory.get(key)
+            for key in ("supported_hypotheses", "evaluation", "limitations")},
     }
 
 
@@ -305,11 +310,21 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         reason = report.get("state", {}).get("stop_reason")
         memory_path = runtime / "global-language-memory.json"
         memory = read_json(memory_path) or empty_memory()
-        merge_report(memory, seed, report)
+        new_global_experience = merge_report(memory, seed, report)
         write_json(memory_path, memory)
+        if new_global_experience or not (runtime / "causal-memory.json").exists():
+            causal_report = CausalExperimentEngine(memory.get("event_transitions", {})).run()
+            write_json(runtime / "causal-memory.json", causal_report)
+        else:
+            causal_report = read_json(runtime / "causal-memory.json")
         mastery = assess_language_mastery(mastery_report(memory))
         report["mastery"] = mastery
         report["global_memory"] = memory.get("totals", {})
+        report["causal_evaluation"] = {
+            "supported_hypotheses": causal_report.get("supported_hypotheses", 0),
+            "evaluation": causal_report.get("evaluation", {}),
+            "limitations": causal_report.get("limitations", []),
+        }
         write_json(runtime / "mastery.json", mastery)
         curriculum["mastery_history"].append({"seed": seed, "round": round_number,
                                                "overall_score": mastery["overall_score"],

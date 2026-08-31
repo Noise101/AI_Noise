@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from local_worker_v21 import (_seed_from_title, enforce_storage_budget, is_transient_error,
-                              merge_curiosity, read_json, work, write_json)
+                              merge_curiosity, read_json, status_record, work, write_json)
 
 
 class LocalWorkerTest(unittest.TestCase):
@@ -31,6 +31,18 @@ class LocalWorkerTest(unittest.TestCase):
             write_json(path, {"phase": "learning"})
             self.assertEqual(read_json(path), {"phase": "learning"})
             self.assertFalse(path.with_suffix(".json.tmp").exists())
+
+    def test_status_exposes_falsifiable_causal_evaluation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            write_json(runtime / "causal-memory.json", {
+                "supported_hypotheses": 0,
+                "evaluation": {"accuracy": 0.1, "baseline_accuracy": 0.1},
+                "limitations": ["event parser is still shallow"],
+            })
+            status = status_record("seed", runtime, "learning", 1)
+            self.assertEqual(status["causal_evaluation"]["supported_hypotheses"], 0)
+            self.assertEqual(status["causal_evaluation"]["evaluation"]["accuracy"], 0.1)
 
     @patch("local_worker_v21.rediscover_from_history", return_value=[])
     @patch("local_worker_v21.discover_curriculum", return_value=[])
