@@ -13,6 +13,7 @@ import sys
 import time
 import traceback
 import urllib.parse
+import shutil
 from pathlib import Path
 
 from web_cache import WEB_CACHE, NetworkBudgetExceeded
@@ -43,6 +44,11 @@ CURRICULUM_METADATA = {"index", "preface", "introduction", "appendix", "volume",
                        "act", "scene"}
 MAX_FRONTIER = 300
 MAX_MASTERY_HISTORY = 500
+GIB = 1024 ** 3
+DEFAULT_COMPACTION_BYTES = 20 * GIB
+DEFAULT_MIN_FREE_BYTES = 50 * GIB
+DEFAULT_RESUME_FREE_BYTES = 60 * GIB
+DEFAULT_ABNORMAL_GROWTH_BYTES_PER_HOUR = 3 * GIB
 DEVELOPMENTAL_SHELVES = (
     ("Category:Fables", 4.0),
     ("Category:Fairy tales", 3.0),
@@ -92,15 +98,67 @@ def runtime_bytes(runtime: Path) -> int:
 
 
 def enforce_storage_budget(runtime: Path, max_bytes: int) -> dict:
-    before = runtime_bytes(runtime)
+    """Apply the staged storage policy; max_bytes is the compaction threshold."""
+    previous = read_json(runtime / "storage-status.json")
+    checked_epoch = time.time()
+    runtime_before = runtime_bytes(runtime)
+    cache_dir = WEB_CACHE.cache_dir if runtime.resolve() == DEFAULT_RUNTIME.resolve() else None
+    cache_before = runtime_bytes(cache_dir) if cache_dir and cache_dir.exists() else 0
+    before = runtime_before + cache_before
+    warning_bytes = max_bytes // 2
+    disk_free = shutil.disk_usage(runtime).free
+    previous_epoch = previous.get("checked_epoch")
+    # Old v26 records counted only .local; do not mistake newly included cache bytes for growth.
+    previous_managed = previous.get("managed_bytes")
+    elapsed_hours = ((checked_epoch - previous_epoch) / 3600
+                     if previous_epoch and checked_epoch > previous_epoch else None)
+    growth = (before - previous_managed if previous_managed is not None else None)
+    growth_per_hour = (growth / elapsed_hours if elapsed_hours and growth is not None else None)
+    abnormal_growth = bool(growth_per_hour is not None
+                           and growth_per_hour >= DEFAULT_ABNORMAL_GROWTH_BYTES_PER_HOUR)
+    previous_paused = bool(previous.get("external_acquisition_paused"))
+    previous_reasons = set(previous.get("pause_reasons", []))
+    low_free = disk_free < DEFAULT_MIN_FREE_BYTES
+    low_free_hold = (previous_paused and "low_disk_free" in previous_reasons
+                     and disk_free < DEFAULT_RESUME_FREE_BYTES)
+    pause_reasons = []
+    if low_free or low_free_hold:
+        pause_reasons.append("low_disk_free")
+    if abnormal_growth:
+        pause_reasons.append("abnormal_growth")
     compacted = None
-    if before > max_bytes:
+    last_compaction_epoch = previous.get("last_compaction_epoch")
+    compaction_due = (before >= max_bytes and
+                      (last_compaction_epoch is None
+                       or checked_epoch - last_compaction_epoch >= 24 * 3600))
+    if compaction_due:
         compacted = compact_runtime(runtime, True)
-    after = runtime_bytes(runtime)
-    record = {"checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-              "before_bytes": before, "after_bytes": after, "limit_bytes": max_bytes,
+        last_compaction_epoch = checked_epoch
+    runtime_after = runtime_bytes(runtime)
+    cache_after = runtime_bytes(cache_dir) if cache_dir and cache_dir.exists() else 0
+    after = runtime_after + cache_after
+    record = {"checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(checked_epoch)),
+              "checked_epoch": checked_epoch,
+              "runtime_bytes": runtime_after, "reconstructible_cache_bytes": cache_after,
+              "managed_bytes": after, "before_bytes": before, "after_bytes": after,
+              "warning_bytes": warning_bytes, "compaction_bytes": max_bytes,
+              "limit_bytes": max_bytes, "warning": after >= warning_bytes,
+              "compaction_recommended": after >= max_bytes,
+              "compaction_due": compaction_due,
               "compacted": compacted is not None,
-              "bytes_reclaimed": 0 if not compacted else compacted["bytes_reclaimed"]}
+              "last_compaction_epoch": last_compaction_epoch,
+              "bytes_reclaimed": 0 if not compacted else compacted["bytes_reclaimed"],
+              "disk_free_bytes": disk_free,
+              "minimum_free_bytes": DEFAULT_MIN_FREE_BYTES,
+              "resume_free_bytes": DEFAULT_RESUME_FREE_BYTES,
+              "growth_bytes_since_check": growth,
+              "growth_bytes_per_hour": None if growth_per_hour is None else round(growth_per_hour),
+              "abnormal_growth_bytes_per_hour": DEFAULT_ABNORMAL_GROWTH_BYTES_PER_HOUR,
+              "abnormal_growth": abnormal_growth,
+              "external_acquisition_paused": bool(pause_reasons),
+              "pause_reasons": pause_reasons,
+              "protected_memories": ["global-language-memory", "error-memory",
+                                       "epistemic-observations", "visual-memory"]}
     write_json(runtime / "storage-status.json", record)
     return record
 
@@ -407,7 +465,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
 
 def work(seed: str, runtime: Path, max_rounds: int, interval: float,
          steps: int, seconds: float, network: int, local_conversation: bool = True,
-         max_runtime_mb: int = 1024) -> dict:
+         max_runtime_mb: int = 20 * 1024) -> dict:
     runtime.mkdir(parents=True, exist_ok=True)
     status_path = runtime / "status.json"
     stop_path = runtime / "STOP"
@@ -423,7 +481,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
     curriculum.setdefault("conversation_practiced_seeds", [])
     seed = curriculum["current_seed"]
     write_json(curriculum_path, curriculum)
-    enforce_storage_budget(runtime, max_runtime_mb * 1024 * 1024)
+    storage_status = enforce_storage_budget(runtime, max_runtime_mb * 1024 * 1024)
     latest = status_record(seed, runtime, "starting", 0)
     write_json(status_path, latest)
     round_number = 0
@@ -432,14 +490,15 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         round_number += 1
         if round_number > 1 and round_number % 100 == 0:
             write_json(status_path, status_record(seed, runtime, "storage_check", round_number - 1))
-            enforce_storage_budget(runtime, max_runtime_mb * 1024 * 1024)
+            storage_status = enforce_storage_budget(runtime, max_runtime_mb * 1024 * 1024)
         if stop_path.exists():
             latest = status_record(seed, runtime, "stopped_by_user", round_number - 1)
             write_json(status_path, latest)
             return latest
         write_json(status_path, status_record(seed, runtime, "learning", round_number - 1))
+        effective_network = 0 if storage_status.get("external_acquisition_paused") else network
         try:
-            report = run_cycle(seed, runtime, steps, seconds, network,
+            report = run_cycle(seed, runtime, steps, seconds, effective_network,
                                runtime / "curiosity-priors.json",
                                runtime / "global-language-memory.json")
         except Exception as error:
@@ -489,7 +548,9 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         visual_path = runtime / "visual-memory.json"
         visual = read_json(visual_path) or empty_visual_memory()
         enqueue_visual(visual, list(memory.get("merged_seeds", [])))
-        visual_result = acquire_visual(visual, runtime / "visual" / "images")
+        visual_result = ({"status": "storage_policy_paused", **visual.get("summary", {})}
+                         if storage_status.get("external_acquisition_paused") else
+                         acquire_visual(visual, runtime / "visual" / "images"))
         write_json(visual_path, visual)
         report["visual_memory"] = visual.get("summary", {})
         report["visual_observation"] = visual_result
@@ -591,7 +652,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             curriculum.setdefault(url_bucket, [])
             curriculum[url_bucket] = sorted(set(curriculum[url_bucket]) | set(quality_urls))
             visited = set(curriculum["completed_seeds"]) | set(curriculum["deferred_seeds"])
-            discovered = discover_curriculum(report, visited, network)
+            discovered = discover_curriculum(report, visited, effective_network)
             known = {item["seed"] for item in curriculum["frontier"]}
             curriculum["frontier"].extend(item for item in discovered if item["seed"] not in known)
             curriculum["frontier"] = [item for item in curriculum["frontier"]
@@ -607,10 +668,11 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             curriculum["frontier"] = sorted(
                 curriculum["frontier"], key=lambda item: (-item.get("score", 0), item["seed"]))[:MAX_FRONTIER]
             if not curriculum["frontier"]:
-                curriculum["frontier"].extend(rediscover_from_history(runtime, visited, network))
+                curriculum["frontier"].extend(
+                    rediscover_from_history(runtime, visited, effective_network))
             if not curriculum["frontier"]:
                 curriculum["frontier"].extend(
-                    discover_from_developmental_shelves(visited, network))
+                    discover_from_developmental_shelves(visited, effective_network))
             if curriculum["frontier"]:
                 selected = curriculum["frontier"].pop(0)
                 curriculum["transitions"].append({"from": seed, "to": selected["seed"],
@@ -639,7 +701,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
 
 def supervise(seed: str, runtime: Path, max_rounds: int, interval: float,
               steps: int, seconds: float, network: int, local_conversation: bool = True,
-              max_runtime_mb: int = 1024) -> dict:
+              max_runtime_mb: int = 20 * 1024) -> dict:
     """Keep autonomous work alive unless STOP is explicitly requested."""
     stop_path = runtime / "STOP"
     retry_count = 0
@@ -684,7 +746,8 @@ def main() -> None:
         work_parser.add_argument("--seconds", type=float, default=60)
         work_parser.add_argument("--network", type=int, default=8)
         work_parser.add_argument("--no-local-conversation", action="store_true")
-        work_parser.add_argument("--max-runtime-mb", type=int, default=1024)
+        work_parser.add_argument("--max-runtime-mb", type=int, default=20 * 1024,
+                                 help="redundant-state compaction threshold (default: 20480 MB)")
     run_parser = subparsers.add_parser("run", help="run in the foreground")
     add_work_arguments(run_parser)
     start_parser = subparsers.add_parser("start", help="start once and keep working in the background")

@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 import urllib.parse
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,6 +25,30 @@ class LocalWorkerTest(unittest.TestCase):
             result = enforce_storage_budget(runtime, 1000)
             self.assertTrue(result["compacted"])
             self.assertLess(result["after_bytes"], result["before_bytes"])
+
+    @patch("local_worker_v21.shutil.disk_usage",
+           return_value=SimpleNamespace(free=100 * 1024 ** 3))
+    @patch("local_worker_v21.runtime_bytes", return_value=4 * 1024 ** 3)
+    @patch("local_worker_v21.time.time", return_value=7200)
+    def test_abnormal_three_gib_per_hour_pauses_external_acquisition(
+            self, _time, _bytes, _disk):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            write_json(runtime / "storage-status.json",
+                       {"checked_epoch": 3600, "managed_bytes": 0})
+            result = enforce_storage_budget(runtime, 20 * 1024 ** 3)
+        self.assertTrue(result["abnormal_growth"])
+        self.assertTrue(result["external_acquisition_paused"])
+        self.assertIn("abnormal_growth", result["pause_reasons"])
+
+    @patch("local_worker_v21.shutil.disk_usage",
+           return_value=SimpleNamespace(free=40 * 1024 ** 3))
+    def test_low_free_space_pauses_only_external_acquisition(self, _disk):
+        with tempfile.TemporaryDirectory() as directory:
+            result = enforce_storage_budget(Path(directory), 20 * 1024 ** 3)
+        self.assertTrue(result["external_acquisition_paused"])
+        self.assertIn("low_disk_free", result["pause_reasons"])
+        self.assertIn("error-memory", result["protected_memories"])
     def test_classifies_network_timeout_but_not_programming_error(self):
         self.assertTrue(is_transient_error(TimeoutError("read timed out")))
         self.assertTrue(is_transient_error(RuntimeError("IncompleteRead(100 bytes read)")))
