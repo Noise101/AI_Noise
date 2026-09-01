@@ -41,6 +41,7 @@ from micro_world_v41 import empty_world_memory, learn_steps as learn_micro_world
 from tool_world_v42 import empty_tool_memory, learn_episodes as learn_tool_world
 from social_development_v44 import empty_stage_three_memory, learn_stage_three
 from cooperative_world_v45 import empty_cooperative_memory, learn_cooperation
+from abstraction_world_v46 import empty_abstraction_memory, learn_abstractions
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -103,6 +104,14 @@ def _competency_ja(social_world: dict, name: str) -> str:
     return f"{correct}/{total}（{percent(correct, total)}）"
 
 
+def _competency_comparison_ja(world: dict, name: str) -> str:
+    result = world.get("competencies", {}).get(name, {})
+    correct, total = result.get("correct", 0), result.get("total", 0)
+    baseline = result.get("baseline_correct", 0)
+    judgement = "基準超え" if correct > baseline else ("同等" if correct == baseline else "基準未満")
+    return f"{correct}/{total}、単純基準 {baseline}/{total}（{judgement}）"
+
+
 def render_human_status(status: dict, now_epoch: float | None = None,
                         process_alive: bool | None = None) -> str:
     now_epoch = time.time() if now_epoch is None else now_epoch
@@ -147,6 +156,7 @@ def render_human_status(status: dict, now_epoch: float | None = None,
     tool_world = status.get("tool_world", {})
     social_world = status.get("social_world", {})
     cooperative_world = status.get("cooperative_world", {})
+    abstraction_world = status.get("abstraction_world", {})
     scaffold = status.get("epistemic_scaffold", {})
     storage = status.get("storage", {})
     quality = status.get("developmental_quality")
@@ -201,6 +211,22 @@ def render_human_status(status: dict, now_epoch: float | None = None,
              f"規範発見       : {_competency_ja(cooperative_world, 'norm_discovery')}",
              f"公平性         : {_competency_ja(cooperative_world, 'fairness')}",
              f"検証する対話   : {_competency_ja(cooperative_world, 'verified_dialogue')}",
+             f"第五段階       : {abstraction_world.get('status', '第四段階の完了待ち')}",
+             f"抽象化の実験   : {abstraction_world.get('abstraction_experiments', 0):,}回",
+             f"抽象予測の失敗 : {abstraction_world.get('prediction_errors', 0):,}回",
+             f"能力合格       : {abstraction_world.get('competencies_passed', 0)}/{abstraction_world.get('competencies_total', 11)}",
+             f"再利用抽象規則 : {abstraction_world.get('reusable_abstract_rules', 0)}件",
+             f"特徴比較       : {_competency_ja(abstraction_world, 'feature_comparison')}",
+             f"概念形成       : {_competency_ja(abstraction_world, 'concept_formation')}",
+             f"概念階層       : {_competency_ja(abstraction_world, 'concept_hierarchy')}",
+             f"関係抽象化     : {_competency_ja(abstraction_world, 'relation_abstraction')}",
+             f"出来事抽象化   : {_competency_ja(abstraction_world, 'event_abstraction')}",
+             f"因果転用       : {_competency_comparison_ja(abstraction_world, 'causal_transfer')}",
+             f"類推           : {_competency_ja(abstraction_world, 'analogy')}",
+             f"構造連想       : {_competency_comparison_ja(abstraction_world, 'structural_association')}",
+             f"自己修正       : {_competency_comparison_ja(abstraction_world, 'self_revision')}",
+             f"表現選択       : {_competency_ja(abstraction_world, 'representation_selection')}",
+             f"統合世界モデル : {_competency_ja(abstraction_world, 'integrated_world_model')}",
              "", "現在の能力評価", "-" * 34]
     ac, at = association_eval.get("correct", 0), association_eval.get("total", 0)
     ab = association_eval.get("baseline_correct", 0)
@@ -363,7 +389,8 @@ def enforce_storage_budget(runtime: Path, max_bytes: int) -> dict:
               "protected_memories": ["global-language-memory", "error-memory",
                                        "epistemic-observations", "visual-memory",
                                        "micro-world-memory", "tool-world-memory",
-                                       "social-world-memory", "cooperative-world-memory"]}
+                                       "social-world-memory", "cooperative-world-memory",
+                                       "abstraction-world-memory"]}
     write_json(runtime / "storage-status.json", record)
     return record
 
@@ -729,6 +756,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
     tool_world = read_json(runtime / "tool-world-memory.json")
     social_world = read_json(runtime / "social-world-memory.json")
     cooperative_world = read_json(runtime / "cooperative-world-memory.json")
+    abstraction_world = read_json(runtime / "abstraction-world-memory.json")
     return {
         "phase": phase,
         "seed": seed,
@@ -779,6 +807,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "tool_world": report.get("tool_world") or tool_world.get("summary", {}),
         "social_world": report.get("social_world") or social_world.get("summary", {}),
         "cooperative_world": report.get("cooperative_world") or cooperative_world.get("summary", {}),
+        "abstraction_world": report.get("abstraction_world") or abstraction_world.get("summary", {}),
         "visual_observation": report.get("visual_observation"),
         "developmental_quality": report.get("developmental_quality"),
         "global_memory_admission": report.get("global_memory_admission"),
@@ -843,6 +872,12 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                                if social_summary.get("status") == "stage_3_complete" else
                                {"stage": 4, "status": "waiting_for_stage_3"})
         write_json(cooperative_path, cooperative_memory)
+        abstraction_path = runtime / "abstraction-world-memory.json"
+        abstraction_memory = read_json(abstraction_path) or empty_abstraction_memory()
+        abstraction_summary = (learn_abstractions(abstraction_memory, 12)
+                               if cooperative_summary.get("status") == "stage_4_complete" else
+                               {"stage": 5, "status": "waiting_for_stage_4"})
+        write_json(abstraction_path, abstraction_memory)
         try:
             report = run_cycle(seed, runtime, steps, seconds, effective_network,
                                runtime / "curiosity-priors.json",
@@ -869,6 +904,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         report["tool_world"] = tool_summary
         report["social_world"] = social_summary
         report["cooperative_world"] = cooperative_summary
+        report["abstraction_world"] = abstraction_summary
         reason = report.get("state", {}).get("stop_reason")
         audit_path = runtime / "parser-audit-memory.json"
         parser_audit_memory = read_json(audit_path) or rebuild_audit(runtime)
