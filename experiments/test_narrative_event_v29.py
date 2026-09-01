@@ -42,6 +42,12 @@ class NarrativeEventExtractorTest(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertEqual(result.reason, "invalid_structural_subject")
 
+    def test_extracts_ordered_events_from_multiple_action_clauses(self):
+        results = self.extractor.extract_multiple(
+            "The fox pushed the tree, the bird flew away, and the fruit fell down.")
+        self.assertEqual([item.event.action for item in results], ["pushed", "flew", "fell"])
+        self.assertEqual([item.event.subject for item in results], ["fox", "bird", "fruit"])
+
 
 if __name__ == "__main__":
     unittest.main()

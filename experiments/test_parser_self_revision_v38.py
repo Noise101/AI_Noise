@@ -1,7 +1,7 @@
 import unittest
 
 from narrative_event_v29 import NarrativeEventExtractor
-from parser_self_revision_v38 import evaluate_policy, revise_parser
+from parser_self_revision_v38 import evaluate_policy, held_out_source, revise_parser
 
 
 class ParserSelfRevisionTest(unittest.TestCase):
@@ -19,11 +19,14 @@ class ParserSelfRevisionTest(unittest.TestCase):
     def test_no_policy_is_adopted_without_holdout_improvement(self):
         frames = {}
         previous = None
-        for index in range(40):
-            identity = f"f{index}"
-            next_id = f"f{index + 1}" if index < 39 else None
-            frames[identity] = {"observation": {"sentence": f"The fox saw food {index}."},
-                                "sequence": {"next_frame": next_id}}
+        urls = [f"https://story/{index}" for index in range(30)]
+        self.assertTrue(any(held_out_source(url) for url in urls))
+        for index, url in enumerate(urls):
+            left, right = f"f{index}a", f"f{index}b"
+            frames[left] = {"observation": {"sentence": "The fox saw food.", "source_url": url},
+                            "sequence": {"previous_frame": None, "next_frame": right}}
+            frames[right] = {"observation": {"sentence": "The fox took food.", "source_url": url},
+                             "sequence": {"previous_frame": left, "next_frame": None}}
         report = revise_parser(frames, previous)
         self.assertEqual(report["selected_policy"], "baseline")
         self.assertEqual(report["selection_status"],

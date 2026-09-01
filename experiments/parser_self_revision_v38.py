@@ -12,8 +12,8 @@ from narrative_event_v29 import NarrativeEventExtractor
 POLICIES = ("baseline", "clause_head", "nearest_compact", "compact_roles")
 
 
-def held_out(left_id: str, right_id: str) -> bool:
-    return hashlib.sha256(f"parser:{left_id}->{right_id}".encode()).digest()[0] % 5 == 0
+def held_out_source(source_url: str) -> bool:
+    return hashlib.sha256(f"parser-source:{source_url}".encode()).digest()[0] % 5 == 0
 
 
 def predictive_key(event) -> str:
@@ -57,8 +57,9 @@ def evaluate_policy(frames: dict, policy: str) -> dict:
         next_id = frame.get("sequence", {}).get("next_frame")
         if identity not in parsed or next_id not in parsed:
             continue
+        source_url = frame.get("observation", {}).get("source_url", "")
         pair = (identity, next_id, parsed[identity], parsed[next_id])
-        (test if held_out(identity, next_id) else train).append(pair)
+        (test if held_out_source(source_url) else train).append(pair)
     choices: dict[str, Counter[str]] = defaultdict(Counter)
     fallback = Counter()
     for _, _, prior, outcome in train:
@@ -79,7 +80,8 @@ def evaluate_policy(frames: dict, policy: str) -> dict:
                        "context": context, "predicted": predicted,
                        "observed": observed, "correct": success})
     total = len(test)
-    return {"policy": policy, "parsed_frames": len(parsed), "available_frames": len(frames),
+    return {"policy": policy, "split": "entire source held out; no story crosses train and test",
+            "parsed_frames": len(parsed), "available_frames": len(frames),
             "parse_coverage": round(len(parsed) / len(frames), 4) if frames else 0.0,
             "correct": correct, "baseline_correct": baseline_correct, "total": total,
             "accuracy": round(correct / total, 4) if total else 0.0,
@@ -88,9 +90,29 @@ def evaluate_policy(frames: dict, policy: str) -> dict:
             "trials": trials[:1000]}
 
 
-def revise_parser(frames: dict, previous: dict | None = None) -> dict:
+def revise_parser(frames: dict, previous: dict | None = None,
+                  audit_summary: dict | None = None,
+                  experience_summary: dict | None = None) -> dict:
     previous = previous or {}
-    evaluations = [evaluate_policy(frames, policy) for policy in POLICIES]
+    audit_summary, experience_summary = audit_summary or {}, experience_summary or {}
+    reasons = audit_summary.get("rejection_reasons", {})
+    failure_causes = experience_summary.get("failure_causes", {})
+    candidates = {"baseline"}
+    generated = []
+    if reasons.get("invalid_structural_subject", 0) or reasons.get("missing_subject", 0):
+        candidates.update({"clause_head", "compact_roles"})
+        generated.append({"component": "subject_selector", "proposal": "clause_head",
+                          "because": "subject-related parser rejections were observed"})
+    if (failure_causes.get("object_mismatch", 0)
+            or failure_causes.get("action_and_object_mismatch", 0)):
+        candidates.update({"nearest_compact", "compact_roles"})
+        generated.append({"component": "object_selector", "proposal": "compact_object",
+                          "because": "held-out predictions mismatched their object role"})
+    if len(candidates) == 1:
+        candidates.update(POLICIES[1:])
+        generated.append({"component": "exploration", "proposal": "all_bounded_policies",
+                          "because": "no specific failure signature was available"})
+    evaluations = [evaluate_policy(frames, policy) for policy in POLICIES if policy in candidates]
     baseline = evaluations[0]
     eligible = [item for item in evaluations if item["policy"] != "baseline"
                 and item["total"] >= 20
@@ -117,5 +139,6 @@ def revise_parser(frames: dict, previous: dict | None = None) -> dict:
             "evaluations": [{key: value for key, value in item.items() if key != "trials"}
                             for item in evaluations],
             "counterexamples": selected["trials"][-500:],
-            "failure_causes": dict(failures), "revisions": revisions[-100:],
+            "failure_causes": dict(failures), "candidate_generation": generated,
+            "revisions": revisions[-100:],
             "warning": "parser policy changes only after holdout improvement; parsed events remain observations"}

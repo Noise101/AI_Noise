@@ -34,6 +34,8 @@ from error_memory_v35 import empty_error_memory, update_error_memory
 from visual_memory_v36 import acquire_one as acquire_visual, empty_visual_memory, enqueue as enqueue_visual
 from experience_revision_v37 import ExperienceRevisionEngine
 from parser_self_revision_v38 import revise_parser
+from parser_audit_memory_v39 import (empty_audit_memory, ingest_report as audit_parser_report,
+                                     rebuild_audit)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -128,6 +130,7 @@ def render_human_status(status: dict, now_epoch: float | None = None,
     revision_eval = revision.get("evaluation", {})
     parser_revision = status.get("parser_revision", {})
     parser_eval = parser_revision.get("selected_evaluation", {}) or {}
+    parser_audit = status.get("parser_audit", {})
     scaffold = status.get("epistemic_scaffold", {})
     storage = status.get("storage", {})
     quality = status.get("developmental_quality")
@@ -163,6 +166,7 @@ def render_human_status(status: dict, now_epoch: float | None = None,
         f"失敗原因分析   : {revision.get('prediction_errors', 0):,}件",
         f"解析方式       : {parser_revision.get('selected_policy') or 'baseline'}（{parser_revision.get('selection_status') or '評価前'}）",
         f"解析方式の評価 : 正解 {parser_eval.get('correct', 0)}/{parser_eval.get('total', 0)}、解析範囲 {100 * parser_eval.get('parse_coverage', 0):.1f}%",
+        f"解析監査       : {parser_audit.get('audited_sentences', 0):,}文（隔離した不採用 {parser_audit.get('quarantined_rejections', 0):,}）",
         f"最優先の弱点   : {DIMENSION_JA.get(mastery.get('weakest_dimension'), mastery.get('weakest_dimension') or '未判定')}",
         "", "間違いの記憶", "-" * 34,
         f"認識した誤り   : {errors.get('recognized_errors', 0):,}件",
@@ -505,6 +509,29 @@ def rediscover_from_history(runtime: Path, visited: set[str], network: int) -> l
     return sorted(found.values(), key=lambda item: (-item["score"], item["seed"]))
 
 
+def parser_counterexample_candidate(audit_memory: dict, visited: set[str]) -> dict | None:
+    """Turn an actual quarantined failure into a request for a nearby observation."""
+    records = [item for item in audit_memory.get("records", {}).values()
+               if item.get("quarantined") and item.get("sentence")]
+    reason_counts = audit_memory.get("summary", {}).get("rejection_reasons", {})
+    ranked_reasons = [name for name, _ in sorted(reason_counts.items(),
+                                                  key=lambda item: (-item[1], item[0]))]
+    for reason in ranked_reasons:
+        for item in reversed(records):
+            if not str(item.get("reason", "")).startswith(reason):
+                continue
+            words = [word.lower() for word in WORD.findall(item["sentence"])
+                     if word.lower() not in TITLE_STOP | CURRICULUM_METADATA and len(word) >= 3]
+            seed = " ".join(list(dict.fromkeys(words))[:4])
+            if seed and seed not in visited and valid_curriculum_seed(seed):
+                return {"seed": seed, "score": 5.5,
+                        "reason": f"seek a new observation resembling parser failure: {reason}",
+                        "parent_url": item.get("source_url"),
+                        "parser_failure_reason": reason,
+                        "audit_id": item.get("audit_id")}
+    return None
+
+
 def discover_from_developmental_shelves(visited: set[str], network: int) -> list[dict]:
     """Find unread child-level titles after the evidence-linked frontier is empty.
 
@@ -570,6 +597,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
     visual_memory = read_json(runtime / "visual-memory.json")
     experience_revision = read_json(runtime / "experience-revision.json")
     parser_revision = read_json(runtime / "parser-revision.json")
+    parser_audit = read_json(runtime / "parser-audit-memory.json")
     return {
         "phase": phase,
         "seed": seed,
@@ -613,6 +641,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
             key: parser_revision.get(key) for key in
             ("selected_policy", "selection_status", "selected_evaluation",
              "failure_causes", "revisions")},
+        "parser_audit": report.get("parser_audit") or parser_audit.get("summary", {}),
         "visual_observation": report.get("visual_observation"),
         "developmental_quality": report.get("developmental_quality"),
         "global_memory_admission": report.get("global_memory_admission"),
@@ -678,6 +707,11 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             continue
         consecutive_transient_errors = 0
         reason = report.get("state", {}).get("stop_reason")
+        audit_path = runtime / "parser-audit-memory.json"
+        parser_audit_memory = read_json(audit_path) or rebuild_audit(runtime)
+        audit_parser_report(parser_audit_memory, seed, report)
+        write_json(audit_path, parser_audit_memory)
+        report["parser_audit"] = parser_audit_memory.get("summary", {})
         memory_path = runtime / "global-language-memory.json"
         memory = read_json(memory_path) or empty_memory()
         developmentally_known_words = {form for form, item in memory.get("words", {}).items()
@@ -705,7 +739,10 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         report["epistemic_scaffold"] = scaffold["summary"]
         previous_parser = read_json(runtime / "parser-revision.json")
         if new_global_experience or not previous_parser:
-            parser_report = revise_parser(scaffold.get("frames", {}), previous_parser)
+            parser_report = revise_parser(
+                scaffold.get("frames", {}), previous_parser,
+                parser_audit_memory.get("summary", {}),
+                read_json(runtime / "experience-revision.json").get("summary", {}))
             write_json(runtime / "parser-revision.json", parser_report)
             os.environ["AI_NOISE_PARSER_POLICY"] = parser_report["selected_policy"]
         else:
@@ -848,6 +885,10 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             if not curriculum["frontier"]:
                 curriculum["frontier"].extend(
                     rediscover_from_history(runtime, visited, effective_network))
+            if not curriculum["frontier"]:
+                parser_candidate = parser_counterexample_candidate(parser_audit_memory, visited)
+                if parser_candidate:
+                    curriculum["frontier"].append(parser_candidate)
             if not curriculum["frontier"]:
                 curriculum["frontier"].extend(
                     discover_from_developmental_shelves(visited, effective_network))

@@ -26,7 +26,7 @@ VERBS = {
     "answer", "answered", "leave", "left", "learn", "learnt", "refuse", "refused",
     "place", "placed", "hang", "hung", "resort", "resorted", "push", "pushed", "sing",
     "sang", "shine", "shone", "sees", "jumps", "waits", "pushes", "eats", "falls",
-    "grows", "shines", "sings",
+    "grows", "shines", "sings", "fly", "flew", "flies",
     "become", "became", "change", "changed",
 }
 SUBJECT_STOP = {"at", "by", "for", "from", "in", "into", "of", "on", "over", "to", "under",
@@ -129,4 +129,41 @@ class NarrativeEventExtractor:
                                       if token not in {"him", "her", "it", "them"}), recent_object)
             elif result.reason.startswith("metadata") or result.reason == "heading":
                 recent_subject = recent_object = None
+        return results
+
+    def extract_multiple(self, sentence: str, recent_subject: str | None = None,
+                         recent_object: str | None = None) -> list[EventExtraction]:
+        """Split explicit action clauses, retaining the original result when splitting is unsafe."""
+        clauses = [part.strip(" ,;:-") for part in re.split(r"\s*;\s*|\s*,\s*|\s+and\s+", sentence,
+                                                            flags=re.IGNORECASE)
+                   if part.strip(" ,;:-")]
+        if len(clauses) < 2:
+            return [self.extract(sentence, recent_subject, recent_object)]
+        results = []
+        subject, obj = recent_subject, recent_object
+        for clause in clauses:
+            result = self.extract(clause, subject, obj)
+            if result.accepted and result.event:
+                results.append(result)
+                subject = result.event.subject
+                tokens = result.event.object.split("_")
+                obj = next((token for token in reversed(tokens)
+                            if token not in {"him", "her", "it", "them"}), obj)
+        if len(results) >= 2:
+            return results
+        return [self.extract(sentence, recent_subject, recent_object)]
+
+    def extract_multi_sequence(self, sentences: list[str]) -> list[EventExtraction]:
+        results = []
+        recent_subject = recent_object = None
+        for sentence in sentences:
+            extracted = self.extract_multiple(sentence, recent_subject, recent_object)
+            results.extend(extracted)
+            for result in extracted:
+                if result.accepted and result.event:
+                    recent_subject = result.event.subject
+                    tokens = result.event.object.split("_")
+                    recent_object = next((token for token in reversed(tokens)
+                                          if token not in {"him", "her", "it", "them"}),
+                                         recent_object)
         return results
