@@ -134,7 +134,8 @@ def evaluate_unseen(models: list[str]) -> dict:
 
 
 def learn_steps(memory: dict, steps: int = 3) -> dict:
-    if memory.get("summary", {}).get("status") == "stage_3_mastered":
+    if memory.get("summary", {}).get("status") in {
+            "stage_3_mastered", "stage_3_foundation_mastered"}:
         return memory["summary"]
     for _ in range(max(0, steps)):
         before = surviving_models(memory)
@@ -167,12 +168,13 @@ def learn_steps(memory: dict, steps: int = 3) -> dict:
                 and evaluation["accuracy"] == 1.0 and errors >= 1
                 and (evaluation["false_belief_total"] == 0
                      or evaluation["false_belief_correct"] == evaluation["false_belief_total"]))
-    memory["summary"] = {"stage": 3, "status": "stage_3_mastered" if mastered else "learning",
+    memory["summary"] = {"stage": 3,
+                         "status": "stage_3_foundation_mastered" if mastered else "learning",
                          "social_experiments": len(memory.get("observations", [])),
                          "prediction_errors": errors,
                          "model_revisions": len(memory.get("revision_history", [])),
                          "surviving_other_models": len(models), "unseen_social_tasks": evaluation,
                          "partner_private_belief_visible": False, "remote_llm_calls": 0,
-                         "next_action": ("retain mastery and await authorized stage 4" if mastered else
+                         "next_action": ("continue with the rest of stage 3" if mastered else
                                          "test where candidate models predict different partner actions")}
     return memory["summary"]

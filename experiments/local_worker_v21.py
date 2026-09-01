@@ -39,7 +39,7 @@ from parser_audit_memory_v39 import (empty_audit_memory, ingest_report as audit_
                                      mark_curriculum_admission, rebuild_audit)
 from micro_world_v41 import empty_world_memory, learn_steps as learn_micro_world
 from tool_world_v42 import empty_tool_memory, learn_episodes as learn_tool_world
-from social_world_v43 import empty_social_memory, learn_steps as learn_social_world
+from social_development_v44 import empty_stage_three_memory, learn_stage_three
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -94,6 +94,12 @@ def human_bytes(value: int | float | None) -> str:
 
 def percent(correct: int | float, total: int | float) -> str:
     return "評価前" if not total else f"{100 * correct / total:.1f}%"
+
+
+def _competency_ja(social_world: dict, name: str) -> str:
+    result = social_world.get("competencies", {}).get(name, {})
+    correct, total = result.get("correct", 0), result.get("total", 0)
+    return f"{correct}/{total}（{percent(correct, total)}）"
 
 
 def render_human_status(status: dict, now_epoch: float | None = None,
@@ -172,10 +178,13 @@ def render_human_status(status: dict, now_epoch: float | None = None,
              f"第三段階       : {social_world.get('status', '第二段階の合格待ち')}",
              f"他者理解の実験 : {social_world.get('social_experiments', 0):,}回",
              f"他者予測の失敗 : {social_world.get('prediction_errors', 0):,}回",
-             f"他者モデル修正 : {social_world.get('model_revisions', 0):,}回",
-             f"残った他者モデル: {social_world.get('surviving_other_models', 0):,}個",
-             f"未見の社会課題 : {social_world.get('unseen_social_tasks', {}).get('correct', 0)}/{social_world.get('unseen_social_tasks', {}).get('total', 0)}（{percent(social_world.get('unseen_social_tasks', {}).get('correct', 0), social_world.get('unseen_social_tasks', {}).get('total', 0))}）",
-             f"誤信念の予測   : {social_world.get('unseen_social_tasks', {}).get('false_belief_correct', 0)}/{social_world.get('unseen_social_tasks', {}).get('false_belief_total', 0)}",
+             f"能力合格       : {social_world.get('competencies_passed', 0)}/{social_world.get('competencies_total', 5)}",
+             f"継続記憶する他者: {social_world.get('persistent_agents', 0)}人",
+             f"誤信念         : {_competency_ja(social_world, 'belief')}",
+             f"好み・目的     : {_competency_ja(social_world, 'identity_profiles')}",
+             f"協力・約束     : {_competency_ja(social_world, 'cooperation_and_promises')}",
+             f"複数人への伝達 : {_competency_ja(social_world, 'multi_agent_communication')}",
+             f"相手別の説明   : {_competency_ja(social_world, 'adaptive_explanation')}",
              "", "現在の能力評価", "-" * 34]
     ac, at = association_eval.get("correct", 0), association_eval.get("total", 0)
     ab = association_eval.get("baseline_correct", 0)
@@ -805,8 +814,8 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                         {"stage": 2, "status": "waiting_for_stage_1"})
         write_json(tool_path, tool_memory)
         social_path = runtime / "social-world-memory.json"
-        social_memory = read_json(social_path) or empty_social_memory()
-        social_summary = (learn_social_world(social_memory, 3)
+        social_memory = read_json(social_path) or empty_stage_three_memory()
+        social_summary = (learn_stage_three(social_memory, 5)
                           if tool_summary.get("status") == "stage_2_mastered" else
                           {"stage": 3, "status": "waiting_for_stage_2"})
         write_json(social_path, social_memory)

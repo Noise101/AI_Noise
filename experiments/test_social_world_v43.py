@@ -21,7 +21,7 @@ class SocialWorldTest(unittest.TestCase):
     def test_noise_identifies_other_observation_model_on_unseen_scenarios(self):
         memory = empty_social_memory()
         summary = learn_steps(memory, 30)
-        self.assertEqual(summary["status"], "stage_3_mastered")
+        self.assertEqual(summary["status"], "stage_3_foundation_mastered")
         self.assertEqual(summary["unseen_social_tasks"]["accuracy"], 1.0)
         self.assertEqual(summary["surviving_other_models"], 1)
         self.assertGreater(summary["model_revisions"], 0)
