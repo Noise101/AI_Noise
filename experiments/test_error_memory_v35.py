@@ -41,6 +41,15 @@ class ErrorMemoryTest(unittest.TestCase):
         self.assertEqual(record["status"], "recognized_and_corrected")
         self.assertEqual(len(record["revision_history"]), 2)
 
+    @patch("error_memory_v35.now", return_value="2026-09-01T00:00:00Z")
+    def test_historical_correction_does_not_disappear_when_current_rule_changes(self, _now):
+        ledger = empty_error_memory()
+        update_error_memory(ledger, self.association(3, True), {}, 10)
+        update_error_memory(ledger, self.association(3, False), {}, 20)
+        self.assertEqual(ledger["summary"]["corrective_changes"], 1)
+        self.assertEqual(ledger["summary"]["currently_corrected"], 0)
+        self.assertTrue(next(iter(ledger["records"].values()))["ever_corrected"])
+
     def test_causal_error_retains_counterexample_without_claiming_truth(self):
         causal = {"preregistered_predictions": [{"prior": "rain|fell|", "prediction": "grew",
             "observed_after_registration": "dried", "correct": False, "count": 1,

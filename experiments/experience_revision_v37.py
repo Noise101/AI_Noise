@@ -65,6 +65,8 @@ class ExperienceRevisionEngine:
 
         feedback: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
         failures = Counter()
+        failure_patterns = Counter()
+        failure_examples: dict[str, dict] = {}
         trials = []
         correct = baseline_correct = covered = total = 0
         for prior, outcome, count in test:
@@ -75,6 +77,15 @@ class ExperienceRevisionEngine:
             if predicted is not None:
                 feedback[(context, predicted)]["success" if success else "failure"] += count
             failures[kind] += count
+            if not success:
+                _, prior_action, prior_object = parts(structural(prior))
+                _, predicted_action, _ = parts(predicted or "||")
+                _, observed_action, observed_object = parts(observed)
+                pattern = (f"{kind}|after:{prior_action}|predicted:{predicted_action or 'none'}|"
+                           f"observed:{observed_action}|object:{observed_object or prior_object}")
+                failure_patterns[pattern] += count
+                failure_examples.setdefault(pattern, {"prior": prior, "predicted": predicted,
+                                                       "observed": observed})
             correct += count * success
             baseline_correct += count * (fallback == observed)
             covered += count * (context in rules)
@@ -106,11 +117,17 @@ class ExperienceRevisionEngine:
                       "accuracy": round(correct / total, 4) if total else 0.0,
                       "baseline_accuracy": round(baseline_correct / total, 4) if total else 0.0,
                       "coverage": round(covered / total, 4) if total else 0.0}
+        grouped_failures = [{"pattern": pattern, "count": count,
+                             "example": failure_examples[pattern],
+                             "query_terms": [term.split(":", 1)[-1] for term in pattern.split("|")[1:]
+                                             if term.split(":", 1)[-1] not in {"none", "object"}]}
+                            for pattern, count in failure_patterns.most_common(30)]
         summary = {"rules_formed": len(learned_rules),
                    "reusable_rules": sum(item["status"] == "reusable" for item in learned_rules),
                    "weakened_rules": sum(item["status"] == "weakened" for item in learned_rules),
                    "prediction_trials": len(trials), "prediction_errors": sum(failures.values()),
-                   "failure_causes": dict(sorted(failures.items())), "evaluation": evaluation}
+                   "failure_causes": dict(sorted(failures.items())),
+                   "failure_patterns": grouped_failures, "evaluation": evaluation}
         return {"version": 37,
                 "cycle": ["structure_event", "form_rule", "predict_holdout",
                           "diagnose_failure", "revise_rule"],

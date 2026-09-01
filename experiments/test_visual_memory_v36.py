@@ -6,7 +6,7 @@ from pathlib import Path
 from PIL import Image
 
 from visual_memory_v36 import (acquire_one, empty_visual_memory, enqueue, hamming,
-                               image_features, rebuild_associations)
+                               ground_depiction_labels, image_features, rebuild_associations)
 
 
 def image_bytes(color=(220, 210, 20)):
@@ -61,6 +61,16 @@ class VisualMemoryTest(unittest.TestCase):
         rebuild_associations(memory)
         self.assertEqual(len(memory["near_duplicate_groups"]), 1)
         self.assertEqual(hamming(features["perceptual_hash"], features["perceptual_hash"]), 0)
+
+    def test_language_connects_only_to_metadata_corroborated_depiction(self):
+        memory = empty_visual_memory()
+        memory["observations"] = {"one": {"observation_id": "one", "query": "yellow lemon",
+            "features": {"perceptual_hash": "0000000000000000"},
+            "source": {"title": "File:Yellow lemon.jpg", "description": "A lemon fruit",
+                       "categories": "Citrus"}}}
+        result = ground_depiction_labels(memory, {"lemon"})
+        self.assertEqual(result["grounded_visual_concepts"], 1)
+        self.assertFalse(memory["depiction_grounded_concepts"]["yellow lemon"]["physical_object_seen"])
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ class ExperienceRevisionTest(unittest.TestCase):
         self.assertTrue(report["trials"])
         self.assertFalse(report["causal_credit"])
         self.assertIn("failure_causes", report["summary"])
+        self.assertTrue(report["summary"]["failure_patterns"])
 
 
 if __name__ == "__main__":

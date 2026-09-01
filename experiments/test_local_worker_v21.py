@@ -9,18 +9,39 @@ from unittest.mock import patch
 from local_worker_v21 import (_seed_from_title, developmental_source_quality, discover_curriculum,
                               discover_from_developmental_shelves, enforce_storage_budget, is_transient_error,
                               compact_learning_history, merge_curiosity, read_json, render_human_status, status_record,
-                              parser_counterexample_candidate, supervise, work, write_json)
+                              parser_counterexample_candidate, structural_counterexample_candidate,
+                              supervise, update_autonomy_state, work, write_json)
 
 
 class LocalWorkerTest(unittest.TestCase):
+    def test_autonomy_switches_to_counterexamples_when_more_tests_add_no_correct_prediction(self):
+        curriculum = {}
+        state = None
+        for index in range(12):
+            report = {"global_memory": {"curricula": 100 + index * 2},
+                      "experience_revision": {"evaluation": {
+                          "correct": 1, "total": 100 + index * 4, "coverage": 0.1},
+                          "reusable_rules": 0, "failure_patterns": [{"pattern": "x"}]}}
+            state = update_autonomy_state(curriculum, report)
+        self.assertEqual(state["mode"], "counterexample_hunt")
+        self.assertFalse(state["human_intervention_required"])
+
     def test_parser_failure_can_request_a_nearby_observation(self):
         audit = {"summary": {"rejection_reasons": {"invalid_structural_subject": 3}},
                  "records": {"x": {"audit_id": "x", "quarantined": True,
+                    "curriculum_admitted": True,
                     "reason": "invalid_structural_subject", "sentence": "Through green woods birds flew.",
                     "source_url": "https://story"}}}
         candidate = parser_counterexample_candidate(audit, set())
         self.assertIn("green woods", candidate["seed"])
         self.assertEqual(candidate["parser_failure_reason"], "invalid_structural_subject")
+
+    def test_repeated_structural_failure_can_drive_counterexample_search(self):
+        report = {"summary": {"failure_patterns": [{"pattern": "x", "count": 8,
+            "query_terms": ["sees", "leaves", "food"]}]}}
+        candidate = structural_counterexample_candidate(report, set())
+        self.assertEqual(candidate["seed"], "sees leaves food")
+        self.assertEqual(candidate["failure_count"], 8)
 
     def test_storage_guard_compacts_redundant_curiosity_over_limit(self):
         with tempfile.TemporaryDirectory() as directory:

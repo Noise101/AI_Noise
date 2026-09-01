@@ -31,11 +31,12 @@ from developmental_curriculum_v32 import assess_source_quality
 from association_learning_v33 import AssociationLearner
 from epistemic_scaffold_v34 import observe_report, rebuild_scaffold, summarize as summarize_scaffold
 from error_memory_v35 import empty_error_memory, update_error_memory
-from visual_memory_v36 import acquire_one as acquire_visual, empty_visual_memory, enqueue as enqueue_visual
+from visual_memory_v36 import (acquire_one as acquire_visual, empty_visual_memory,
+                               enqueue as enqueue_visual, ground_depiction_labels)
 from experience_revision_v37 import ExperienceRevisionEngine
 from parser_self_revision_v38 import revise_parser
 from parser_audit_memory_v39 import (empty_audit_memory, ingest_report as audit_parser_report,
-                                     rebuild_audit)
+                                     mark_curriculum_admission, rebuild_audit)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -131,6 +132,7 @@ def render_human_status(status: dict, now_epoch: float | None = None,
     parser_revision = status.get("parser_revision", {})
     parser_eval = parser_revision.get("selected_evaluation", {}) or {}
     parser_audit = status.get("parser_audit", {})
+    autonomy = status.get("autonomy", {})
     scaffold = status.get("epistemic_scaffold", {})
     storage = status.get("storage", {})
     quality = status.get("developmental_quality")
@@ -142,6 +144,7 @@ def render_human_status(status: dict, now_epoch: float | None = None,
              f"現在の教材     : {status.get('seed') or '不明'}",
              f"起動後ラウンド : {status.get('rounds', 0)}",
              f"外部LLM利用    : {status.get('codex_or_remote_llm_calls', 0)}回",
+             f"自律運転       : {autonomy.get('mode', '評価中')}（人の操作 {'必要' if autonomy.get('human_intervention_required') else '不要'}）",
              "", "言語と経験", "-" * 34,
              f"採用教材       : {global_memory.get('curricula', 0):,}",
              f"単語           : {global_memory.get('word_forms', 0):,}（根拠あり {global_memory.get('grounded_word_forms', 0):,}）",
@@ -172,6 +175,7 @@ def render_human_status(status: dict, now_epoch: float | None = None,
         f"認識した誤り   : {errors.get('recognized_errors', 0):,}件",
         f"再発した誤り   : {errors.get('repeated_errors', 0):,}件",
         f"訂正に反映済み : {errors.get('corrective_changes', 0):,}件",
+        f"現在有効な訂正 : {errors.get('currently_corrected', errors.get('corrective_changes', 0)):,}件",
         f"反例として保持 : {errors.get('unresolved_errors', 0):,}件",
         "", "画像経験", "-" * 34,
         f"画像表現を観測 : {visual.get('depictions_seen', 0):,}枚",
@@ -413,6 +417,34 @@ def compact_learning_history(curriculum: dict) -> None:
     curriculum["mastery_history"] = history[-MAX_MASTERY_HISTORY:]
 
 
+def update_autonomy_state(curriculum: dict, report: dict) -> dict:
+    """Detect a measured plateau and change observation strategy without human prompting."""
+    revision = report.get("experience_revision", {})
+    global_memory = report.get("global_memory", {})
+    snapshot = {"curricula": global_memory.get("curricula", 0),
+                "structural_correct": revision.get("evaluation", {}).get("correct", 0),
+                "structural_total": revision.get("evaluation", {}).get("total", 0),
+                "structural_coverage": revision.get("evaluation", {}).get("coverage", 0.0),
+                "reusable_rules": revision.get("reusable_rules", 0),
+                "failure_patterns": len(revision.get("failure_patterns", []))}
+    history = curriculum.setdefault("capability_history", [])
+    if not history or history[-1].get("curricula") != snapshot["curricula"]:
+        history.append(snapshot)
+        curriculum["capability_history"] = history[-200:]
+    window = curriculum["capability_history"][-30:]
+    plateau = (len(window) >= 10
+               and window[-1]["curricula"] - window[0]["curricula"] >= 20
+               and window[-1]["structural_total"] > window[0]["structural_total"]
+               and window[-1]["structural_correct"] <= window[0]["structural_correct"])
+    state = {"mode": "counterexample_hunt" if plateau else "normal_curriculum",
+             "plateau_detected": plateau, "observations_compared": len(window),
+             "reason": ("structural tests grew without another correct prediction" if plateau else
+                        "no sustained measured plateau in the current window"),
+             "human_intervention_required": False}
+    curriculum["autonomy_state"] = state
+    return state
+
+
 def developmental_source_quality(report: dict) -> dict:
     return assess_source_quality(report)
 
@@ -512,7 +544,8 @@ def rediscover_from_history(runtime: Path, visited: set[str], network: int) -> l
 def parser_counterexample_candidate(audit_memory: dict, visited: set[str]) -> dict | None:
     """Turn an actual quarantined failure into a request for a nearby observation."""
     records = [item for item in audit_memory.get("records", {}).values()
-               if item.get("quarantined") and item.get("sentence")]
+               if item.get("quarantined") and item.get("sentence")
+               and item.get("curriculum_admitted") is True]
     reason_counts = audit_memory.get("summary", {}).get("rejection_reasons", {})
     ranked_reasons = [name for name, _ in sorted(reason_counts.items(),
                                                   key=lambda item: (-item[1], item[0]))]
@@ -529,6 +562,21 @@ def parser_counterexample_candidate(audit_memory: dict, visited: set[str]) -> di
                         "parent_url": item.get("source_url"),
                         "parser_failure_reason": reason,
                         "audit_id": item.get("audit_id")}
+    return None
+
+
+def structural_counterexample_candidate(experience_report: dict, visited: set[str]) -> dict | None:
+    """Request another observation for the most frequent unresolved structural failure."""
+    patterns = experience_report.get("summary", {}).get("failure_patterns", [])
+    for item in patterns:
+        terms = [term.lower() for term in item.get("query_terms", [])
+                 if term and term.lower() not in TITLE_STOP | CURRICULUM_METADATA]
+        seed = " ".join(list(dict.fromkeys(terms))[:4])
+        if seed and seed not in visited and valid_curriculum_seed(seed):
+            return {"seed": seed, "score": 6.0,
+                    "reason": "seek an independent counterexample for a repeated structural failure",
+                    "parent_url": None, "failure_pattern": item.get("pattern"),
+                    "failure_count": item.get("count", 0)}
     return None
 
 
@@ -642,6 +690,8 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
             ("selected_policy", "selection_status", "selected_evaluation",
              "failure_causes", "revisions")},
         "parser_audit": report.get("parser_audit") or parser_audit.get("summary", {}),
+        "autonomy": report.get("autonomy") or read_json(
+            runtime / "curriculum-state.json").get("autonomy_state", {}),
         "visual_observation": report.get("visual_observation"),
         "developmental_quality": report.get("developmental_quality"),
         "global_memory_admission": report.get("global_memory_admission"),
@@ -726,6 +776,9 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             "reason": ("audited developmental passage" if report["developmental_quality"].get(
                 "admit_to_global_memory") else ("grounded Japanese boundary path" if japanese_grounded
                 else "outside current developmental level; raw report retained"))}
+        mark_curriculum_admission(parser_audit_memory, seed, admitted)
+        write_json(audit_path, parser_audit_memory)
+        report["parser_audit"] = parser_audit_memory.get("summary", {})
         new_global_experience = merge_report(memory, seed, report) if admitted else False
         write_json(memory_path, memory)
         scaffold_path = runtime / "epistemic-observations.json"
@@ -757,6 +810,9 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         visual_result = ({"status": "storage_policy_paused", **visual.get("summary", {})}
                          if storage_status.get("external_acquisition_paused") else
                          acquire_visual(visual, runtime / "visual" / "images"))
+        grounded_forms = {form for form, item in memory.get("words", {}).items()
+                          if item.get("curricula", 0) >= 3}
+        visual_result["language_grounding"] = ground_depiction_labels(visual, grounded_forms)
         write_json(visual_path, visual)
         report["visual_memory"] = visual.get("summary", {})
         report["visual_observation"] = visual_result
@@ -831,6 +887,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         }
         report["error_memory"] = error_ledger.get("summary", {})
         report["experience_revision"] = experience_report.get("summary", {})
+        report["autonomy"] = update_autonomy_state(curriculum, report)
         report["causal_lab"] = run_lab(seed)
         write_json(runtime / "causal-lab.json", report["causal_lab"])
         write_json(runtime / "mastery.json", mastery)
@@ -868,6 +925,10 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             curriculum[url_bucket] = sorted(set(curriculum[url_bucket]) | set(quality_urls))
             visited = set(curriculum["completed_seeds"]) | set(curriculum["deferred_seeds"])
             discovered = discover_curriculum(report, visited, effective_network)
+            if report.get("autonomy", {}).get("mode") == "counterexample_hunt":
+                targeted = structural_counterexample_candidate(experience_report, visited)
+                if targeted:
+                    discovered.insert(0, targeted)
             known = {item["seed"] for item in curriculum["frontier"]}
             curriculum["frontier"].extend(item for item in discovered if item["seed"] not in known)
             curriculum["frontier"] = [item for item in curriculum["frontier"]
@@ -885,6 +946,11 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             if not curriculum["frontier"]:
                 curriculum["frontier"].extend(
                     rediscover_from_history(runtime, visited, effective_network))
+            if not curriculum["frontier"]:
+                structural_candidate = structural_counterexample_candidate(
+                    experience_report, visited)
+                if structural_candidate:
+                    curriculum["frontier"].append(structural_candidate)
             if not curriculum["frontier"]:
                 parser_candidate = parser_counterexample_candidate(parser_audit_memory, visited)
                 if parser_candidate:

@@ -29,11 +29,20 @@ def ingest_report(memory: dict, seed: str, report: dict) -> bool:
                                  "accepted": bool(item.get("accepted")),
                                  "event": item.get("event"), "reason": item.get("reason"),
                                  "quality": item.get("quality", 0.0),
+                                 "curriculum_admitted": report.get(
+                                     "global_memory_admission", {}).get("admitted"),
                                  "quarantined": not bool(item.get("accepted"))}
     if seed not in set(memory.setdefault("observed_seeds", [])):
         memory["observed_seeds"].append(seed)
     memory["summary"] = summarize(memory)
     return len(records) > before
+
+
+def mark_curriculum_admission(memory: dict, seed: str, admitted: bool) -> None:
+    for item in memory.get("records", {}).values():
+        if item.get("seed") == seed:
+            item["curriculum_admitted"] = bool(admitted)
+    memory["summary"] = summarize(memory)
 
 
 def summarize(memory: dict) -> dict:

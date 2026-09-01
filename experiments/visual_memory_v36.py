@@ -9,6 +9,7 @@ import json
 import math
 import time
 import urllib.parse
+import re
 from pathlib import Path
 
 from PIL import Image
@@ -18,6 +19,7 @@ from web_cache import WEB_CACHE
 
 USER_AGENT = "AI_Noise/0.36 (read-only visual development experiment)"
 ACQUISITION_INTERVAL_SECONDS = 60
+VISUAL_STOP = {"a", "an", "and", "the", "of", "in", "on", "to", "with"}
 
 
 def empty_visual_memory() -> dict:
@@ -141,6 +143,33 @@ def rebuild_associations(memory: dict) -> None:
     memory["summary"] = summarize(memory)
 
 
+def ground_depiction_labels(memory: dict, grounded_language_forms: set[str]) -> dict:
+    """Connect a word to a depiction only when independent source metadata fields agree."""
+    concepts = memory.setdefault("depiction_grounded_concepts", {})
+    for item in memory.get("observations", {}).values():
+        query_tokens = [token for token in re.findall(r"[a-z]+", item.get("query", "").lower())
+                        if token not in VISUAL_STOP and len(token) >= 3]
+        grounded_tokens = [token for token in query_tokens if token in grounded_language_forms]
+        source = item.get("source", {})
+        fields = {name: re.sub(r"<[^>]+>", " ", str(source.get(name) or "")).lower()
+                  for name in ("title", "description", "categories")}
+        supporting_fields = [name for name, text in fields.items()
+                             if any(token in text for token in query_tokens)]
+        if not grounded_tokens or len(supporting_fields) < 2:
+            continue
+        concept = item.get("query", "")
+        item["grounding_status"] = "depiction_label_corroborated_by_source_metadata"
+        concepts[concept] = {"concept": concept, "language_forms": grounded_tokens,
+                             "depiction_id": item.get("observation_id"),
+                             "supporting_metadata_fields": supporting_fields,
+                             "physical_object_seen": False, "causal_credit": False,
+                             "decision_influence": False}
+    rebuild_associations(memory)
+    return {"grounded_visual_concepts": len(concepts),
+            "grounding_kind": "web depiction plus corroborating metadata",
+            "physical_objects_seen": 0}
+
+
 def summarize(memory: dict) -> dict:
     observations = list(memory.get("observations", {}).values())
     return {"mode": memory.get("mode", "depiction_observation"),
@@ -149,7 +178,7 @@ def summarize(memory: dict) -> dict:
             "depictions_seen": len(observations),
             "physical_objects_seen": 0,
             "near_duplicate_groups": len(memory.get("near_duplicate_groups", [])),
-            "grounded_visual_concepts": 0,
+            "grounded_visual_concepts": len(memory.get("depiction_grounded_concepts", {})),
             "decision_influence": False}
 
 

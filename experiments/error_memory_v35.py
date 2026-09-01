@@ -37,16 +37,26 @@ def _remember(ledger: dict, *, domain: str, context: str, asserted: str | None,
                         "context": context, "asserted_or_predicted": asserted,
                         "observed": observed, "occurrences": occurrences,
                         "first_recorded_at": timestamp, "last_confirmed_at": timestamp,
-                        "status": status, "evidence": evidence, "correction": correction,
+                        "status": status, "ever_corrected": bool(correction.get("mechanism_changed")),
+                        "correction_count": int(bool(correction.get("mechanism_changed"))),
+                        "evidence": evidence, "correction": correction,
                         "revision_history": [{"at": timestamp, "event": "error_recognized",
                                               "occurrences": occurrences, "status": status}]}
         return
     before = (record.get("occurrences", 0), record.get("status"), record.get("correction"))
+    historical_correction = (record.get("status") == "recognized_and_corrected"
+                             or any(item.get("status") == "recognized_and_corrected"
+                                    or item.get("before_status") == "recognized_and_corrected"
+                                    for item in record.get("revision_history", [])))
+    was_ever_corrected = record.get("ever_corrected", historical_correction)
+    new_correction = bool(correction.get("mechanism_changed")) and not was_ever_corrected
     record["occurrences"] = max(record.get("occurrences", 0), occurrences)
     record["last_confirmed_at"] = timestamp
     record["evidence"] = evidence
     record["correction"] = correction
     record["status"] = status
+    record["ever_corrected"] = was_ever_corrected or bool(correction.get("mechanism_changed"))
+    record["correction_count"] = record.get("correction_count", int(was_ever_corrected)) + int(new_correction)
     after = (record["occurrences"], status, correction)
     if after != before:
         record.setdefault("revision_history", []).append(
@@ -61,8 +71,14 @@ def summarize(ledger: dict) -> dict:
     return {"recognized_errors": len(records),
             "recorded_occurrences": sum(item.get("occurrences", 0) for item in records),
             "repeated_errors": sum(item.get("occurrences", 0) > 1 for item in records),
-            "corrective_changes": sum(item.get("status") == "recognized_and_corrected"
+            "corrective_changes": sum(item.get("ever_corrected",
+                                      item.get("status") == "recognized_and_corrected" or
+                                      any(event.get("status") == "recognized_and_corrected" or
+                                          event.get("before_status") == "recognized_and_corrected"
+                                          for event in item.get("revision_history", [])))
                                       for item in records),
+            "currently_corrected": sum(item.get("status") == "recognized_and_corrected"
+                                        for item in records),
             "unresolved_errors": sum(item.get("status") == "recognized_error" for item in records),
             "domains": dict(sorted(domains.items()))}
 
