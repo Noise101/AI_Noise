@@ -10,10 +10,21 @@ from local_worker_v21 import (_seed_from_title, developmental_source_quality, di
                               discover_from_developmental_shelves, enforce_storage_budget, is_transient_error,
                               compact_learning_history, merge_curiosity, read_json, render_human_status, status_record,
                               parser_counterexample_candidate, structural_counterexample_candidate,
-                              supervise, update_autonomy_state, work, write_json)
+                              curriculum_strategy_allowed, supervise, update_autonomy_state,
+                              update_curriculum_strategy, work, write_json)
 
 
 class LocalWorkerTest(unittest.TestCase):
+    def test_low_yield_curriculum_route_deprioritizes_itself(self):
+        curriculum = {"transitions": [{"to": f"seed{i}", "reason": "broad shelf"}
+                                       for i in range(10)]}
+        for index in range(10):
+            update_curriculum_strategy(curriculum, f"seed{index}", index == 0)
+        self.assertFalse(curriculum_strategy_allowed(
+            curriculum, {"reason": "broad shelf"}))
+        self.assertTrue(curriculum_strategy_allowed(
+            curriculum, {"reason": "targeted counterexample"}))
+
     def test_autonomy_switches_to_counterexamples_when_more_tests_add_no_correct_prediction(self):
         curriculum = {}
         state = None

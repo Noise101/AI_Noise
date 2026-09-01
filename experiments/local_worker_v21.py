@@ -445,6 +445,33 @@ def update_autonomy_state(curriculum: dict, report: dict) -> dict:
     return state
 
 
+def update_curriculum_strategy(curriculum: dict, seed: str, admitted: bool) -> dict:
+    """Learn which candidate-generation routes actually yield developmental material."""
+    transition = next((item for item in reversed(curriculum.get("transitions", []))
+                       if item.get("to") == seed), None)
+    strategy = (transition or {}).get("reason", "initial_or_external_seed")
+    ledger = curriculum.setdefault("strategy_performance", {})
+    item = ledger.setdefault(strategy, {"attempts": 0, "admitted": 0, "rejected": 0})
+    outcomes = item.setdefault("seed_outcomes", {})
+    previous = outcomes.get(seed)
+    if previous is None:
+        item["attempts"] += 1
+        item["admitted" if admitted else "rejected"] += 1
+    elif previous != admitted:
+        item["admitted" if previous else "rejected"] -= 1
+        item["admitted" if admitted else "rejected"] += 1
+    outcomes[seed] = admitted
+    item["admission_rate"] = round(item["admitted"] / item["attempts"], 4)
+    item["status"] = ("deprioritized" if item["attempts"] >= 10
+                      and item["admission_rate"] < 0.2 else "active")
+    return {"strategy": strategy, **item}
+
+
+def curriculum_strategy_allowed(curriculum: dict, candidate: dict) -> bool:
+    performance = curriculum.get("strategy_performance", {}).get(candidate.get("reason"), {})
+    return performance.get("status") != "deprioritized"
+
+
 def developmental_source_quality(report: dict) -> dict:
     return assess_source_quality(report)
 
@@ -771,6 +798,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         japanese_grounded = bool(JAPANESE.search(seed) and report.get("knowledge", {}).get(
             "lexicon", {}).get("grounded_meanings"))
         admitted = report["developmental_quality"].get("admit_to_global_memory") or japanese_grounded
+        report["curriculum_strategy"] = update_curriculum_strategy(curriculum, seed, bool(admitted))
         report["global_memory_admission"] = {
             "admitted": bool(admitted),
             "reason": ("audited developmental passage" if report["developmental_quality"].get(
@@ -933,6 +961,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             curriculum["frontier"].extend(item for item in discovered if item["seed"] not in known)
             curriculum["frontier"] = [item for item in curriculum["frontier"]
                                       if item["seed"] not in visited
+                                      and curriculum_strategy_allowed(curriculum, item)
                                       and valid_curriculum_seed(
                                           item["seed"], item.get("linked_title"))
                                       and item.get("parent_url") not in set(
