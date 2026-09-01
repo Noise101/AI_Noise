@@ -45,6 +45,8 @@ CURRICULUM_METADATA = {"index", "preface", "introduction", "appendix", "volume",
                        "history", "dictionary", "encyclopedia", "book", "part", "section",
                        "act", "scene"}
 MAX_FRONTIER = 300
+MAX_DEVELOPMENTAL_SHELF_DEPTH = 8
+MAX_SHELF_PAGES_PER_DISCOVERY = 2000
 MAX_MASTERY_HISTORY = 500
 GIB = 1024 ** 3
 DEFAULT_COMPACTION_BYTES = 20 * GIB
@@ -503,13 +505,16 @@ def discover_from_developmental_shelves(visited: set[str], network: int) -> list
     queue = [(shelf, score, 0, None) for shelf, score in DEVELOPMENTAL_SHELVES]
     seen_pages: set[tuple[str, str | None]] = set()
     seen_shelves: set[str] = set()
-    while queue and len(found) < MAX_FRONTIER:
+    shelf_pages_examined = 0
+    while (queue and len(found) < MAX_FRONTIER
+           and shelf_pages_examined < MAX_SHELF_PAGES_PER_DISCOVERY):
         shelf, shelf_score, depth, continuation = queue.pop(0)
         page_key = (shelf, continuation)
-        if page_key in seen_pages or depth > 2:
+        if page_key in seen_pages or depth > MAX_DEVELOPMENTAL_SHELF_DEPTH:
             continue
         seen_pages.add(page_key)
         seen_shelves.add(shelf)
+        shelf_pages_examined += 1
         params = urllib.parse.urlencode({"action": "query", "list": "categorymembers",
                                          "cmtitle": shelf, "cmtype": "page|subcat",
                                          "cmlimit": 100, "format": "json", "formatversion": 2,
