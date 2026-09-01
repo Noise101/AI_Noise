@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import os
 from dataclasses import asdict, dataclass
 
 from story_learning_v12 import Event
@@ -55,6 +56,9 @@ class EventExtraction:
 class NarrativeEventExtractor:
     """Rule-based baseline: conservative, inspectable, and independent of an LLM."""
 
+    def __init__(self, policy: str | None = None):
+        self.policy = policy or os.environ.get("AI_NOISE_PARSER_POLICY", "baseline")
+
     def extract(self, sentence: str, recent_subject: str | None = None,
                 recent_object: str | None = None) -> EventExtraction:
         words = [word.lower() for word in WORD.findall(sentence)]
@@ -88,7 +92,8 @@ class NarrativeEventExtractor:
                               if word not in ARTICLES | POSSESSIVES]
         if not subject_candidates:
             return EventExtraction(sentence, False, None, "missing_subject", 0.0, verb_index)
-        subject = subject_candidates[-1]
+        subject = (subject_candidates[0] if self.policy in {"clause_head", "compact_roles"}
+                   else subject_candidates[-1])
         if subject in SUBJECT_STOP:
             return EventExtraction(sentence, False, None, "invalid_structural_subject", 0.0,
                                    verb_index)
@@ -100,7 +105,13 @@ class NarrativeEventExtractor:
         object_words = [word for word in words[action_index + 1:] if word not in ARTICLES]
         if object_words and object_words[-1] in {"it", "them", "him", "her"} and recent_object:
             object_words[-1] = recent_object
-        event = Event(subject, words[action_index], "_".join(object_words[:8]))
+        if self.policy in {"compact_roles", "nearest_compact"}:
+            compact = next((word for word in object_words
+                            if word not in SUBJECT_STOP | POSSESSIVES | PRONOUNS), "")
+            object_value = compact
+        else:
+            object_value = "_".join(object_words[:8])
+        event = Event(subject, words[action_index], object_value)
         quality = 0.85 if subject_candidates[-1] in PRONOUNS else (1.0 if object_words else 0.8)
         reason = "accepted_with_local_coreference" if subject_candidates[-1] in PRONOUNS else "accepted"
         return EventExtraction(sentence, True, event, reason, quality, verb_index)

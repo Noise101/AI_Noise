@@ -33,6 +33,7 @@ from epistemic_scaffold_v34 import observe_report, rebuild_scaffold, summarize a
 from error_memory_v35 import empty_error_memory, update_error_memory
 from visual_memory_v36 import acquire_one as acquire_visual, empty_visual_memory, enqueue as enqueue_visual
 from experience_revision_v37 import ExperienceRevisionEngine
+from parser_self_revision_v38 import revise_parser
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -125,6 +126,8 @@ def render_human_status(status: dict, now_epoch: float | None = None,
     visual = status.get("visual_memory", {})
     revision = status.get("experience_revision", {})
     revision_eval = revision.get("evaluation", {})
+    parser_revision = status.get("parser_revision", {})
+    parser_eval = parser_revision.get("selected_evaluation", {}) or {}
     scaffold = status.get("epistemic_scaffold", {})
     storage = status.get("storage", {})
     quality = status.get("developmental_quality")
@@ -158,6 +161,8 @@ def render_human_status(status: dict, now_epoch: float | None = None,
         f"構造規則       : {revision.get('rules_formed', 0):,}件（再利用可能 {revision.get('reusable_rules', 0):,}、弱化 {revision.get('weakened_rules', 0):,}）",
         f"構造予測       : {revision_eval.get('correct', 0)}/{revision_eval.get('total', 0)}（{percent(revision_eval.get('correct', 0), revision_eval.get('total', 0))}）、適用範囲 {100 * revision_eval.get('coverage', 0):.1f}%",
         f"失敗原因分析   : {revision.get('prediction_errors', 0):,}件",
+        f"解析方式       : {parser_revision.get('selected_policy') or 'baseline'}（{parser_revision.get('selection_status') or '評価前'}）",
+        f"解析方式の評価 : 正解 {parser_eval.get('correct', 0)}/{parser_eval.get('total', 0)}、解析範囲 {100 * parser_eval.get('parse_coverage', 0):.1f}%",
         f"最優先の弱点   : {DIMENSION_JA.get(mastery.get('weakest_dimension'), mastery.get('weakest_dimension') or '未判定')}",
         "", "間違いの記憶", "-" * 34,
         f"認識した誤り   : {errors.get('recognized_errors', 0):,}件",
@@ -564,6 +569,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
     error_memory = read_json(runtime / "error-memory.json")
     visual_memory = read_json(runtime / "visual-memory.json")
     experience_revision = read_json(runtime / "experience-revision.json")
+    parser_revision = read_json(runtime / "parser-revision.json")
     return {
         "phase": phase,
         "seed": seed,
@@ -603,6 +609,10 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "visual_memory": report.get("visual_memory") or visual_memory.get("summary", {}),
         "experience_revision": report.get("experience_revision") or
                                experience_revision.get("summary", {}),
+        "parser_revision": report.get("parser_revision") or {
+            key: parser_revision.get(key) for key in
+            ("selected_policy", "selection_status", "selected_evaluation",
+             "failure_causes", "revisions")},
         "visual_observation": report.get("visual_observation"),
         "developmental_quality": report.get("developmental_quality"),
         "global_memory_admission": report.get("global_memory_admission"),
@@ -628,6 +638,8 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
     seed = curriculum["current_seed"]
     write_json(curriculum_path, curriculum)
     storage_status = enforce_storage_budget(runtime, max_runtime_mb * 1024 * 1024)
+    parser_policy = read_json(runtime / "parser-revision.json").get("selected_policy", "baseline")
+    os.environ["AI_NOISE_PARSER_POLICY"] = parser_policy
     latest = status_record(seed, runtime, "starting", 0)
     write_json(status_path, latest)
     round_number = 0
@@ -691,6 +703,17 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         scaffold["summary"] = summarize_scaffold(scaffold)
         write_json(scaffold_path, scaffold)
         report["epistemic_scaffold"] = scaffold["summary"]
+        previous_parser = read_json(runtime / "parser-revision.json")
+        if new_global_experience or not previous_parser:
+            parser_report = revise_parser(scaffold.get("frames", {}), previous_parser)
+            write_json(runtime / "parser-revision.json", parser_report)
+            os.environ["AI_NOISE_PARSER_POLICY"] = parser_report["selected_policy"]
+        else:
+            parser_report = previous_parser
+        report["parser_revision"] = {
+            key: parser_report.get(key) for key in
+            ("selected_policy", "selection_status", "selected_evaluation",
+             "failure_causes", "revisions")}
         visual_path = runtime / "visual-memory.json"
         visual = read_json(visual_path) or empty_visual_memory()
         enqueue_visual(visual, list(memory.get("merged_seeds", [])))
