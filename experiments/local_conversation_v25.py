@@ -83,7 +83,8 @@ QUESTION_STOP = {"a", "an", "and", "are", "can", "did", "do", "does", "in", "is"
                  "me", "of", "something", "tell", "that", "the", "think", "to", "what",
                  "what's", "where", "which", "who", "why", "with", "you", "your", "okay",
                  "let's", "try", "example", "changed", "compared", "sentence", "different",
-                 "means", "now", "shows", "this", "together"}
+                 "means", "meaning", "now", "shows", "this", "together", "contrasting",
+                 "contrast", "differ", "note", "using", "both", "examples", "between", "two"}
 
 
 def _focus_from_question(question: str, unknown: str, seed: str) -> str:
@@ -115,7 +116,7 @@ def practice_once(seed: str, mastery: dict, curiosity: dict[str, dict], partner=
     first_words = set(re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", response["question"].lower()))
     seed_words = set(word for word in seed.lower().split() if word.isalpha())
     second_words = [word for word in re.findall(
-        r"[A-Za-z]+(?:'[A-Za-z]+)?", second["question"].lower())
+        r"[A-Za-z]+(?:'[A-Za-z]+)?", (second["reply"] + " " + second["question"]).lower())
         if word not in QUESTION_STOP and len(word) > 2]
     contrast = next((word for word in second_words
                      if word not in first_words and word not in seed_words),
