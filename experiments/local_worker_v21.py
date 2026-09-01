@@ -38,6 +38,7 @@ from parser_self_revision_v38 import revise_parser
 from parser_audit_memory_v39 import (empty_audit_memory, ingest_report as audit_parser_report,
                                      mark_curriculum_admission, rebuild_audit)
 from micro_world_v41 import empty_world_memory, learn_steps as learn_micro_world
+from tool_world_v42 import empty_tool_memory, learn_episodes as learn_tool_world
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -135,6 +136,7 @@ def render_human_status(status: dict, now_epoch: float | None = None,
     parser_audit = status.get("parser_audit", {})
     autonomy = status.get("autonomy", {})
     micro_world = status.get("micro_world", {})
+    tool_world = status.get("tool_world", {})
     scaffold = status.get("epistemic_scaffold", {})
     storage = status.get("storage", {})
     quality = status.get("developmental_quality")
@@ -160,6 +162,11 @@ def render_human_status(status: dict, now_epoch: float | None = None,
              f"規則修正       : {micro_world.get('corrective_revisions', 0):,}回",
              f"残った仮説     : {micro_world.get('surviving_hypotheses', 0):,}個",
              f"未見世界評価   : {micro_world.get('holdout', {}).get('correct', 0)}/{micro_world.get('holdout', {}).get('total', 0)}（{percent(micro_world.get('holdout', {}).get('correct', 0), micro_world.get('holdout', {}).get('total', 0))}）",
+             f"第二段階       : {tool_world.get('status', '第一段階の合格待ち')}",
+             f"道具世界試行   : {tool_world.get('episodes', 0):,}回",
+             f"成功した計画   : {tool_world.get('successful_training_plans', 0):,}件",
+             f"行動失敗の記憶 : {tool_world.get('remembered_action_failures', 0):,}件",
+             f"未見道具課題   : {tool_world.get('unseen_tasks', {}).get('successes', 0)}/{tool_world.get('unseen_tasks', {}).get('total', 0)}（{percent(tool_world.get('unseen_tasks', {}).get('successes', 0), tool_world.get('unseen_tasks', {}).get('total', 0))}）",
              "", "現在の能力評価", "-" * 34]
     ac, at = association_eval.get("correct", 0), association_eval.get("total", 0)
     ab = association_eval.get("baseline_correct", 0)
@@ -321,7 +328,7 @@ def enforce_storage_budget(runtime: Path, max_bytes: int) -> dict:
               "pause_reasons": pause_reasons,
               "protected_memories": ["global-language-memory", "error-memory",
                                        "epistemic-observations", "visual-memory",
-                                       "micro-world-memory"]}
+                                       "micro-world-memory", "tool-world-memory"]}
     write_json(runtime / "storage-status.json", record)
     return record
 
@@ -684,6 +691,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
     parser_revision = read_json(runtime / "parser-revision.json")
     parser_audit = read_json(runtime / "parser-audit-memory.json")
     micro_world = read_json(runtime / "micro-world-memory.json")
+    tool_world = read_json(runtime / "tool-world-memory.json")
     return {
         "phase": phase,
         "seed": seed,
@@ -731,6 +739,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "autonomy": report.get("autonomy") or read_json(
             runtime / "curriculum-state.json").get("autonomy_state", {}),
         "micro_world": report.get("micro_world") or micro_world.get("summary", {}),
+        "tool_world": report.get("tool_world") or tool_world.get("summary", {}),
         "visual_observation": report.get("visual_observation"),
         "developmental_quality": report.get("developmental_quality"),
         "global_memory_admission": report.get("global_memory_admission"),
@@ -777,6 +786,12 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         micro_memory = read_json(micro_path) or empty_world_memory()
         micro_summary = learn_micro_world(micro_memory, 3)
         write_json(micro_path, micro_memory)
+        tool_path = runtime / "tool-world-memory.json"
+        tool_memory = read_json(tool_path) or empty_tool_memory()
+        tool_summary = (learn_tool_world(tool_memory, 25)
+                        if micro_summary.get("status") == "stage_1_mastered" else
+                        {"stage": 2, "status": "waiting_for_stage_1"})
+        write_json(tool_path, tool_memory)
         try:
             report = run_cycle(seed, runtime, steps, seconds, effective_network,
                                runtime / "curiosity-priors.json",
@@ -800,6 +815,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             continue
         consecutive_transient_errors = 0
         report["micro_world"] = micro_summary
+        report["tool_world"] = tool_summary
         reason = report.get("state", {}).get("stop_reason")
         audit_path = runtime / "parser-audit-memory.json"
         parser_audit_memory = read_json(audit_path) or rebuild_audit(runtime)
