@@ -223,8 +223,11 @@ python3 autonomous_controller_v20.py "fox grapes" --state controller-state.json 
 cd experiments
 python3 local_worker_v21.py start "fox grapes"
 python3 local_worker_v21.py status
+python3 local_worker_v21.py status-ja
 python3 local_worker_v21.py stop
 ```
+
+`status-ja`は、稼働状態、最終更新、言語記憶、連想・因果の基準比較、誤り記憶、画像経験、ストレージを日本語で要約します。通常確認はこちらを使い、`status`のJSONは詳細調査や機械処理に使います。
 
 `start`はバックグラウンドで一度だけ起動します。`status`の`heartbeat`が更新されていれば動作中です。現在のseed、処理済みカリキュラム数、`completed_gaps`、`remaining_gaps`、実通信数、停止理由を確認できます。通信上限は周期ごとのレート制限として自動再開されます。Codexは新しい学習機構の設計、失敗解析、節目のレビューだけに使う想定です。
 

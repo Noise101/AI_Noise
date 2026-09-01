@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from local_worker_v21 import (_seed_from_title, developmental_source_quality, discover_curriculum,
                               discover_from_developmental_shelves, enforce_storage_budget, is_transient_error,
-                              compact_learning_history, merge_curiosity, read_json, status_record,
+                              compact_learning_history, merge_curiosity, read_json, render_human_status, status_record,
                               supervise, work, write_json)
 
 
@@ -61,6 +61,38 @@ class LocalWorkerTest(unittest.TestCase):
             write_json(path, {"phase": "learning"})
             self.assertEqual(read_json(path), {"phase": "learning"})
             self.assertFalse(path.with_suffix(".json.tmp").exists())
+
+    def test_human_status_explains_health_and_baselines_in_japanese(self):
+        status = {"phase": "between_rounds", "seed": "fox grapes",
+                  "heartbeat": "2026-09-01T00:00:00Z", "pid": 123, "rounds": 10,
+                  "codex_or_remote_llm_calls": 0,
+                  "global_memory": {"curricula": 12, "word_forms": 100,
+                                    "grounded_word_forms": 40, "quality_events": 30},
+                  "mastery": {"weakest_dimension": "associations"},
+                  "association": {"evaluation": {"correct": 2, "baseline_correct": 4,
+                                                    "total": 20}, "reinforced": 1, "weakened": 3},
+                  "causal_evaluation": {"supported_hypotheses": 0,
+                      "evaluation": {"correct": 4, "baseline_correct": 4, "total": 20}},
+                  "representation": {"selected_evaluation": {"correct": 0, "total": 20,
+                                                                 "coverage": 0.1}},
+                  "error_memory": {"recognized_errors": 5, "unresolved_errors": 3},
+                  "visual_memory": {"depictions_seen": 2, "pending_visual_curricula": 8},
+                  "storage": {"managed_bytes": 1024 ** 3, "disk_free_bytes": 100 * 1024 ** 3}}
+        rendered = render_human_status(status, now_epoch=1788220805, process_alive=True)
+        self.assertIn("正常に稼働", rendered)
+        self.assertIn("次の処理を準備中", rendered)
+        self.assertIn("連想予測", rendered)
+        self.assertIn("基準より下", rendered)
+        self.assertIn("因果予測", rendered)
+        self.assertIn("基準と同じ", rendered)
+        self.assertIn("管理対象合計   : 1.0GB", rendered)
+
+    def test_human_status_warns_when_process_is_dead_and_heartbeat_stale(self):
+        status = {"phase": "learning", "heartbeat": "2026-09-01T00:00:00Z", "pid": 123}
+        rendered = render_human_status(status, now_epoch=1788222000, process_alive=False)
+        self.assertIn("確認が必要", rendered)
+        self.assertIn("ワーカープロセスが停止", rendered)
+        self.assertIn("最終更新が2分以上前", rendered)
 
     def test_status_exposes_falsifiable_causal_evaluation(self):
         with tempfile.TemporaryDirectory() as directory:

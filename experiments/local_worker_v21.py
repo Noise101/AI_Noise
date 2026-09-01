@@ -14,6 +14,8 @@ import time
 import traceback
 import urllib.parse
 import shutil
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from web_cache import WEB_CACHE, NetworkBudgetExceeded
@@ -55,6 +57,136 @@ DEVELOPMENTAL_SHELVES = (
     ("Category:Children's literature", 2.0),
     ("Category:Folklore", 1.0),
 )
+
+PHASE_JA = {
+    "starting": "起動中", "learning": "学習中", "between_rounds": "次の処理を準備中",
+    "curriculum_transition": "次の教材へ移動中", "transient_error_wait": "一時エラーから再試行待ち",
+    "supervisor_retry_wait": "監督機構による再試行待ち", "resource_paused": "外部取得の再開待ち",
+    "storage_check": "容量確認中", "curriculum_exhausted": "教材候補を再探索中",
+    "worker_error_wait": "内部エラーから復旧待ち", "stopped_by_user": "ユーザー操作で停止",
+    "round_budget_exhausted": "指定回数を完了", "error": "エラー停止",
+}
+DIMENSION_JA = {"characters": "文字", "words": "単語", "phrases": "フレーズ",
+                "conversation": "会話", "prediction": "予測", "causality": "因果",
+                "concepts": "概念", "associations": "連想"}
+
+
+def human_bytes(value: int | float | None) -> str:
+    if value is None:
+        return "不明"
+    number = float(value)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(number) < 1024 or unit == "TB":
+            return f"{number:.1f}{unit}" if unit != "B" else f"{int(number)}B"
+        number /= 1024
+    return f"{number:.1f}TB"
+
+
+def percent(correct: int | float, total: int | float) -> str:
+    return "評価前" if not total else f"{100 * correct / total:.1f}%"
+
+
+def render_human_status(status: dict, now_epoch: float | None = None,
+                        process_alive: bool | None = None) -> str:
+    now_epoch = time.time() if now_epoch is None else now_epoch
+    pid = status.get("pid")
+    if process_alive is None:
+        try:
+            os.kill(int(pid), 0)
+            process_alive = True
+        except (OSError, TypeError, ValueError):
+            process_alive = False
+    heartbeat = status.get("heartbeat")
+    heartbeat_epoch = None
+    heartbeat_ja = "不明"
+    if heartbeat:
+        try:
+            stamp = datetime.fromisoformat(heartbeat.replace("Z", "+00:00"))
+            heartbeat_epoch = stamp.timestamp()
+            heartbeat_ja = stamp.astimezone(ZoneInfo("Asia/Tokyo")).strftime("%Y-%m-%d %H:%M:%S JST")
+        except ValueError:
+            pass
+    age = None if heartbeat_epoch is None else max(0, int(now_epoch - heartbeat_epoch))
+    stale = age is None or age > 120
+    phase = status.get("phase", "unknown")
+    healthy = process_alive and not stale and phase not in {"error", "stopped_by_user"}
+    health = "正常に稼働" if healthy else "確認が必要"
+    global_memory = status.get("global_memory", {})
+    mastery = status.get("mastery", {})
+    association = status.get("association", {})
+    association_eval = association.get("evaluation", {})
+    causal = status.get("causal_evaluation", {})
+    causal_eval = causal.get("evaluation", {})
+    representation = status.get("representation", {}).get("selected_evaluation", {})
+    errors = status.get("error_memory", {})
+    visual = status.get("visual_memory", {})
+    scaffold = status.get("epistemic_scaffold", {})
+    storage = status.get("storage", {})
+    quality = status.get("developmental_quality")
+    lines = ["Noise 学習状況", "=" * 34,
+             f"総合判定       : {health}",
+             f"動作状態       : {PHASE_JA.get(phase, phase)}",
+             f"プロセス       : {'生存' if process_alive else '停止'}（PID {pid or '不明'}）",
+             f"最終更新       : {heartbeat_ja}" + (f"（{age}秒前）" if age is not None else ""),
+             f"現在の教材     : {status.get('seed') or '不明'}",
+             f"起動後ラウンド : {status.get('rounds', 0)}",
+             f"外部LLM利用    : {status.get('codex_or_remote_llm_calls', 0)}回",
+             "", "言語と経験", "-" * 34,
+             f"採用教材       : {global_memory.get('curricula', 0):,}",
+             f"単語           : {global_memory.get('word_forms', 0):,}（根拠あり {global_memory.get('grounded_word_forms', 0):,}）",
+             f"フレーズ       : {global_memory.get('phrases', 0):,}（根拠あり {global_memory.get('grounded_phrases', 0):,}）",
+             f"品質確認イベント: {global_memory.get('quality_events', 0):,}",
+             f"人間科学観測   : {scaffold.get('observation_frames', 0):,}件（解釈 {scaffold.get('interpretations_committed', 0)}、仮説 {scaffold.get('hypotheses_committed', 0)}）",
+             "", "現在の能力評価", "-" * 34]
+    ac, at = association_eval.get("correct", 0), association_eval.get("total", 0)
+    ab = association_eval.get("baseline_correct", 0)
+    association_judgement = "基準を上回った" if ac > ab else ("基準と同じ" if ac == ab else "基準より下")
+    cc, ct = causal_eval.get("correct", 0), causal_eval.get("total", 0)
+    cb = causal_eval.get("baseline_correct", 0)
+    causal_judgement = "基準を上回った" if cc > cb else ("基準と同じ" if cc == cb else "基準より下")
+    lines.extend([
+        f"連想予測       : {ac}/{at}（{percent(ac, at)}）、単純基準 {ab}/{at} → {association_judgement}",
+        f"連想の修正     : 強化 {association.get('reinforced', 0)}、弱化 {association.get('weakened', 0)}",
+        f"因果予測       : {cc}/{ct}（{percent(cc, ct)}）、単純基準 {cb}/{ct} → {causal_judgement}",
+        f"因果候補       : {causal.get('supported_hypotheses', 0)}件（まだ証明ではない）",
+        f"抽象表現       : 正解 {representation.get('correct', 0)}/{representation.get('total', 0)}、適用範囲 {100 * representation.get('coverage', 0):.1f}%",
+        f"最優先の弱点   : {DIMENSION_JA.get(mastery.get('weakest_dimension'), mastery.get('weakest_dimension') or '未判定')}",
+        "", "間違いの記憶", "-" * 34,
+        f"認識した誤り   : {errors.get('recognized_errors', 0):,}件",
+        f"再発した誤り   : {errors.get('repeated_errors', 0):,}件",
+        f"訂正に反映済み : {errors.get('corrective_changes', 0):,}件",
+        f"反例として保持 : {errors.get('unresolved_errors', 0):,}件",
+        "", "画像経験", "-" * 34,
+        f"画像表現を観測 : {visual.get('depictions_seen', 0):,}枚",
+        f"視覚待ち教材   : {visual.get('pending_visual_curricula', 0):,}",
+        f"実物を観測     : {visual.get('physical_objects_seen', 0):,}件",
+        f"接地済み概念   : {visual.get('grounded_visual_concepts', 0):,}件",
+        "", "ストレージ", "-" * 34,
+        f"永続データ     : {human_bytes(storage.get('runtime_bytes'))}",
+        f"再取得可能キャッシュ: {human_bytes(storage.get('reconstructible_cache_bytes'))}",
+        f"管理対象合計   : {human_bytes(storage.get('managed_bytes', storage.get('after_bytes')))}",
+        f"ディスク空き   : {human_bytes(storage.get('disk_free_bytes'))}",
+        f"10GB警告       : {'発生中' if storage.get('warning') else 'なし'}",
+        f"外部取得停止   : {'停止中: ' + ', '.join(storage.get('pause_reasons', [])) if storage.get('external_acquisition_paused') else 'なし'}",
+    ])
+    if quality:
+        admitted = status.get("global_memory_admission", {}).get("admitted")
+        lines.extend(["", "直近の教材審査", "-" * 34,
+                      f"判定           : {'長期記憶へ採用' if admitted else '不採用（記憶を汚さず次へ）'}",
+                      f"適合スコア     : {quality.get('score', 0):.3f}"])
+    notes = []
+    if not process_alive:
+        notes.append("ワーカープロセスが停止しています。")
+    if stale:
+        notes.append("最終更新が2分以上前です。停止または処理詰まりを確認してください。")
+    if status.get("error"):
+        notes.append(f"エラー: {status['error']}")
+    if ac <= ab:
+        notes.append("連想はまだ単純基準を上回っていません。経験を追加しながら修正中です。")
+    if cc <= cb:
+        notes.append("因果予測はまだ単純基準を上回っていません。")
+    lines.extend(["", "要点", "-" * 34, *[f"・{note}" for note in notes]])
+    return "\n".join(lines)
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -756,12 +888,17 @@ def main() -> None:
     add_work_arguments(supervise_parser)
     status_parser = subparsers.add_parser("status", help="show the last local heartbeat")
     status_parser.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
+    status_ja_parser = subparsers.add_parser("status-ja", help="show an easy Japanese status summary")
+    status_ja_parser.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
     stop_parser = subparsers.add_parser("stop", help="request a safe stop between cycles")
     stop_parser.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
     args = parser.parse_args()
 
     if args.command == "status":
         print(json.dumps(read_json(args.runtime / "status.json"), ensure_ascii=False, indent=2))
+        return
+    if args.command == "status-ja":
+        print(render_human_status(read_json(args.runtime / "status.json")))
         return
     if args.command == "stop":
         args.runtime.mkdir(parents=True, exist_ok=True)
