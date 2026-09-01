@@ -41,7 +41,8 @@ from micro_world_v41 import empty_world_memory, learn_steps as learn_micro_world
 from tool_world_v42 import empty_tool_memory, learn_episodes as learn_tool_world
 from social_development_v44 import empty_stage_three_memory, learn_stage_three
 from cooperative_world_v45 import empty_cooperative_memory, learn_cooperation
-from abstraction_world_v46 import empty_abstraction_memory, learn_abstractions
+from abstraction_world_v46 import (assess_open_transfer, empty_abstraction_memory,
+                                   learn_abstractions)
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -215,6 +216,7 @@ def render_human_status(status: dict, now_epoch: float | None = None,
              f"抽象化の実験   : {abstraction_world.get('abstraction_experiments', 0):,}回",
              f"抽象予測の失敗 : {abstraction_world.get('prediction_errors', 0):,}回",
              f"能力合格       : {abstraction_world.get('competencies_passed', 0)}/{abstraction_world.get('competencies_total', 11)}",
+             f"実教材への転用 : {sum(bool(x) for x in abstraction_world.get('open_transfer_gates', {}).values())}/4",
              f"再利用抽象規則 : {abstraction_world.get('reusable_abstract_rules', 0)}件",
              f"特徴比較       : {_competency_ja(abstraction_world, 'feature_comparison')}",
              f"概念形成       : {_competency_ja(abstraction_world, 'concept_formation')}",
@@ -1008,6 +1010,11 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                 experience_report = ExperienceRevisionEngine(
                     memory.get("quality_event_transitions", {})).run()
                 write_json(runtime / "experience-revision.json", experience_report)
+        abstraction_summary = assess_open_transfer(
+            abstraction_memory, representation_report, association_report,
+            causal_report, experience_report)
+        write_json(abstraction_path, abstraction_memory)
+        report["abstraction_world"] = abstraction_summary
         error_path = runtime / "error-memory.json"
         error_ledger = read_json(error_path) or empty_error_memory()
         update_error_memory(error_ledger, association_report, causal_report,

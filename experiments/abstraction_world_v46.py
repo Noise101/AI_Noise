@@ -395,15 +395,17 @@ def learn_abstractions(memory: dict, steps: int = 12) -> dict:
              "revision_improves_holdout": revision_gate,
              "non_surface_representation_selected": representation_gate,
              "abstract_rules_reused_on_unseen": transfer_gate}
-    complete = all(passed.values()) and all(gates.values())
+    bounded_complete = all(passed.values()) and all(gates.values())
     score = sum(passed.values())
-    status = ("stage_5_complete" if complete else
+    status = ("stage_5_bounded_complete_open_transfer_pending" if bounded_complete else
               ("stage_5_integration_testing" if score >= 9 else
                ("stage_5_transfer_testing" if score >= 7 else
                 ("stage_5_structure_learning" if score >= 4 else
                  ("stage_5_concept_learning" if score >= 2 else "stage_5_feature_learning")))))
     memory["summary"] = {
-        "stage": 5, "status": status, "competencies_passed": score,
+        "stage": 5, "status": status,
+        "bounded_world_complete": bounded_complete, "open_transfer_complete": False,
+        "competencies_passed": score,
         "competencies_total": len(COMPETENCIES), "competencies": evaluations,
         "required_gates": gates,
         "abstraction_experiments": sum(len(x["observations"]) for x in memory["tracks"].values()),
@@ -416,3 +418,32 @@ def learn_abstractions(memory: dict, steps: int = 12) -> dict:
         "limitations": ["completion is mastery of bounded abstraction and transfer worlds",
                         "transfer to open web text must still be measured separately"]}
     return memory["summary"]
+
+
+def assess_open_transfer(memory: dict, representation: dict, association: dict,
+                         causal: dict, revision: dict) -> dict:
+    """Do not call stage 5 complete until abstractions improve real curriculum holdouts."""
+    summary = memory.get("summary") or learn_abstractions(memory, 0)
+    selected = representation.get("selected_evaluation", {})
+    representation_gate = (representation.get("selected_scheme") != "surface"
+                           and selected.get("correct", 0) > selected.get("baseline_correct", 0))
+    association_eval = association.get("evaluation", {})
+    association_gate = association_eval.get("correct", 0) > association_eval.get("baseline_correct", 0)
+    causal_eval = causal.get("evaluation", {})
+    causal_gate = causal_eval.get("correct", 0) > causal_eval.get("baseline_correct", 0)
+    revision_summary = revision.get("summary", revision)
+    revision_eval = revision_summary.get("evaluation", {})
+    revision_gate = (revision_summary.get("reusable_rules", 0) > 0
+                     and revision_eval.get("correct", 0) > revision_eval.get("baseline_correct", 0))
+    open_gates = {"real_representation_beats_surface": representation_gate,
+                  "real_association_beats_baseline": association_gate,
+                  "real_causal_prediction_beats_baseline": causal_gate,
+                  "real_reusable_rules_beat_baseline": revision_gate}
+    summary["open_transfer_gates"] = open_gates
+    summary["open_transfer_complete"] = all(open_gates.values())
+    if summary.get("bounded_world_complete") and summary["open_transfer_complete"]:
+        summary["status"] = "stage_5_complete"
+    elif summary.get("bounded_world_complete"):
+        summary["status"] = "stage_5_bounded_complete_open_transfer_learning"
+    memory["summary"] = summary
+    return summary
