@@ -68,7 +68,7 @@ def summarize(ledger: dict) -> dict:
 
 
 def update_error_memory(ledger: dict, association: dict, causal: dict,
-                        at_curricula: int) -> dict:
+                        at_curricula: int, experience_revision: dict | None = None) -> dict:
     weakened = {(item.get("cue"), item.get("associated_outcome")): item
                 for item in association.get("predictive_associations", [])
                 if item.get("status") == "weakened"}
@@ -104,6 +104,23 @@ def update_error_memory(ledger: dict, association: dict, causal: dict,
                               "mechanism_changed": False,
                               "affected_hypothesis": basis,
                               "causal_credit": False})
+    experience_revision = experience_revision or {}
+    rule_status = {item.get("context"): item.get("status")
+                   for item in experience_revision.get("rules", [])}
+    for item in experience_revision.get("trials", []):
+        if item.get("correct") is not False:
+            continue
+        context = item.get("abstract_context", "")
+        weakened = rule_status.get(context) == "weakened"
+        _remember(ledger, domain="structural_rule", context=context,
+                  asserted=item.get("predicted"), observed=item.get("observed"),
+                  occurrences=item.get("count", 1),
+                  evidence={"kind": "structural_holdout", "at_curricula": at_curricula,
+                            "failure_cause": item.get("failure_cause"),
+                            "source_event": item.get("prior")},
+                  correction={"action": ("weaken_structural_rule" if weakened else
+                                         "retain_diagnosed_counterexample"),
+                              "mechanism_changed": weakened, "causal_credit": False})
     ledger["summary"] = summarize(ledger)
     return ledger
 

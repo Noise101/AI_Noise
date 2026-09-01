@@ -32,6 +32,7 @@ from association_learning_v33 import AssociationLearner
 from epistemic_scaffold_v34 import observe_report, rebuild_scaffold, summarize as summarize_scaffold
 from error_memory_v35 import empty_error_memory, update_error_memory
 from visual_memory_v36 import acquire_one as acquire_visual, empty_visual_memory, enqueue as enqueue_visual
+from experience_revision_v37 import ExperienceRevisionEngine
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -122,6 +123,8 @@ def render_human_status(status: dict, now_epoch: float | None = None,
     representation = status.get("representation", {}).get("selected_evaluation", {})
     errors = status.get("error_memory", {})
     visual = status.get("visual_memory", {})
+    revision = status.get("experience_revision", {})
+    revision_eval = revision.get("evaluation", {})
     scaffold = status.get("epistemic_scaffold", {})
     storage = status.get("storage", {})
     quality = status.get("developmental_quality")
@@ -152,6 +155,9 @@ def render_human_status(status: dict, now_epoch: float | None = None,
         f"因果予測       : {cc}/{ct}（{percent(cc, ct)}）、単純基準 {cb}/{ct} → {causal_judgement}",
         f"因果候補       : {causal.get('supported_hypotheses', 0)}件（まだ証明ではない）",
         f"抽象表現       : 正解 {representation.get('correct', 0)}/{representation.get('total', 0)}、適用範囲 {100 * representation.get('coverage', 0):.1f}%",
+        f"構造規則       : {revision.get('rules_formed', 0):,}件（再利用可能 {revision.get('reusable_rules', 0):,}、弱化 {revision.get('weakened_rules', 0):,}）",
+        f"構造予測       : {revision_eval.get('correct', 0)}/{revision_eval.get('total', 0)}（{percent(revision_eval.get('correct', 0), revision_eval.get('total', 0))}）、適用範囲 {100 * revision_eval.get('coverage', 0):.1f}%",
+        f"失敗原因分析   : {revision.get('prediction_errors', 0):,}件",
         f"最優先の弱点   : {DIMENSION_JA.get(mastery.get('weakest_dimension'), mastery.get('weakest_dimension') or '未判定')}",
         "", "間違いの記憶", "-" * 34,
         f"認識した誤り   : {errors.get('recognized_errors', 0):,}件",
@@ -557,6 +563,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
     epistemic_scaffold = read_json(runtime / "epistemic-observations.json")
     error_memory = read_json(runtime / "error-memory.json")
     visual_memory = read_json(runtime / "visual-memory.json")
+    experience_revision = read_json(runtime / "experience-revision.json")
     return {
         "phase": phase,
         "seed": seed,
@@ -594,6 +601,8 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
                               epistemic_scaffold.get("summary", {}),
         "error_memory": report.get("error_memory") or error_memory.get("summary", {}),
         "visual_memory": report.get("visual_memory") or visual_memory.get("summary", {}),
+        "experience_revision": report.get("experience_revision") or
+                               experience_revision.get("summary", {}),
         "visual_observation": report.get("visual_observation"),
         "developmental_quality": report.get("developmental_quality"),
         "global_memory_admission": report.get("global_memory_admission"),
@@ -716,19 +725,27 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                 memory.get("quality_event_transitions", {}),
                 memory.get("quality_event_counts", {})).run()
             write_json(runtime / "association-memory.json", association_report)
+            experience_report = ExperienceRevisionEngine(
+                memory.get("quality_event_transitions", {})).run()
+            write_json(runtime / "experience-revision.json", experience_report)
         else:
             causal_report = read_json(runtime / "causal-memory.json")
             representation_report = read_json(runtime / "representation-memory.json")
             association_report = read_json(runtime / "association-memory.json")
+            experience_report = read_json(runtime / "experience-revision.json")
             if not association_report:
                 association_report = AssociationLearner(
                     memory.get("quality_event_transitions", {}),
                     memory.get("quality_event_counts", {})).run()
                 write_json(runtime / "association-memory.json", association_report)
+            if not experience_report:
+                experience_report = ExperienceRevisionEngine(
+                    memory.get("quality_event_transitions", {})).run()
+                write_json(runtime / "experience-revision.json", experience_report)
         error_path = runtime / "error-memory.json"
         error_ledger = read_json(error_path) or empty_error_memory()
         update_error_memory(error_ledger, association_report, causal_report,
-                            memory.get("totals", {}).get("curricula", 0))
+                            memory.get("totals", {}).get("curricula", 0), experience_report)
         write_json(error_path, error_ledger)
         mastery = assess_language_mastery(
             mastery_report(memory), causal_report, conversation_practice_summary(runtime),
@@ -753,6 +770,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             "warning": association_report.get("warning"),
         }
         report["error_memory"] = error_ledger.get("summary", {})
+        report["experience_revision"] = experience_report.get("summary", {})
         report["causal_lab"] = run_lab(seed)
         write_json(runtime / "causal-lab.json", report["causal_lab"])
         write_json(runtime / "mastery.json", mastery)

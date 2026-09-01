@@ -49,6 +49,20 @@ class ErrorMemoryTest(unittest.TestCase):
         record = next(iter(ledger["records"].values()))
         self.assertFalse(record["correction"]["causal_credit"])
 
+    def test_structural_failure_keeps_diagnosis_as_counterexample(self):
+        revision = {"rules": [{"context": "agent|sees|food", "status": "tentative"}],
+                    "trials": [{"prior": "fox|sees|food",
+                                "abstract_context": "agent|sees|food",
+                                "predicted": "agent|takes|food",
+                                "observed": "agent|leaves|food",
+                                "failure_cause": "action_mismatch",
+                                "correct": False, "count": 1}]}
+        ledger = update_error_memory(empty_error_memory(), {}, {}, 5, revision)
+        record = next(iter(ledger["records"].values()))
+        self.assertEqual(record["domain"], "structural_rule")
+        self.assertEqual(record["evidence"]["failure_cause"], "action_mismatch")
+        self.assertFalse(record["correction"]["causal_credit"])
+
 
 if __name__ == "__main__":
     unittest.main()
