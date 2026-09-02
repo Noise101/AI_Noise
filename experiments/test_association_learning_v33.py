@@ -33,6 +33,18 @@ class AssociationLearningTest(unittest.TestCase):
         self.assertTrue(tested)
         self.assertTrue(any(item["prediction_failures"] for item in tested))
 
+    def test_structural_action_classes_are_compared_with_their_own_baseline(self):
+        transitions = {}
+        for index in range(200):
+            prior_action = "common" if index % 3 else f"rare{index}"
+            outcome_action = "continues" if prior_action == "common" else f"varies{index}"
+            transitions[f"agent{index}|{prior_action}|item"] = {
+                f"agent{index}|{outcome_action}|item": 1}
+        report = AssociationLearner(transitions).run()
+        structural = report["structural_evaluation"]
+        self.assertGreater(structural["total"], 0)
+        self.assertIn(report["selected_mode"], {"exact_action", "learned_structural_class"})
+
 
 if __name__ == "__main__":
     unittest.main()

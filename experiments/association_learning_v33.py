@@ -10,6 +10,8 @@ import math
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from representation_learning_v31 import learn_frequency_classes, parts
+
 
 STOP = {"the", "a", "an", "to", "of", "and", "in", "on", "at", "for", "with",
         "he", "she", "it", "they", "his", "her", "their", "that", "this"}
@@ -129,11 +131,42 @@ class AssociationLearner:
                       "baseline_accuracy": round(base_rate, 4), "correct": correct,
                       "baseline_correct": baseline_correct, "total": total,
                       "coverage": round(covered / total, 4) if total else 0.0}
+        action_classes, threshold = learn_frequency_classes(train)
+        class_links: dict[str, Counter[str]] = defaultdict(Counter)
+        class_baseline = Counter()
+        for prior, outcome, count in train:
+            prior_class = action_classes.get(parts(prior)[1], "rare")
+            outcome_class = action_classes.get(parts(outcome)[1], "rare")
+            class_links[prior_class][outcome_class] += count
+            class_baseline[outcome_class] += count
+        class_fallback = class_baseline.most_common(1)[0][0] if class_baseline else None
+        class_correct = class_baseline_correct = class_total = 0
+        for prior, outcome, count in test:
+            prior_class = action_classes.get(parts(prior)[1], "rare")
+            observed_class = action_classes.get(parts(outcome)[1], "rare")
+            prediction = (class_links[prior_class].most_common(1)[0][0]
+                          if class_links.get(prior_class) else class_fallback)
+            class_correct += count * (prediction == observed_class)
+            class_baseline_correct += count * (class_fallback == observed_class)
+            class_total += count
+        structural_evaluation = {
+            "accuracy": round(class_correct / class_total, 4) if class_total else 0.0,
+            "baseline_accuracy": round(class_baseline_correct / class_total, 4) if class_total else 0.0,
+            "correct": class_correct, "baseline_correct": class_baseline_correct,
+            "total": class_total, "coverage": 1.0 if class_total else 0.0,
+            "representation": "learned_action_frequency_class",
+            "learned_frequency_threshold": threshold}
+        selected_mode = ("learned_structural_class" if
+                         class_correct - class_baseline_correct > correct - baseline_correct
+                         else "exact_action")
+        selected_evaluation = structural_evaluation if selected_mode == "learned_structural_class" else evaluation
         return {"version": 33,
                 "method": "associations learned on 80%; predictions corrected on unseen 20%",
                 "structural_associations": self.structural_edges(),
                 "predictive_associations": predictive[:5000],
                 "evaluation": evaluation, "predictions": predictions[:1000],
+                "structural_evaluation": structural_evaluation,
+                "selected_mode": selected_mode, "selected_evaluation": selected_evaluation,
                 "reinforced": sum(item["status"] == "reinforced" for item in predictive),
                 "weakened": sum(item["status"] == "weakened" for item in predictive),
                 "warning": "association guides recall and prediction; it is not causal evidence"}

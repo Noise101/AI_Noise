@@ -427,7 +427,7 @@ def assess_open_transfer(memory: dict, representation: dict, association: dict,
     selected = representation.get("selected_evaluation", {})
     representation_gate = (representation.get("selected_scheme") != "surface"
                            and selected.get("correct", 0) > selected.get("baseline_correct", 0))
-    association_eval = association.get("evaluation", {})
+    association_eval = association.get("selected_evaluation", association.get("evaluation", {}))
     association_gate = association_eval.get("correct", 0) > association_eval.get("baseline_correct", 0)
     causal_eval = causal.get("evaluation", {})
     causal_gate = causal_eval.get("correct", 0) > causal_eval.get("baseline_correct", 0)

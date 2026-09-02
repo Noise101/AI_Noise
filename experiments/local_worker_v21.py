@@ -142,6 +142,7 @@ def render_human_status(status: dict, now_epoch: float | None = None,
     mastery = status.get("mastery", {})
     association = status.get("association", {})
     association_eval = association.get("evaluation", {})
+    structural_association_eval = association.get("selected_evaluation", association_eval)
     causal = status.get("causal_evaluation", {})
     causal_eval = causal.get("evaluation", {})
     representation = status.get("representation", {}).get("selected_evaluation", {})
@@ -239,6 +240,7 @@ def render_human_status(status: dict, now_epoch: float | None = None,
     lines.extend([
         f"連想予測       : {ac}/{at}（{percent(ac, at)}）、単純基準 {ab}/{at} → {association_judgement}",
         f"連想の修正     : 強化 {association.get('reinforced', 0)}、弱化 {association.get('weakened', 0)}",
+        f"構造連想（実教材）: {structural_association_eval.get('correct', 0)}/{structural_association_eval.get('total', 0)}、単純基準 {structural_association_eval.get('baseline_correct', 0)}/{structural_association_eval.get('total', 0)}",
         f"因果予測       : {cc}/{ct}（{percent(cc, ct)}）、単純基準 {cb}/{ct} → {causal_judgement}",
         f"因果候補       : {causal.get('supported_hypotheses', 0)}件（まだ証明ではない）",
         f"抽象表現       : 正解 {representation.get('correct', 0)}/{representation.get('total', 0)}、適用範囲 {100 * representation.get('coverage', 0):.1f}%",
@@ -788,6 +790,8 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
             ("selected_scheme", "selection_status", "selected_evaluation", "revisions")},
         "association": report.get("association") or {
             "evaluation": association_memory.get("evaluation", {}),
+            "selected_evaluation": association_memory.get("selected_evaluation", {}),
+            "selected_mode": association_memory.get("selected_mode"),
             "reinforced": association_memory.get("reinforced", 0),
             "weakened": association_memory.get("weakened", 0),
             "warning": association_memory.get("warning"),
@@ -1038,6 +1042,8 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         }
         report["association"] = {
             "evaluation": association_report.get("evaluation", {}),
+            "selected_evaluation": association_report.get("selected_evaluation", {}),
+            "selected_mode": association_report.get("selected_mode"),
             "reinforced": association_report.get("reinforced", 0),
             "weakened": association_report.get("weakened", 0),
             "warning": association_report.get("warning"),
