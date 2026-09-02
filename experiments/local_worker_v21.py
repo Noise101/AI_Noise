@@ -1036,7 +1036,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         report["visual_observation"] = visual_result
         existing_representation = read_json(runtime / "representation-memory.json")
         if (new_global_experience or not (runtime / "causal-memory.json").exists()
-                or existing_representation.get("experience_source") != "verified_v47_task_views"):
+                or existing_representation.get("experience_source") != "verified_v47_task_views_r2"):
             previous_representation = read_json(runtime / "representation-memory.json")
             representation_report = evaluate_representations(
                 learning_transitions)
@@ -1051,20 +1051,20 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                     "reason": "new holdout evidence changed predictive ranking",
                     "at_curricula": memory.get("totals", {}).get("curricula", 0)})
             representation_report["revisions"] = revisions[-100:]
-            representation_report["experience_source"] = "verified_v47_task_views"
+            representation_report["experience_source"] = "verified_v47_task_views_r2"
             write_json(runtime / "representation-memory.json", representation_report)
             # Legacy transitions predate extraction audits and remain quarantined from causal claims.
             causal_report = evaluate_causal_views(
                 coherent_transitions, representation_report)
-            causal_report["experience_source"] = "verified_v47_task_views"
+            causal_report["experience_source"] = "verified_v47_task_views_r2"
             write_json(runtime / "causal-memory.json", causal_report)
             association_report = AssociationLearner(
                 learning_transitions, learning_event_counts).run()
-            association_report["experience_source"] = "verified_v47_task_views"
+            association_report["experience_source"] = "verified_v47_task_views_r2"
             write_json(runtime / "association-memory.json", association_report)
             experience_report = ExperienceRevisionEngine(
                 coherent_transitions, contextual_transitions).run()
-            experience_report["experience_source"] = "verified_v47_task_views"
+            experience_report["experience_source"] = "verified_v47_task_views_r2"
             write_json(runtime / "experience-revision.json", experience_report)
         else:
             causal_report = read_json(runtime / "causal-memory.json")

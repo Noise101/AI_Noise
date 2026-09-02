@@ -33,7 +33,9 @@ SUBJECT_STOP = {"at", "by", "for", "from", "in", "into", "of", "on", "over", "to
                 "upon", "with", "and", "but", "or"}
 FUNCTION_WORDS = SUBJECT_STOP | {"as", "during", "before", "after", "while", "than", "then",
                                  "who", "which", "what", "when", "where", "why", "how", "so",
-                                 "again", "there", "thus"}
+                                 "again", "there", "thus", "if", "unless", "although", "because",
+                                 "not", "perhaps", "immediately", "eagerly", "once", "none",
+                                 "let", "good", "known"}
 METADATA_TERMS = {
     "author", "translator", "translated", "illustrated", "illustrator", "editor", "edition",
     "ebook", "copyright", "license", "gutenberg", "wikisource", "proofread", "transcription",
@@ -107,6 +109,9 @@ class NarrativeEventExtractor:
                    else subject_candidates[-1])
         if subject in SUBJECT_STOP:
             return EventExtraction(sentence, False, None, "invalid_structural_subject", 0.0,
+                                   verb_index)
+        if strict and (len(subject) < 2 or subject in {"nce"}):
+            return EventExtraction(sentence, False, None, "invalid_developmental_subject", 0.0,
                                    verb_index)
         if subject in PRONOUNS:
             if not recent_subject:
