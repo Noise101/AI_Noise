@@ -171,6 +171,40 @@ class CausalExperimentEngine:
                                 "a positive lift is a falsifiable cause candidate, not a causal proof"]}
 
 
+def evaluate_causal_views(transitions: dict[str, dict[str, int]], representation: dict) -> dict:
+    """Keep concrete evidence unless an abstract view materially improves unseen prediction."""
+    concrete = CausalExperimentEngine(transitions).run()
+    scheme = representation.get("selected_scheme", "surface")
+    if scheme == "surface":
+        concrete["selected_view"] = "concrete"
+        concrete["view_evaluations"] = {"concrete": concrete["evaluation"]}
+        return concrete
+
+    abstract_transitions = transform_transitions(transitions, representation)
+    abstract = CausalExperimentEngine(abstract_transitions).run()
+
+    def improvement(report: dict) -> int:
+        evaluation = report.get("evaluation", {})
+        return evaluation.get("correct", 0) - evaluation.get("baseline_correct", 0)
+
+    abstract_eval = abstract.get("evaluation", {})
+    required = max(5, math.ceil(abstract_eval.get("total", 0) * 0.01))
+    use_abstract = (improvement(abstract) >= required
+                    and improvement(abstract) > improvement(concrete))
+    selected = abstract if use_abstract else concrete
+    selected["selected_view"] = "abstract" if use_abstract else "concrete"
+    selected["view_evaluations"] = {
+        "concrete": concrete.get("evaluation", {}),
+        "abstract": abstract.get("evaluation", {}),
+    }
+    selected["view_hypotheses"] = {
+        "concrete": concrete.get("supported_hypotheses", 0),
+        "abstract": abstract.get("supported_hypotheses", 0),
+    }
+    selected["abstract_scheme"] = scheme
+    return selected
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--memory", type=Path, default=Path(__file__).resolve().parent.parent /
@@ -182,8 +216,8 @@ def main() -> None:
     # Only v29 quality-audited observations may be causal evidence. Older events are retained
     # for language history but cannot silently contaminate this evaluation.
     representation = evaluate_representations(memory.get("quality_event_transitions", {}))
-    transitions = transform_transitions(memory.get("quality_event_transitions", {}), representation)
-    report = CausalExperimentEngine(transitions).run()
+    transitions = memory.get("quality_event_transitions", {})
+    report = evaluate_causal_views(transitions, representation)
     report["representation"] = {"selected_scheme": representation["selected_scheme"],
                                 "selection_status": representation["selection_status"]}
     args.output.write_text(json.dumps(report, ensure_ascii=False, separators=(",", ":")) + "\n",

@@ -24,9 +24,9 @@ from mastery_drive_v24 import assess_language_mastery
 from local_conversation_v25 import practice_once
 from compact_runtime_v26 import compact_runtime
 from global_memory_v27 import empty_memory, mastery_report, merge_report
-from causal_experiment_v28 import CausalExperimentEngine
+from causal_experiment_v28 import evaluate_causal_views
 from causal_lab_v30 import run_lab
-from representation_learning_v31 import evaluate_representations, transform_transitions
+from representation_learning_v31 import evaluate_representations
 from developmental_curriculum_v32 import assess_source_quality
 from association_learning_v33 import AssociationLearner
 from epistemic_scaffold_v34 import observe_report, rebuild_scaffold, summarize as summarize_scaffold
@@ -988,10 +988,9 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                     "at_curricula": memory.get("totals", {}).get("curricula", 0)})
             representation_report["revisions"] = revisions[-100:]
             write_json(runtime / "representation-memory.json", representation_report)
-            abstract_transitions = transform_transitions(
-                memory.get("quality_event_transitions", {}), representation_report)
             # Legacy transitions predate extraction audits and remain quarantined from causal claims.
-            causal_report = CausalExperimentEngine(abstract_transitions).run()
+            causal_report = evaluate_causal_views(
+                memory.get("quality_event_transitions", {}), representation_report)
             write_json(runtime / "causal-memory.json", causal_report)
             association_report = AssociationLearner(
                 memory.get("quality_event_transitions", {}),

@@ -1,6 +1,7 @@
 import unittest
 
-from causal_experiment_v28 import CausalExperimentEngine, RevisableBelief, normalized_action
+from causal_experiment_v28 import (CausalExperimentEngine, RevisableBelief,
+                                  evaluate_causal_views, normalized_action)
 
 
 class CausalExperimentTest(unittest.TestCase):
@@ -27,6 +28,22 @@ class CausalExperimentTest(unittest.TestCase):
         self.assertTrue(all("prediction" in item and "observed_after_registration" in item
                             for item in report["preregistered_predictions"]))
         self.assertGreater(report["supported_hypotheses"], 0)
+
+    def test_abstract_view_cannot_erase_concrete_causal_evidence(self):
+        transitions = {}
+        for index in range(120):
+            transitions[f"animal{index}|fails|task"] = {f"animal{index}|leaves|place": 1}
+            transitions[f"bird{index}|sees|food"] = {f"bird{index}|waits|place": 1}
+        representation = {
+            "selected_scheme": "learned_frequency_bands",
+            "learned_action_bands": {
+                "fails": "rare", "leaves": "rare", "sees": "rare", "waits": "rare"}}
+        concrete = CausalExperimentEngine(transitions).run()
+        report = evaluate_causal_views(transitions, representation)
+        self.assertEqual(report["selected_view"], "concrete")
+        self.assertEqual(report["evaluation"], concrete["evaluation"])
+        self.assertEqual(report["supported_hypotheses"], concrete["supported_hypotheses"])
+        self.assertIn("abstract", report["view_evaluations"])
 
 
 if __name__ == "__main__":
