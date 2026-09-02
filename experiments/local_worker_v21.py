@@ -179,7 +179,7 @@ def render_human_status(status: dict, now_epoch: float | None = None,
              f"単語           : {global_memory.get('word_forms', 0):,}（根拠あり {global_memory.get('grounded_word_forms', 0):,}）",
              f"フレーズ       : {global_memory.get('phrases', 0):,}（根拠あり {global_memory.get('grounded_phrases', 0):,}）",
              f"品質確認イベント: {global_memory.get('quality_events', 0):,}",
-             f"検証済みイベント: {verified.get('events', 0):,}（遷移 {verified.get('transition_observations', 0):,}、2場面文脈 {verified.get('contextual_observations', 0):,}）",
+             f"検証済みイベント: {verified.get('events', 0):,}（遷移 {verified.get('transition_observations', 0):,}、同一主体 {verified.get('coherent_transition_observations', 0):,}、2場面文脈 {verified.get('contextual_observations', 0):,}）",
              f"再解析で隔離   : {verified.get('quarantined_sentences', 0):,}文",
              f"人間科学観測   : {scaffold.get('observation_frames', 0):,}件（解釈 {scaffold.get('interpretations_committed', 0)}、仮説 {scaffold.get('hypotheses_committed', 0)}）",
              "", "能動実験世界", "-" * 34,
@@ -994,6 +994,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         write_json(runtime / "verified-experience.json", verified_experience)
         report["verified_experience"] = verified_experience.get("summary", {})
         learning_transitions = verified_experience.get("transitions", {})
+        coherent_transitions = verified_experience.get("coherent_transitions", learning_transitions)
         learning_event_counts = verified_experience.get("event_counts", {})
         contextual_transitions = verified_experience.get("contextual_transitions", {})
         new_global_experience = merge_report(memory, seed, report) if admitted else False
@@ -1035,7 +1036,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         report["visual_observation"] = visual_result
         existing_representation = read_json(runtime / "representation-memory.json")
         if (new_global_experience or not (runtime / "causal-memory.json").exists()
-                or existing_representation.get("experience_source") != "verified_v47"):
+                or existing_representation.get("experience_source") != "verified_v47_task_views"):
             previous_representation = read_json(runtime / "representation-memory.json")
             representation_report = evaluate_representations(
                 learning_transitions)
@@ -1050,20 +1051,20 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                     "reason": "new holdout evidence changed predictive ranking",
                     "at_curricula": memory.get("totals", {}).get("curricula", 0)})
             representation_report["revisions"] = revisions[-100:]
-            representation_report["experience_source"] = "verified_v47"
+            representation_report["experience_source"] = "verified_v47_task_views"
             write_json(runtime / "representation-memory.json", representation_report)
             # Legacy transitions predate extraction audits and remain quarantined from causal claims.
             causal_report = evaluate_causal_views(
-                learning_transitions, representation_report)
-            causal_report["experience_source"] = "verified_v47"
+                coherent_transitions, representation_report)
+            causal_report["experience_source"] = "verified_v47_task_views"
             write_json(runtime / "causal-memory.json", causal_report)
             association_report = AssociationLearner(
                 learning_transitions, learning_event_counts).run()
-            association_report["experience_source"] = "verified_v47"
+            association_report["experience_source"] = "verified_v47_task_views"
             write_json(runtime / "association-memory.json", association_report)
             experience_report = ExperienceRevisionEngine(
-                learning_transitions, contextual_transitions).run()
-            experience_report["experience_source"] = "verified_v47"
+                coherent_transitions, contextual_transitions).run()
+            experience_report["experience_source"] = "verified_v47_task_views"
             write_json(runtime / "experience-revision.json", experience_report)
         else:
             causal_report = read_json(runtime / "causal-memory.json")
@@ -1072,7 +1073,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             experience_report = read_json(runtime / "experience-revision.json")
             if not causal_report or "selected_view" not in causal_report:
                 causal_report = evaluate_causal_views(
-                    learning_transitions, representation_report)
+                    coherent_transitions, representation_report)
                 write_json(runtime / "causal-memory.json", causal_report)
             if not association_report or "selected_evaluation" not in association_report:
                 association_report = AssociationLearner(
@@ -1080,7 +1081,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                 write_json(runtime / "association-memory.json", association_report)
             if not experience_report:
                 experience_report = ExperienceRevisionEngine(
-                    learning_transitions, contextual_transitions).run()
+                    coherent_transitions, contextual_transitions).run()
                 write_json(runtime / "experience-revision.json", experience_report)
         abstraction_summary = assess_open_transfer(
             abstraction_memory, representation_report, association_report,

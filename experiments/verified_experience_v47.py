@@ -16,6 +16,7 @@ def rebuild_verified_experience(audit_memory: dict) -> dict:
 
     extractor = NarrativeEventExtractor("developmental_grounded")
     transitions: dict[str, dict[str, int]] = {}
+    coherent_transitions: dict[str, dict[str, int]] = {}
     contextual: dict[str, dict[str, int]] = {}
     event_counts = Counter()
     rejected = Counter()
@@ -48,7 +49,15 @@ def rebuild_verified_experience(audit_memory: dict) -> dict:
             prior, outcome = events[index - 1], events[index]
             bucket = transitions.setdefault(prior, {})
             bucket[outcome] = bucket.get(outcome, 0) + 1
+            # A subject switch without an explicit discourse model is not evidence
+            # that the first event predicts the second.
+            if prior.split("|", 1)[0] != outcome.split("|", 1)[0]:
+                continue
+            coherent_bucket = coherent_transitions.setdefault(prior, {})
+            coherent_bucket[outcome] = coherent_bucket.get(outcome, 0) + 1
             if index >= 2:
+                if events[index - 2].split("|", 1)[0] != prior.split("|", 1)[0]:
+                    continue
                 context = f"{events[index - 2]}>>{prior}"
                 contextual_bucket = contextual.setdefault(context, {})
                 contextual_bucket[outcome] = contextual_bucket.get(outcome, 0) + 1
@@ -58,12 +67,15 @@ def rebuild_verified_experience(audit_memory: dict) -> dict:
         "policy": "developmental_grounded",
         "event_counts": dict(event_counts),
         "transitions": transitions,
+        "coherent_transitions": coherent_transitions,
         "contextual_transitions": contextual,
         "sequences": sequences,
         "summary": {
             "sources": len(grouped), "accepted_sentences": accepted_sentences,
             "events": sum(event_counts.values()), "unique_events": len(event_counts),
             "transition_observations": sum(sum(items.values()) for items in transitions.values()),
+            "coherent_transition_observations": sum(
+                sum(items.values()) for items in coherent_transitions.values()),
             "contextual_observations": sum(sum(items.values()) for items in contextual.values()),
             "quarantined_sentences": sum(rejected.values()),
             "quarantine_reasons": dict(rejected.most_common()),
