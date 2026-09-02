@@ -28,6 +28,16 @@ class ExperienceRevisionTest(unittest.TestCase):
         self.assertIn("failure_causes", report["summary"])
         self.assertTrue(report["summary"]["failure_patterns"])
 
+    def test_two_event_context_is_measured_separately(self):
+        contextual = {}
+        for index in range(80):
+            context = f"animal{index}|sees|food>>animal{index}|tries|food"
+            contextual[context] = {f"animal{index}|takes|food": 1}
+        report = ExperienceRevisionEngine({}, contextual).run()
+        evaluation = report["summary"]["contextual_evaluation"]
+        self.assertGreater(evaluation["total"], 0)
+        self.assertEqual(evaluation["context_events"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -69,7 +69,8 @@ def abstract_event(event: str, scheme: str, families: dict[str, str] | None = No
         return f"agent|{action}|{object_head}"
     if scheme == "learned_form_family":
         return f"agent|{(families or {}).get(action, action)}|object"
-    if scheme in {"learned_frequency_class", "learned_frequency_bands"}:
+    if scheme in {"learned_frequency_class", "learned_frequency_bands",
+                  "learned_relational_class"}:
         return f"agent|{(action_classes or {}).get(action, 'rare')}|object"
     raise ValueError(f"unknown representation scheme: {scheme}")
 
@@ -153,6 +154,24 @@ def learn_frequency_bands(train: list[tuple[str, str, int]]) -> tuple[dict[str, 
     return mapping, (low, high)
 
 
+def learn_relational_action_classes(train: list[tuple[str, str, int]]) -> dict[str, str]:
+    """Induce functional action classes from what actions lead to, never from frequency alone."""
+    effects: dict[str, Counter[str]] = defaultdict(Counter)
+    for prior, outcome, count in train:
+        prior_action = parts(prior)[1]
+        outcome_action = parts(outcome)[1]
+        if prior_action and outcome_action:
+            effects[prior_action][outcome_action] += count
+    result = {}
+    for action, outcomes in effects.items():
+        support = sum(outcomes.values())
+        dominant, dominant_count = outcomes.most_common(1)[0]
+        # Weak one-off relations stay distinct; repeated consequences may form a shared class.
+        result[action] = (f"leads_to:{dominant}" if support >= 3
+                          and dominant_count / support >= 0.5 else f"action:{action}")
+    return result
+
+
 def evaluate_representations(transitions: dict[str, dict[str, int]]) -> dict:
     train, test = [], []
     for prior, outcomes in transitions.items():
@@ -162,11 +181,14 @@ def evaluate_representations(transitions: dict[str, dict[str, int]]) -> dict:
     families = learn_form_families(train_actions)
     action_classes, frequency_threshold = learn_frequency_classes(train)
     action_bands, frequency_band_thresholds = learn_frequency_bands(train)
+    relational_classes = learn_relational_action_classes(train)
     schemes = ("surface", "role_action", "role_action_object", "learned_form_family",
-               "learned_frequency_class", "learned_frequency_bands")
+               "learned_frequency_class", "learned_frequency_bands", "learned_relational_class")
     evaluations = []
     for scheme in schemes:
-        scheme_classes = action_bands if scheme == "learned_frequency_bands" else action_classes
+        scheme_classes = (action_bands if scheme == "learned_frequency_bands" else
+                          relational_classes if scheme == "learned_relational_class" else
+                          action_classes)
         choices: dict[str, Counter[str]] = defaultdict(Counter)
         global_outcomes = Counter()
         for prior, outcome, count in train:
@@ -204,6 +226,7 @@ def evaluate_representations(transitions: dict[str, dict[str, int]]) -> dict:
             "learned_frequency_threshold": frequency_threshold,
             "learned_action_bands": action_bands,
             "learned_frequency_band_thresholds": list(frequency_band_thresholds),
+            "learned_relational_action_classes": relational_classes,
             "warning": "a compact spelling family is retained only when unseen prediction improves"}
 
 
@@ -211,6 +234,8 @@ def transform_transitions(transitions: dict[str, dict[str, int]], report: dict) 
     scheme = report.get("selected_scheme", "surface")
     families = report.get("learned_form_families", {})
     action_classes = (report.get("learned_action_bands", {}) if scheme == "learned_frequency_bands"
+                      else report.get("learned_relational_action_classes", {})
+                      if scheme == "learned_relational_class"
                       else report.get("learned_action_classes", {}))
     transformed: dict[str, dict[str, int]] = {}
     for prior, outcomes in transitions.items():

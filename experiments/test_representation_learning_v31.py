@@ -2,6 +2,7 @@ import unittest
 
 from representation_learning_v31 import (abstract_event, evaluate_representations,
                                          learn_form_families, learn_frequency_bands,
+                                         learn_relational_action_classes,
                                          transform_transitions)
 
 
@@ -41,6 +42,15 @@ class RepresentationLearningTest(unittest.TestCase):
         self.assertLess(thresholds[0], thresholds[1])
         self.assertTrue(set(mapping.values()).issubset({"rare", "mid", "high"}))
         self.assertEqual(mapping["common"], "high")
+
+    def test_relational_classes_group_actions_by_repeated_observed_effect(self):
+        train = [("fox|tries|food", "fox|waits|food", 3),
+                 ("bird|looks|food", "bird|waits|food", 4),
+                 ("cat|jumps|wall", "cat|falls|ground", 1)]
+        classes = learn_relational_action_classes(train)
+        self.assertEqual(classes["tries"], "leads_to:waits")
+        self.assertEqual(classes["looks"], "leads_to:waits")
+        self.assertEqual(classes["jumps"], "action:jumps")
 
 
 if __name__ == "__main__":

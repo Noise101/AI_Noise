@@ -31,6 +31,9 @@ VERBS = {
 }
 SUBJECT_STOP = {"at", "by", "for", "from", "in", "into", "of", "on", "over", "to", "under",
                 "upon", "with", "and", "but", "or"}
+FUNCTION_WORDS = SUBJECT_STOP | {"as", "during", "before", "after", "while", "than", "then",
+                                 "who", "which", "what", "when", "where", "why", "how", "so",
+                                 "again", "there", "thus"}
 METADATA_TERMS = {
     "author", "translator", "translated", "illustrated", "illustrator", "editor", "edition",
     "ebook", "copyright", "license", "gutenberg", "wikisource", "proofread", "transcription",
@@ -71,9 +74,13 @@ class NarrativeEventExtractor:
         if sentence.strip().endswith(":"):
             return EventExtraction(sentence, False, None, "heading", 0.0)
 
+        strict = self.policy == "developmental_grounded"
+        if strict and (len(words) > 18 or any(mark in sentence for mark in (";", "—", "--"))):
+            return EventExtraction(sentence, False, None, "outside_simple_clause", 0.0)
+
         verb_index = next((i for i, word in enumerate(words[1:], 1)
                            if word in VERBS or word in AUXILIARIES), None)
-        if verb_index is None:
+        if verb_index is None and not strict:
             verb_index = next((i for i, word in enumerate(words[2:], 2)
                                if word.endswith(("ed", "ing"))), None)
         if verb_index is None:
@@ -82,17 +89,21 @@ class NarrativeEventExtractor:
         action_index = verb_index
         if words[verb_index] in AUXILIARIES:
             candidate = next((i for i in range(verb_index + 1, min(len(words), verb_index + 4))
-                              if words[i] in VERBS or words[i].endswith(("ed", "ing"))), None)
+                              if words[i] in VERBS or (not strict and
+                                 words[i].endswith(("ed", "ing")))), None)
             if candidate is None:
                 return EventExtraction(sentence, False, None, "auxiliary_without_action", 0.0,
                                        verb_index)
             action_index = candidate
 
+        excluded_subjects = (ARTICLES | POSSESSIVES | FUNCTION_WORDS if strict
+                             else ARTICLES | POSSESSIVES)
         subject_candidates = [word for word in words[:verb_index]
-                              if word not in ARTICLES | POSSESSIVES]
+                              if word not in excluded_subjects]
         if not subject_candidates:
             return EventExtraction(sentence, False, None, "missing_subject", 0.0, verb_index)
-        subject = (subject_candidates[0] if self.policy in {"clause_head", "compact_roles"}
+        subject = (subject_candidates[0] if self.policy in {"clause_head", "compact_roles",
+                                                            "developmental_grounded"}
                    else subject_candidates[-1])
         if subject in SUBJECT_STOP:
             return EventExtraction(sentence, False, None, "invalid_structural_subject", 0.0,
@@ -102,17 +113,20 @@ class NarrativeEventExtractor:
                 return EventExtraction(sentence, False, None, "unresolved_pronoun_subject", 0.0,
                                        verb_index)
             subject = recent_subject
-        object_words = [word for word in words[action_index + 1:] if word not in ARTICLES]
+        object_words = [word for word in words[action_index + 1:]
+                        if word not in ARTICLES | (AUXILIARIES if strict else set())]
         if object_words and object_words[-1] in {"it", "them", "him", "her"} and recent_object:
             object_words[-1] = recent_object
-        if self.policy in {"compact_roles", "nearest_compact"}:
+        if self.policy in {"compact_roles", "nearest_compact", "developmental_grounded"}:
             compact = next((word for word in object_words
-                            if word not in SUBJECT_STOP | POSSESSIVES | PRONOUNS), "")
+                            if word not in FUNCTION_WORDS | POSSESSIVES | PRONOUNS), "")
             object_value = compact
         else:
             object_value = "_".join(object_words[:8])
         event = Event(subject, words[action_index], object_value)
-        quality = 0.85 if subject_candidates[-1] in PRONOUNS else (1.0 if object_words else 0.8)
+        quality = (0.95 if strict and object_value else
+                   0.85 if subject_candidates[-1] in PRONOUNS else
+                   (1.0 if object_words else 0.8))
         reason = "accepted_with_local_coreference" if subject_candidates[-1] in PRONOUNS else "accepted"
         return EventExtraction(sentence, True, event, reason, quality, verb_index)
 

@@ -9,6 +9,7 @@ and keeps failed rules as counterexamples rather than rewriting history.
 from __future__ import annotations
 
 import hashlib
+import math
 from collections import Counter, defaultdict
 
 
@@ -44,8 +45,52 @@ def mismatch_kind(predicted: str | None, observed: str) -> str:
 
 
 class ExperienceRevisionEngine:
-    def __init__(self, transitions: dict[str, dict[str, int]]):
+    def __init__(self, transitions: dict[str, dict[str, int]],
+                 contextual_transitions: dict[str, dict[str, int]] | None = None):
         self.transitions = transitions
+        self.contextual_transitions = contextual_transitions or {}
+
+    def contextual_evaluation(self) -> dict:
+        """Test two-event context without replacing the simpler model unless it generalizes."""
+        train, test = [], []
+        for context, outcomes in self.contextual_transitions.items():
+            for outcome, count in outcomes.items():
+                key = hashlib.sha256(f"contextual:{context}->{outcome}".encode()).digest()[0]
+                (test if key % 5 == 0 else train).append((context, outcome, count))
+        rules: dict[str, Counter[str]] = defaultdict(Counter)
+        fallback = Counter()
+        for context, outcome, count in train:
+            abstract_context = ">>".join(structural(event, False)
+                                          for event in context.split(">>"))
+            result = structural(outcome)
+            rules[abstract_context][result] += count
+            fallback[result] += count
+        common = fallback.most_common(1)[0][0] if fallback else None
+        correct = baseline = covered = total = 0
+        feedback: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
+        for context, outcome, count in test:
+            abstract_context = ">>".join(structural(event, False)
+                                          for event in context.split(">>"))
+            observed = structural(outcome)
+            predicted = rules[abstract_context].most_common(1)[0][0] if abstract_context in rules else common
+            success = predicted == observed
+            correct += count * success
+            baseline += count * (common == observed)
+            covered += count * (abstract_context in rules)
+            total += count
+            if predicted is not None and abstract_context in rules:
+                feedback[(abstract_context, predicted)]["success" if success else "failure"] += count
+        reusable = 0
+        for context, outcomes in rules.items():
+            predicted = outcomes.most_common(1)[0][0]
+            result = feedback[(context, predicted)]
+            tested = result["success"] + result["failure"]
+            reusable += tested >= 2 and result["success"] / tested >= 0.6
+        return {"correct": correct, "baseline_correct": baseline, "total": total,
+                "accuracy": round(correct / total, 4) if total else 0.0,
+                "baseline_accuracy": round(baseline / total, 4) if total else 0.0,
+                "coverage": round(covered / total, 4) if total else 0.0,
+                "reusable_rules": reusable, "context_events": 2}
 
     def run(self) -> dict:
         train, test = [], []
@@ -128,6 +173,17 @@ class ExperienceRevisionEngine:
                    "prediction_trials": len(trials), "prediction_errors": sum(failures.values()),
                    "failure_causes": dict(sorted(failures.items())),
                    "failure_patterns": grouped_failures, "evaluation": evaluation}
+        contextual = self.contextual_evaluation()
+        required = max(5, math.ceil(contextual.get("total", 0) * 0.01))
+        if (contextual["correct"] - contextual["baseline_correct"] >= required
+                and contextual["correct"] - contextual["baseline_correct"]
+                > evaluation["correct"] - evaluation["baseline_correct"]):
+            summary["evaluation"] = contextual
+            summary["reusable_rules"] = contextual["reusable_rules"]
+            summary["selected_context"] = "two_event"
+        else:
+            summary["selected_context"] = "one_event"
+        summary["contextual_evaluation"] = contextual
         return {"version": 37,
                 "cycle": ["structure_event", "form_rule", "predict_holdout",
                           "diagnose_failure", "revise_rule"],

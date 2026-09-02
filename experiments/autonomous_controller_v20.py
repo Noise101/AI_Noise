@@ -90,6 +90,16 @@ class EnglishDevelopmentEnvironment:
             belief = item.get("accepted_belief")
             if belief:
                 self.agent.lexicon.update_meaning_hypothesis(form, belief)
+            elif (item.get("curricula", 0) >= 3 and item.get("encounters", 0) >= 5
+                  and item.get("roles")):
+                roles = sorted(item["roles"], key=lambda role: (-item["roles"][role], role))
+                self.agent.lexicon.update_meaning_hypothesis(form, {
+                    "status": "grounded_from_repeated_roles",
+                    "accepted_sense": "observed_role:" + roles[0],
+                    "leading_sense": "observed_role:" + roles[0],
+                    "confidence_margin": 0.0,
+                    "alternatives": ["observed_role:" + role for role in roles[1:]],
+                })
         for phrase, item in memory.get("phrases", {}).items():
             belief = item.get("accepted_belief")
             if belief:
@@ -131,7 +141,7 @@ class EnglishDevelopmentEnvironment:
         phrase = self.agent.lexicon.phrase_gap()
         if phrase:
             gaps.append(LearningGap(
-                f"phrase:{phrase['form']}", "phrase", phrase["query"], 0.75,
+                f"phrase:{phrase['form']}", "phrase", phrase["query"], 1.25,
                 phrase.get("observations", 1), 2, "repeated phrase has no accepted phrase sense",
             ))
         conversation = self.agent.lexicon.conversation_gap()

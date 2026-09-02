@@ -159,6 +159,32 @@ class CausalExperimentEngine:
             correct += count * (prediction == observed)
             baseline_correct += count * (baseline_prediction == observed)
             total += count
+        # Compare different actions in a shared observed object context. These are
+        # counterfactual questions to seek evidence for, not synthetic answers.
+        matched: dict[str, dict[str, Counter[str]]] = defaultdict(lambda: defaultdict(Counter))
+        for prior, outcome, count in train:
+            _, prior_action, prior_object = event_parts(prior)
+            object_head = next((token for token in prior_object if token not in STOP_TOKENS), "none")
+            matched[object_head][prior_action][normalized_action(outcome)] += count
+        contrasts = []
+        for object_head, actions in matched.items():
+            supported = [(action, outcomes) for action, outcomes in actions.items()
+                         if sum(outcomes.values()) >= 3]
+            for index, (left_action, left_outcomes) in enumerate(supported):
+                for right_action, right_outcomes in supported[index + 1:]:
+                    outcomes = set(left_outcomes) | set(right_outcomes)
+                    for outcome_action in outcomes:
+                        left_rate = left_outcomes[outcome_action] / sum(left_outcomes.values())
+                        right_rate = right_outcomes[outcome_action] / sum(right_outcomes.values())
+                        difference = abs(left_rate - right_rate)
+                        if difference >= 0.25:
+                            contrasts.append({"shared_context": f"object={object_head}",
+                                              "action_a": left_action, "action_b": right_action,
+                                              "outcome": outcome_action,
+                                              "rate_difference": round(difference, 4),
+                                              "status": "observational_contrast"})
+        contrasts.sort(key=lambda item: (-item["rate_difference"], item["shared_context"],
+                                         item["action_a"], item["action_b"]))
         return {"method": "deterministic 80/20 holdout; predictions registered before comparison",
                 "train_observations": sum(item[2] for item in train),
                 "test_observations": total, "baseline_prediction": baseline_prediction,
@@ -167,6 +193,13 @@ class CausalExperimentEngine:
                                "baseline_accuracy": round(baseline_correct / total, 4) if total else 0.0,
                                "correct": correct, "baseline_correct": baseline_correct, "total": total},
                 "preregistered_predictions": preregistered,
+                "matched_contrasts": contrasts[:100],
+                "counterfactual_questions": [
+                    {"question": (f"In {item['shared_context']}, would outcome={item['outcome']} "
+                                  f"change if action={item['action_a']} were replaced by "
+                                  f"action={item['action_b']}?"),
+                     "status": "needs_comparative_evidence"}
+                    for item in contrasts[:30]],
                 "limitations": ["event parser is still shallow", "holdout evidence is observational",
                                 "a positive lift is a falsifiable cause candidate, not a causal proof"]}
 

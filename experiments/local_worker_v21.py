@@ -37,12 +37,14 @@ from experience_revision_v37 import ExperienceRevisionEngine
 from parser_self_revision_v38 import revise_parser
 from parser_audit_memory_v39 import (empty_audit_memory, ingest_report as audit_parser_report,
                                      mark_curriculum_admission, rebuild_audit)
+from narrative_event_v29 import VERBS
 from micro_world_v41 import empty_world_memory, learn_steps as learn_micro_world
 from tool_world_v42 import empty_tool_memory, learn_episodes as learn_tool_world
 from social_development_v44 import empty_stage_three_memory, learn_stage_three
 from cooperative_world_v45 import empty_cooperative_memory, learn_cooperation
 from abstraction_world_v46 import (assess_open_transfer, empty_abstraction_memory,
                                    learn_abstractions)
+from verified_experience_v47 import rebuild_verified_experience
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -153,6 +155,7 @@ def render_human_status(status: dict, now_epoch: float | None = None,
     parser_revision = status.get("parser_revision", {})
     parser_eval = parser_revision.get("selected_evaluation", {}) or {}
     parser_audit = status.get("parser_audit", {})
+    verified = status.get("verified_experience", {})
     autonomy = status.get("autonomy", {})
     micro_world = status.get("micro_world", {})
     tool_world = status.get("tool_world", {})
@@ -176,6 +179,8 @@ def render_human_status(status: dict, now_epoch: float | None = None,
              f"単語           : {global_memory.get('word_forms', 0):,}（根拠あり {global_memory.get('grounded_word_forms', 0):,}）",
              f"フレーズ       : {global_memory.get('phrases', 0):,}（根拠あり {global_memory.get('grounded_phrases', 0):,}）",
              f"品質確認イベント: {global_memory.get('quality_events', 0):,}",
+             f"検証済みイベント: {verified.get('events', 0):,}（遷移 {verified.get('transition_observations', 0):,}、2場面文脈 {verified.get('contextual_observations', 0):,}）",
+             f"再解析で隔離   : {verified.get('quarantined_sentences', 0):,}文",
              f"人間科学観測   : {scaffold.get('observation_frames', 0):,}件（解釈 {scaffold.get('interpretations_committed', 0)}、仮説 {scaffold.get('hypotheses_committed', 0)}）",
              "", "能動実験世界", "-" * 34,
              f"第一段階       : {micro_world.get('status', '準備中')}",
@@ -242,6 +247,7 @@ def render_human_status(status: dict, now_epoch: float | None = None,
         f"連想の修正     : 強化 {association.get('reinforced', 0)}、弱化 {association.get('weakened', 0)}",
         f"構造連想（実教材）: {structural_association_eval.get('correct', 0)}/{structural_association_eval.get('total', 0)}、単純基準 {structural_association_eval.get('baseline_correct', 0)}/{structural_association_eval.get('total', 0)}",
         f"因果予測       : {cc}/{ct}（{percent(cc, ct)}）、単純基準 {cb}/{ct} → {causal_judgement}",
+        f"因果評価層     : {causal.get('selected_view', 'concrete')}（比較候補 {len(causal.get('matched_contrasts', []))}件）",
         f"因果候補       : {causal.get('supported_hypotheses', 0)}件（まだ証明ではない）",
         f"抽象表現       : 正解 {representation.get('correct', 0)}/{representation.get('total', 0)}、適用範囲 {100 * representation.get('coverage', 0):.1f}%",
         f"構造規則       : {revision.get('rules_formed', 0):,}件（再利用可能 {revision.get('reusable_rules', 0):,}、弱化 {revision.get('weakened_rules', 0):,}）",
@@ -585,7 +591,9 @@ def discover_curriculum(report: dict, visited: set[str], network: int) -> list[d
                 if not seed or seed in visited:
                     continue
                 same_collection = title.rsplit("/", 1)[0] in linked_title if "/" in title else False
-                score = 3.0 if same_collection else 1.0
+                if not same_collection:
+                    continue
+                score = 3.0
                 candidates[seed] = {"seed": seed, "score": score,
                                     "reason": "unvisited story link found in read evidence",
                                     "parent_url": url, "linked_title": linked_title}
@@ -679,6 +687,15 @@ def structural_counterexample_candidate(experience_report: dict, visited: set[st
     """Request another observation for the most frequent unresolved structural failure."""
     patterns = experience_report.get("summary", {}).get("failure_patterns", [])
     for item in patterns:
+        example = item.get("example", {})
+        actions = []
+        for event in (example.get("prior"), example.get("predicted"), example.get("observed")):
+            if event:
+                values = event.split("|", 2)
+                actions.append(values[1] if len(values) > 1 else "")
+        if actions and (len(actions) != 3 or any(action not in VERBS for action in actions)
+                        or actions[1] == "said"):
+            continue
         terms = [term.lower() for term in item.get("query_terms", [])
                  if term and term.lower() not in TITLE_STOP | CURRICULUM_METADATA]
         seed = " ".join(list(dict.fromkeys(terms))[:4])
@@ -687,6 +704,40 @@ def structural_counterexample_candidate(experience_report: dict, visited: set[st
                     "reason": "seek an independent counterexample for a repeated structural failure",
                     "parent_url": None, "failure_pattern": item.get("pattern"),
                     "failure_count": item.get("count", 0)}
+    return None
+
+
+def causal_comparison_candidate(causal_report: dict, visited: set[str]) -> dict | None:
+    """Seek both sides of a real observational contrast; never invent its answer."""
+    for item in causal_report.get("matched_contrasts", []):
+        context = item.get("shared_context", "").split("=", 1)[-1]
+        terms = [item.get("action_a", ""), item.get("action_b", ""), context,
+                 item.get("outcome", "")]
+        seed = " ".join(dict.fromkeys(term for term in terms
+                                      if term and term not in TITLE_STOP))
+        if seed and seed not in visited and valid_curriculum_seed(seed):
+            return {"seed": seed, "score": 6.5,
+                    "reason": "seek comparative evidence for an unresolved causal contrast",
+                    "parent_url": None, "contrast": item}
+    return None
+
+
+def repeated_grounding_candidate(verified: dict, visited: set[str]) -> dict | None:
+    """Prefer a new context for a partly learned event over endless vocabulary expansion."""
+    ranked = sorted(verified.get("event_counts", {}).items(),
+                    key=lambda item: (-item[1], item[0]))
+    for event, count in ranked:
+        if not 2 <= count < 8:
+            continue
+        subject, action, obj = (event.split("|", 2) + ["", ""])[:3]
+        object_head = obj.split("_")[0] if obj else ""
+        seed = " ".join(dict.fromkeys(term for term in (subject, action, object_head)
+                                      if term and term not in TITLE_STOP))
+        if seed and seed not in visited and valid_curriculum_seed(seed):
+            return {"seed": seed, "score": 6.25,
+                    "reason": "repeat a partly grounded event in an independent story",
+                    "parent_url": None, "observed_event": event,
+                    "prior_observations": count}
     return None
 
 
@@ -761,6 +812,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
     social_world = read_json(runtime / "social-world-memory.json")
     cooperative_world = read_json(runtime / "cooperative-world-memory.json")
     abstraction_world = read_json(runtime / "abstraction-world-memory.json")
+    verified_experience = read_json(runtime / "verified-experience.json")
     return {
         "phase": phase,
         "seed": seed,
@@ -783,7 +835,8 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
             runtime / "global-language-memory.json").get("totals", {}),
         "causal_evaluation": report.get("causal_evaluation") or {
             key: causal_memory.get(key)
-            for key in ("supported_hypotheses", "evaluation", "limitations")},
+            for key in ("supported_hypotheses", "evaluation", "limitations", "selected_view",
+                        "view_evaluations", "matched_contrasts")},
         "causal_lab": report.get("causal_lab") or read_json(runtime / "causal-lab.json"),
         "representation": report.get("representation") or {
             key: representation_memory.get(key) for key in
@@ -807,6 +860,8 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
             ("selected_policy", "selection_status", "selected_evaluation",
              "failure_causes", "revisions")},
         "parser_audit": report.get("parser_audit") or parser_audit.get("summary", {}),
+        "verified_experience": report.get("verified_experience") or
+                               verified_experience.get("summary", {}),
         "autonomy": report.get("autonomy") or read_json(
             runtime / "curriculum-state.json").get("autonomy_state", {}),
         "micro_world": report.get("micro_world") or micro_world.get("summary", {}),
@@ -935,6 +990,12 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         mark_curriculum_admission(parser_audit_memory, seed, admitted)
         write_json(audit_path, parser_audit_memory)
         report["parser_audit"] = parser_audit_memory.get("summary", {})
+        verified_experience = rebuild_verified_experience(parser_audit_memory)
+        write_json(runtime / "verified-experience.json", verified_experience)
+        report["verified_experience"] = verified_experience.get("summary", {})
+        learning_transitions = verified_experience.get("transitions", {})
+        learning_event_counts = verified_experience.get("event_counts", {})
+        contextual_transitions = verified_experience.get("contextual_transitions", {})
         new_global_experience = merge_report(memory, seed, report) if admitted else False
         write_json(memory_path, memory)
         scaffold_path = runtime / "epistemic-observations.json"
@@ -972,10 +1033,12 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         write_json(visual_path, visual)
         report["visual_memory"] = visual.get("summary", {})
         report["visual_observation"] = visual_result
-        if new_global_experience or not (runtime / "causal-memory.json").exists():
+        existing_representation = read_json(runtime / "representation-memory.json")
+        if (new_global_experience or not (runtime / "causal-memory.json").exists()
+                or existing_representation.get("experience_source") != "verified_v47"):
             previous_representation = read_json(runtime / "representation-memory.json")
             representation_report = evaluate_representations(
-                memory.get("quality_event_transitions", {}))
+                learning_transitions)
             selected_evaluation = next((item for item in representation_report["evaluations"]
                 if item["scheme"] == representation_report["selected_scheme"]), {})
             representation_report["selected_evaluation"] = selected_evaluation
@@ -987,17 +1050,20 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                     "reason": "new holdout evidence changed predictive ranking",
                     "at_curricula": memory.get("totals", {}).get("curricula", 0)})
             representation_report["revisions"] = revisions[-100:]
+            representation_report["experience_source"] = "verified_v47"
             write_json(runtime / "representation-memory.json", representation_report)
             # Legacy transitions predate extraction audits and remain quarantined from causal claims.
             causal_report = evaluate_causal_views(
-                memory.get("quality_event_transitions", {}), representation_report)
+                learning_transitions, representation_report)
+            causal_report["experience_source"] = "verified_v47"
             write_json(runtime / "causal-memory.json", causal_report)
             association_report = AssociationLearner(
-                memory.get("quality_event_transitions", {}),
-                memory.get("quality_event_counts", {})).run()
+                learning_transitions, learning_event_counts).run()
+            association_report["experience_source"] = "verified_v47"
             write_json(runtime / "association-memory.json", association_report)
             experience_report = ExperienceRevisionEngine(
-                memory.get("quality_event_transitions", {})).run()
+                learning_transitions, contextual_transitions).run()
+            experience_report["experience_source"] = "verified_v47"
             write_json(runtime / "experience-revision.json", experience_report)
         else:
             causal_report = read_json(runtime / "causal-memory.json")
@@ -1006,16 +1072,15 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             experience_report = read_json(runtime / "experience-revision.json")
             if not causal_report or "selected_view" not in causal_report:
                 causal_report = evaluate_causal_views(
-                    memory.get("quality_event_transitions", {}), representation_report)
+                    learning_transitions, representation_report)
                 write_json(runtime / "causal-memory.json", causal_report)
             if not association_report or "selected_evaluation" not in association_report:
                 association_report = AssociationLearner(
-                    memory.get("quality_event_transitions", {}),
-                    memory.get("quality_event_counts", {})).run()
+                    learning_transitions, learning_event_counts).run()
                 write_json(runtime / "association-memory.json", association_report)
             if not experience_report:
                 experience_report = ExperienceRevisionEngine(
-                    memory.get("quality_event_transitions", {})).run()
+                    learning_transitions, contextual_transitions).run()
                 write_json(runtime / "experience-revision.json", experience_report)
         abstraction_summary = assess_open_transfer(
             abstraction_memory, representation_report, association_report,
@@ -1036,6 +1101,9 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             "supported_hypotheses": causal_report.get("supported_hypotheses", 0),
             "evaluation": causal_report.get("evaluation", {}),
             "limitations": causal_report.get("limitations", []),
+            "selected_view": causal_report.get("selected_view", "concrete"),
+            "view_evaluations": causal_report.get("view_evaluations", {}),
+            "matched_contrasts": causal_report.get("matched_contrasts", []),
         }
         report["representation"] = {
             "selected_scheme": representation_report.get("selected_scheme"),
@@ -1092,7 +1160,11 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             visited = set(curriculum["completed_seeds"]) | set(curriculum["deferred_seeds"])
             discovered = discover_curriculum(report, visited, effective_network)
             if report.get("autonomy", {}).get("mode") == "counterexample_hunt":
-                targeted = structural_counterexample_candidate(experience_report, visited)
+                targeted = causal_comparison_candidate(causal_report, visited)
+                if not targeted:
+                    targeted = repeated_grounding_candidate(verified_experience, visited)
+                if not targeted:
+                    targeted = structural_counterexample_candidate(experience_report, visited)
                 if targeted:
                     discovered.insert(0, targeted)
             known = {item["seed"] for item in curriculum["frontier"]}

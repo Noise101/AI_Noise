@@ -45,6 +45,17 @@ class CausalExperimentTest(unittest.TestCase):
         self.assertEqual(report["supported_hypotheses"], concrete["supported_hypotheses"])
         self.assertIn("abstract", report["view_evaluations"])
 
+    def test_shared_context_generates_questions_not_causal_answers(self):
+        transitions = {}
+        for index in range(80):
+            action = "pushes" if index % 2 else "waits"
+            outcome = "falls" if action == "pushes" else "stays"
+            transitions[f"agent{index}|{action}|stone"] = {f"agent{index}|{outcome}|stone": 1}
+        report = CausalExperimentEngine(transitions).run()
+        self.assertTrue(report["matched_contrasts"])
+        self.assertTrue(all(item["status"] == "needs_comparative_evidence"
+                            for item in report["counterfactual_questions"]))
+
 
 if __name__ == "__main__":
     unittest.main()

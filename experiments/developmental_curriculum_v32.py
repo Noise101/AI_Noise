@@ -36,21 +36,25 @@ def assess_source_quality(report: dict, known_words: set[str] | None = None) -> 
     recurrence = 0.0 if not subjects else 1 - len(set(subjects)) / len(subjects)
     dialogue_ratio = sum(('"' in sentence or "“" in sentence or "?" in sentence)
                          for sentence in sentences) / max(1, accepted)
+    beliefs = report.get("knowledge", {}).get("concepts", {}).get("beliefs", [])
+    corroborated = any(item.get("status") == "corroborated"
+                       and len(set(item.get("citations", []))) >= 2 for item in beliefs)
+    minimum_events = 2 if corroborated else 3
     score = (0.35 * narrative_ratio + 0.30 * short_ratio + 0.20 * vocabulary_fit
              + 0.15 * recurrence + 0.05 * dialogue_ratio)
     reasons = []
-    if accepted < 2:
-        reasons.append("fewer than two accepted events")
-    if narrative_ratio < 0.3:
+    if accepted < minimum_events:
+        reasons.append(f"fewer than {minimum_events} accepted events")
+    if narrative_ratio < 0.5:
         reasons.append("most audited sentences are not narrative events")
-    if short_ratio < 0.5:
+    if short_ratio < 0.7:
         reasons.append("sentences exceed the current child-level length")
     if recurrence < 0.15 and dialogue_ratio < 0.15:
         reasons.append("no recurring subject or dialogue structure")
-    if score < 0.58:
-        reasons.append("combined developmental score below 0.58")
-    admitted = (accepted >= 2 and narrative_ratio >= 0.3 and short_ratio >= 0.5
-                and (recurrence >= 0.15 or dialogue_ratio >= 0.15) and score >= 0.58)
+    if score < 0.65:
+        reasons.append("combined developmental score below 0.65")
+    admitted = (accepted >= minimum_events and narrative_ratio >= 0.5 and short_ratio >= 0.7
+                and (recurrence >= 0.15 or dialogue_ratio >= 0.15) and score >= 0.65)
     return {"status": "developmental_passage" if admitted else "outside_current_level",
             "admit_to_global_memory": admitted, "score": round(score, 3),
             "accepted": accepted, "total": len(audits),

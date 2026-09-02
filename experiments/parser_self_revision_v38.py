@@ -9,7 +9,8 @@ from collections import Counter, defaultdict
 from narrative_event_v29 import NarrativeEventExtractor
 
 
-POLICIES = ("baseline", "clause_head", "nearest_compact", "compact_roles")
+POLICIES = ("baseline", "clause_head", "nearest_compact", "compact_roles",
+            "developmental_grounded")
 
 
 def held_out_source(source_url: str) -> bool:
@@ -97,7 +98,7 @@ def revise_parser(frames: dict, previous: dict | None = None,
     audit_summary, experience_summary = audit_summary or {}, experience_summary or {}
     reasons = audit_summary.get("rejection_reasons", {})
     failure_causes = experience_summary.get("failure_causes", {})
-    candidates = {"baseline"}
+    candidates = {"baseline", "developmental_grounded"}
     generated = []
     if reasons.get("invalid_structural_subject", 0) or reasons.get("missing_subject", 0):
         candidates.update({"clause_head", "compact_roles"})

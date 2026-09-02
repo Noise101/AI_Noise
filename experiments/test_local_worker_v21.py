@@ -10,7 +10,8 @@ from local_worker_v21 import (_seed_from_title, developmental_source_quality, di
                               discover_from_developmental_shelves, enforce_storage_budget, is_transient_error,
                               compact_learning_history, merge_curiosity, read_json, render_human_status, status_record,
                               parser_counterexample_candidate, structural_counterexample_candidate,
-                              curriculum_strategy_allowed, supervise, update_autonomy_state,
+                              repeated_grounding_candidate, curriculum_strategy_allowed,
+                              supervise, update_autonomy_state,
                               update_curriculum_strategy, work, write_json)
 
 
@@ -53,6 +54,12 @@ class LocalWorkerTest(unittest.TestCase):
         candidate = structural_counterexample_candidate(report, set())
         self.assertEqual(candidate["seed"], "sees leaves food")
         self.assertEqual(candidate["failure_count"], 8)
+
+    def test_partly_grounded_event_can_request_independent_repetition(self):
+        verified = {"event_counts": {"fox|sees|grapes": 3, "bird|flies|sky": 1}}
+        candidate = repeated_grounding_candidate(verified, set())
+        self.assertEqual(candidate["seed"], "fox sees grapes")
+        self.assertEqual(candidate["prior_observations"], 3)
 
     def test_storage_guard_compacts_redundant_curiosity_over_limit(self):
         with tempfile.TemporaryDirectory() as directory:
