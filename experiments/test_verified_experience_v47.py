@@ -1,6 +1,6 @@
 import unittest
 
-from verified_experience_v47 import rebuild_verified_experience
+from verified_experience_v47 import rebuild_verified_experience, select_experience_profile
 
 
 class VerifiedExperienceTest(unittest.TestCase):
@@ -21,6 +21,21 @@ class VerifiedExperienceTest(unittest.TestCase):
                                       "curriculum_admitted": False}}}
         report = rebuild_verified_experience(memory)
         self.assertEqual(report["summary"]["accepted_sentences"], 0)
+
+    def test_sentence_limit_is_selected_on_unseen_whole_sources(self):
+        records = {}
+        for source in range(100):
+            for position, sentence in enumerate(
+                    ("The fox saw food.", "The fox tried food.", "The fox took food.")):
+                records[f"{source}-{position}"] = {
+                    "seed": f"story {source}", "source_url": f"source-{source}",
+                    "source_position": position, "sentence": sentence,
+                    "curriculum_admitted": True}
+        experience, policy = select_experience_profile({"records": records})
+        self.assertEqual(policy["selected_policy"], "developmental_grounded_18")
+        self.assertEqual(policy["selection_status"], "selected_on_unseen_sources")
+        self.assertTrue(policy["safety_invariants"])
+        self.assertEqual(experience["policy"], policy["selected_policy"])
 
 
 if __name__ == "__main__":

@@ -44,7 +44,7 @@ from social_development_v44 import empty_stage_three_memory, learn_stage_three
 from cooperative_world_v45 import empty_cooperative_memory, learn_cooperation
 from abstraction_world_v46 import (assess_open_transfer, empty_abstraction_memory,
                                    learn_abstractions)
-from verified_experience_v47 import rebuild_verified_experience
+from verified_experience_v47 import select_experience_profile
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -156,6 +156,7 @@ def render_human_status(status: dict, now_epoch: float | None = None,
     parser_eval = parser_revision.get("selected_evaluation", {}) or {}
     parser_audit = status.get("parser_audit", {})
     verified = status.get("verified_experience", {})
+    self_policy = status.get("self_learning_policy", {})
     autonomy = status.get("autonomy", {})
     micro_world = status.get("micro_world", {})
     tool_world = status.get("tool_world", {})
@@ -181,8 +182,9 @@ def render_human_status(status: dict, now_epoch: float | None = None,
              f"品質確認イベント: {global_memory.get('quality_events', 0):,}",
              f"検証済みイベント: {verified.get('events', 0):,}（遷移 {verified.get('transition_observations', 0):,}、同一主体 {verified.get('coherent_transition_observations', 0):,}、2場面文脈 {verified.get('contextual_observations', 0):,}）",
              f"再解析で隔離   : {verified.get('quarantined_sentences', 0):,}文",
+             f"自己選択した読解: {self_policy.get('selected_policy', '評価中')}（{self_policy.get('selection_status', '評価中')}）",
              f"人間科学観測   : {scaffold.get('observation_frames', 0):,}件（解釈 {scaffold.get('interpretations_committed', 0)}、仮説 {scaffold.get('hypotheses_committed', 0)}）",
-             "", "能動実験世界", "-" * 34,
+             "", "限定実験世界（機構診断用・実能力ではない）", "-" * 34,
              f"第一段階       : {micro_world.get('status', '準備中')}",
              f"自分で行った実験: {micro_world.get('interventions', 0):,}回",
              f"予測失敗       : {micro_world.get('prediction_errors', 0):,}回",
@@ -561,6 +563,15 @@ def curriculum_strategy_allowed(curriculum: dict, candidate: dict) -> bool:
     return performance.get("status") != "deprioritized"
 
 
+def learned_curriculum_score(curriculum: dict, candidate: dict) -> float:
+    """Rank routes by their observed developmental yield with a Beta prior."""
+    base = candidate.get("score", 0.0)
+    performance = curriculum.get("strategy_performance", {}).get(candidate.get("reason"), {})
+    admitted, rejected = performance.get("admitted", 0), performance.get("rejected", 0)
+    expected_yield = (admitted + 1) / (admitted + rejected + 2)
+    return base * (0.5 + expected_yield)
+
+
 def developmental_source_quality(report: dict) -> dict:
     return assess_source_quality(report)
 
@@ -813,6 +824,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
     cooperative_world = read_json(runtime / "cooperative-world-memory.json")
     abstraction_world = read_json(runtime / "abstraction-world-memory.json")
     verified_experience = read_json(runtime / "verified-experience.json")
+    self_learning_policy = read_json(runtime / "self-learning-policy.json")
     return {
         "phase": phase,
         "seed": seed,
@@ -862,6 +874,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "parser_audit": report.get("parser_audit") or parser_audit.get("summary", {}),
         "verified_experience": report.get("verified_experience") or
                                verified_experience.get("summary", {}),
+        "self_learning_policy": report.get("self_learning_policy") or self_learning_policy,
         "autonomy": report.get("autonomy") or read_json(
             runtime / "curriculum-state.json").get("autonomy_state", {}),
         "micro_world": report.get("micro_world") or micro_world.get("summary", {}),
@@ -990,9 +1003,12 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         mark_curriculum_admission(parser_audit_memory, seed, admitted)
         write_json(audit_path, parser_audit_memory)
         report["parser_audit"] = parser_audit_memory.get("summary", {})
-        verified_experience = rebuild_verified_experience(parser_audit_memory)
+        verified_experience, self_learning_policy = select_experience_profile(
+            parser_audit_memory, read_json(runtime / "self-learning-policy.json"))
         write_json(runtime / "verified-experience.json", verified_experience)
+        write_json(runtime / "self-learning-policy.json", self_learning_policy)
         report["verified_experience"] = verified_experience.get("summary", {})
+        report["self_learning_policy"] = self_learning_policy
         learning_transitions = verified_experience.get("transitions", {})
         coherent_transitions = verified_experience.get("coherent_transitions", learning_transitions)
         learning_event_counts = verified_experience.get("event_counts", {})
@@ -1035,8 +1051,9 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         report["visual_memory"] = visual.get("summary", {})
         report["visual_observation"] = visual_result
         existing_representation = read_json(runtime / "representation-memory.json")
+        experience_source = "verified_v49:" + self_learning_policy["selected_policy"]
         if (new_global_experience or not (runtime / "causal-memory.json").exists()
-                or existing_representation.get("experience_source") != "verified_v47_task_views_r2"):
+                or existing_representation.get("experience_source") != experience_source):
             previous_representation = read_json(runtime / "representation-memory.json")
             representation_report = evaluate_representations(
                 learning_transitions)
@@ -1051,20 +1068,20 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                     "reason": "new holdout evidence changed predictive ranking",
                     "at_curricula": memory.get("totals", {}).get("curricula", 0)})
             representation_report["revisions"] = revisions[-100:]
-            representation_report["experience_source"] = "verified_v47_task_views_r2"
+            representation_report["experience_source"] = experience_source
             write_json(runtime / "representation-memory.json", representation_report)
             # Legacy transitions predate extraction audits and remain quarantined from causal claims.
             causal_report = evaluate_causal_views(
                 coherent_transitions, representation_report)
-            causal_report["experience_source"] = "verified_v47_task_views_r2"
+            causal_report["experience_source"] = experience_source
             write_json(runtime / "causal-memory.json", causal_report)
             association_report = AssociationLearner(
                 learning_transitions, learning_event_counts).run()
-            association_report["experience_source"] = "verified_v47_task_views_r2"
+            association_report["experience_source"] = experience_source
             write_json(runtime / "association-memory.json", association_report)
             experience_report = ExperienceRevisionEngine(
                 coherent_transitions, contextual_transitions).run()
-            experience_report["experience_source"] = "verified_v47_task_views_r2"
+            experience_report["experience_source"] = experience_source
             write_json(runtime / "experience-revision.json", experience_report)
         else:
             causal_report = read_json(runtime / "causal-memory.json")
@@ -1182,7 +1199,8 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                                            or (item.get("evidence_status") == "corroborated"
                                                and item.get("independent_sources", 0) >= 2))]
             curriculum["frontier"] = sorted(
-                curriculum["frontier"], key=lambda item: (-item.get("score", 0), item["seed"]))[:MAX_FRONTIER]
+                curriculum["frontier"],
+                key=lambda item: (-learned_curriculum_score(curriculum, item), item["seed"]))[:MAX_FRONTIER]
             if not curriculum["frontier"]:
                 curriculum["frontier"].extend(
                     rediscover_from_history(runtime, visited, effective_network))

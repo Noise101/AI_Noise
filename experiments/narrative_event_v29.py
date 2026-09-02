@@ -76,8 +76,13 @@ class NarrativeEventExtractor:
         if sentence.strip().endswith(":"):
             return EventExtraction(sentence, False, None, "heading", 0.0)
 
-        strict = self.policy == "developmental_grounded"
-        if strict and (len(words) > 18 or any(mark in sentence for mark in (";", "—", "--"))):
+        strict = self.policy.startswith("developmental_grounded")
+        try:
+            developmental_limit = int(self.policy.rsplit("_", 1)[-1])
+        except ValueError:
+            developmental_limit = 18
+        if strict and (len(words) > developmental_limit
+                       or any(mark in sentence for mark in (";", "—", "--"))):
             return EventExtraction(sentence, False, None, "outside_simple_clause", 0.0)
 
         verb_index = next((i for i, word in enumerate(words[1:], 1)
@@ -104,8 +109,8 @@ class NarrativeEventExtractor:
                               if word not in excluded_subjects]
         if not subject_candidates:
             return EventExtraction(sentence, False, None, "missing_subject", 0.0, verb_index)
-        subject = (subject_candidates[0] if self.policy in {"clause_head", "compact_roles",
-                                                            "developmental_grounded"}
+        subject = (subject_candidates[0] if self.policy in {"clause_head", "compact_roles"}
+                   or strict
                    else subject_candidates[-1])
         if subject in SUBJECT_STOP:
             return EventExtraction(sentence, False, None, "invalid_structural_subject", 0.0,
@@ -122,7 +127,7 @@ class NarrativeEventExtractor:
                         if word not in ARTICLES | (AUXILIARIES if strict else set())]
         if object_words and object_words[-1] in {"it", "them", "him", "her"} and recent_object:
             object_words[-1] = recent_object
-        if self.policy in {"compact_roles", "nearest_compact", "developmental_grounded"}:
+        if self.policy in {"compact_roles", "nearest_compact"} or strict:
             compact = next((word for word in object_words
                             if word not in FUNCTION_WORDS | POSSESSIVES | PRONOUNS), "")
             object_value = compact

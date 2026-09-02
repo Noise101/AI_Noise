@@ -11,7 +11,7 @@ from local_worker_v21 import (_seed_from_title, developmental_source_quality, di
                               compact_learning_history, merge_curiosity, read_json, render_human_status, status_record,
                               parser_counterexample_candidate, structural_counterexample_candidate,
                               repeated_grounding_candidate, curriculum_strategy_allowed,
-                              supervise, update_autonomy_state,
+                              learned_curriculum_score, supervise, update_autonomy_state,
                               update_curriculum_strategy, work, write_json)
 
 
@@ -25,6 +25,13 @@ class LocalWorkerTest(unittest.TestCase):
             curriculum, {"reason": "broad shelf"}))
         self.assertTrue(curriculum_strategy_allowed(
             curriculum, {"reason": "targeted counterexample"}))
+
+    def test_successful_curriculum_route_earns_higher_autonomous_priority(self):
+        curriculum = {"strategy_performance": {
+            "good": {"admitted": 8, "rejected": 2},
+            "bad": {"admitted": 1, "rejected": 9}}}
+        self.assertGreater(learned_curriculum_score(curriculum, {"reason": "good", "score": 2}),
+                           learned_curriculum_score(curriculum, {"reason": "bad", "score": 2}))
 
     def test_autonomy_switches_to_counterexamples_when_more_tests_add_no_correct_prediction(self):
         curriculum = {}

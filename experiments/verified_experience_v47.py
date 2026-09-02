@@ -3,18 +3,20 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections import Counter, defaultdict
 
 from narrative_event_v29 import NarrativeEventExtractor
 
 
-def rebuild_verified_experience(audit_memory: dict) -> dict:
+def rebuild_verified_experience(audit_memory: dict,
+                                policy: str = "developmental_grounded_18") -> dict:
     grouped: dict[tuple[str, str], list[dict]] = defaultdict(list)
     for item in audit_memory.get("records", {}).values():
         if item.get("curriculum_admitted") is True and item.get("sentence"):
             grouped[(item.get("seed", ""), item.get("source_url", ""))].append(item)
 
-    extractor = NarrativeEventExtractor("developmental_grounded")
+    extractor = NarrativeEventExtractor(policy)
     transitions: dict[str, dict[str, int]] = {}
     coherent_transitions: dict[str, dict[str, int]] = {}
     contextual: dict[str, dict[str, int]] = {}
@@ -64,7 +66,7 @@ def rebuild_verified_experience(audit_memory: dict) -> dict:
 
     return {
         "version": 47,
-        "policy": "developmental_grounded",
+        "policy": policy,
         "event_counts": dict(event_counts),
         "transitions": transitions,
         "coherent_transitions": coherent_transitions,
@@ -82,3 +84,70 @@ def rebuild_verified_experience(audit_memory: dict) -> dict:
         },
         "warning": "original audit is retained; only conservative reparses feed prediction",
     }
+
+
+def evaluate_experience_profile(experience: dict) -> dict:
+    """Score a parsing policy on whole unseen sources, separate from its extraction count."""
+    train, test = [], []
+    for sequence in experience.get("sequences", []):
+        target = (test if hashlib.sha256(
+            f"profile-source:{sequence.get('source_url', '')}".encode()).digest()[0] % 5 == 0
+                  else train)
+        events = sequence.get("events", [])
+        for prior, outcome in zip(events, events[1:]):
+            if prior.split("|", 1)[0] == outcome.split("|", 1)[0]:
+                target.append((prior, outcome))
+    choices: dict[str, Counter[str]] = defaultdict(Counter)
+    outcomes = Counter()
+    for prior, outcome in train:
+        prior_action = prior.split("|", 2)[1]
+        outcome_action = outcome.split("|", 2)[1]
+        choices[prior_action][outcome_action] += 1
+        outcomes[outcome_action] += 1
+    fallback = outcomes.most_common(1)[0][0] if outcomes else None
+    correct = baseline = covered = 0
+    for prior, outcome in test:
+        prior_action = prior.split("|", 2)[1]
+        observed = outcome.split("|", 2)[1]
+        prediction = choices[prior_action].most_common(1)[0][0] if prior_action in choices else fallback
+        correct += prediction == observed
+        baseline += fallback == observed
+        covered += prior_action in choices
+    total = len(test)
+    return {"policy": experience.get("policy"), "correct": correct,
+            "baseline_correct": baseline, "total": total,
+            "accuracy": round(correct / total, 4) if total else 0.0,
+            "baseline_accuracy": round(baseline / total, 4) if total else 0.0,
+            "coverage": round(covered / total, 4) if total else 0.0,
+            "accepted_sentences": experience.get("summary", {}).get("accepted_sentences", 0)}
+
+
+def select_experience_profile(audit_memory: dict, previous: dict | None = None) -> tuple[dict, dict]:
+    """Let evidence choose sentence complexity; retain history and reverse bad choices."""
+    previous = previous or {}
+    policies = tuple(f"developmental_grounded_{limit}" for limit in range(10, 25, 2))
+    experiences = {policy: rebuild_verified_experience(audit_memory, policy) for policy in policies}
+    evaluations = [evaluate_experience_profile(experiences[policy]) for policy in policies]
+    default_policy = "developmental_grounded_18"
+    eligible = [item for item in evaluations if item["total"] >= 20]
+    selected = max(eligible, key=lambda item: (
+        item["correct"] - item["baseline_correct"], item["correct"], item["coverage"],
+        -abs(int(item["policy"].rsplit("_", 1)[-1]) - 18)), default=None)
+    if selected is None or selected["correct"] <= selected["baseline_correct"]:
+        selected = next(item for item in evaluations if item["policy"] == default_policy)
+        status = "safe_default_until_predictive_evidence"
+    else:
+        status = "selected_on_unseen_sources"
+    revisions = list(previous.get("revisions", []))
+    before = previous.get("selected_policy")
+    if before and before != selected["policy"]:
+        revisions.append({"before": before, "after": selected["policy"],
+                          "reason": "whole-source holdout changed policy ranking",
+                          "evidence_total": selected["total"]})
+    policy_memory = {"version": 49, "selected_policy": selected["policy"],
+                     "selection_status": status, "selected_evaluation": selected,
+                     "evaluations": evaluations, "revisions": revisions[-100:],
+                     "mutable_parameter": "maximum words in a developmental sentence",
+                     "safety_invariants": ["read_only_sources", "no_remote_llm_teacher",
+                                           "explicit_action_required", "original_audit_retained"]}
+    return experiences[selected["policy"]], policy_memory
