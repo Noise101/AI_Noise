@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import itertools
+import math
 import time
 from collections import Counter
 
@@ -425,21 +426,27 @@ def assess_open_transfer(memory: dict, representation: dict, association: dict,
     """Do not call stage 5 complete until abstractions improve real curriculum holdouts."""
     summary = memory.get("summary") or learn_abstractions(memory, 0)
     selected = representation.get("selected_evaluation", {})
+    def material_lift(evaluation: dict) -> bool:
+        total = evaluation.get("total", 0)
+        required = max(5, math.ceil(total * 0.01))
+        return evaluation.get("correct", 0) - evaluation.get("baseline_correct", 0) >= required
+
     representation_gate = (representation.get("selected_scheme") != "surface"
-                           and selected.get("correct", 0) > selected.get("baseline_correct", 0))
+                           and material_lift(selected))
     association_eval = association.get("selected_evaluation", association.get("evaluation", {}))
-    association_gate = association_eval.get("correct", 0) > association_eval.get("baseline_correct", 0)
+    association_gate = material_lift(association_eval)
     causal_eval = causal.get("evaluation", {})
-    causal_gate = causal_eval.get("correct", 0) > causal_eval.get("baseline_correct", 0)
+    causal_gate = material_lift(causal_eval)
     revision_summary = revision.get("summary", revision)
     revision_eval = revision_summary.get("evaluation", {})
     revision_gate = (revision_summary.get("reusable_rules", 0) > 0
-                     and revision_eval.get("correct", 0) > revision_eval.get("baseline_correct", 0))
+                     and material_lift(revision_eval))
     open_gates = {"real_representation_beats_surface": representation_gate,
                   "real_association_beats_baseline": association_gate,
                   "real_causal_prediction_beats_baseline": causal_gate,
                   "real_reusable_rules_beat_baseline": revision_gate}
     summary["open_transfer_gates"] = open_gates
+    summary["open_transfer_gate_policy"] = "at least 5 predictions and 1% of holdout above baseline"
     summary["open_transfer_complete"] = all(open_gates.values())
     if summary.get("bounded_world_complete") and summary["open_transfer_complete"]:
         summary["status"] = "stage_5_complete"

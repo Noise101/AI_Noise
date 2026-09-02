@@ -35,13 +35,25 @@ class AbstractionWorldTest(unittest.TestCase):
         learn_abstractions(memory, 300)
         summary = assess_open_transfer(
             memory,
-            {"selected_scheme": "role_action", "selected_evaluation": {"correct": 8, "baseline_correct": 4}},
-            {"evaluation": {"correct": 8, "baseline_correct": 5}},
-            {"evaluation": {"correct": 7, "baseline_correct": 5}},
+            {"selected_scheme": "role_action", "selected_evaluation": {"correct": 12, "baseline_correct": 4, "total": 100}},
+            {"evaluation": {"correct": 12, "baseline_correct": 5, "total": 100}},
+            {"evaluation": {"correct": 12, "baseline_correct": 5, "total": 100}},
             {"summary": {"reusable_rules": 2,
-                         "evaluation": {"correct": 9, "baseline_correct": 5}}})
+                         "evaluation": {"correct": 12, "baseline_correct": 5, "total": 100}}})
         self.assertEqual(summary["status"], "stage_5_complete")
         self.assertTrue(summary["open_transfer_complete"])
+
+    def test_tiny_open_transfer_lift_is_not_counted_as_success(self):
+        memory = empty_abstraction_memory()
+        learn_abstractions(memory, 300)
+        summary = assess_open_transfer(
+            memory,
+            {"selected_scheme": "role_action", "selected_evaluation": {"correct": 51, "baseline_correct": 50, "total": 100}},
+            {"evaluation": {"correct": 51, "baseline_correct": 50, "total": 100}},
+            {"evaluation": {"correct": 51, "baseline_correct": 50, "total": 100}},
+            {"summary": {"reusable_rules": 1,
+                         "evaluation": {"correct": 51, "baseline_correct": 50, "total": 100}}})
+        self.assertFalse(any(summary["open_transfer_gates"].values()))
 
 
 if __name__ == "__main__":
