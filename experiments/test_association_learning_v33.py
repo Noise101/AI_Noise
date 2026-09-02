@@ -43,7 +43,8 @@ class AssociationLearningTest(unittest.TestCase):
         report = AssociationLearner(transitions).run()
         structural = report["structural_evaluation"]
         self.assertGreater(structural["total"], 0)
-        self.assertIn(report["selected_mode"], {"exact_action", "learned_structural_class"})
+        self.assertIn(report["selected_mode"],
+                      {"exact_action", "learned_structural_class", "learned_structural_bands"})
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ import math
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from representation_learning_v31 import learn_frequency_classes, parts
+from representation_learning_v31 import learn_frequency_bands, learn_frequency_classes, parts
 
 
 STOP = {"the", "a", "an", "to", "of", "and", "in", "on", "at", "for", "with",
@@ -156,16 +156,44 @@ class AssociationLearner:
             "total": class_total, "coverage": 1.0 if class_total else 0.0,
             "representation": "learned_action_frequency_class",
             "learned_frequency_threshold": threshold}
-        selected_mode = ("learned_structural_class" if
-                         class_correct - class_baseline_correct > correct - baseline_correct
-                         else "exact_action")
-        selected_evaluation = structural_evaluation if selected_mode == "learned_structural_class" else evaluation
+        action_bands, band_thresholds = learn_frequency_bands(train)
+        band_links: dict[str, Counter[str]] = defaultdict(Counter)
+        band_baseline = Counter()
+        for prior, outcome, count in train:
+            prior_band = action_bands.get(parts(prior)[1], "rare")
+            outcome_band = action_bands.get(parts(outcome)[1], "rare")
+            band_links[prior_band][outcome_band] += count
+            band_baseline[outcome_band] += count
+        band_fallback = band_baseline.most_common(1)[0][0] if band_baseline else None
+        band_correct = band_baseline_correct = band_total = 0
+        for prior, outcome, count in test:
+            prior_band = action_bands.get(parts(prior)[1], "rare")
+            observed_band = action_bands.get(parts(outcome)[1], "rare")
+            prediction = (band_links[prior_band].most_common(1)[0][0]
+                          if band_links.get(prior_band) else band_fallback)
+            band_correct += count * (prediction == observed_band)
+            band_baseline_correct += count * (band_fallback == observed_band)
+            band_total += count
+        band_evaluation = {
+            "accuracy": round(band_correct / band_total, 4) if band_total else 0.0,
+            "baseline_accuracy": round(band_baseline_correct / band_total, 4) if band_total else 0.0,
+            "correct": band_correct, "baseline_correct": band_baseline_correct,
+            "total": band_total, "coverage": 1.0 if band_total else 0.0,
+            "representation": "learned_action_frequency_bands",
+            "learned_frequency_band_thresholds": list(band_thresholds)}
+        candidates = [(correct - baseline_correct, "exact_action", evaluation),
+                      (class_correct - class_baseline_correct, "learned_structural_class",
+                       structural_evaluation),
+                      (band_correct - band_baseline_correct, "learned_structural_bands",
+                       band_evaluation)]
+        _, selected_mode, selected_evaluation = max(candidates, key=lambda item: (item[0], item[1]))
         return {"version": 33,
                 "method": "associations learned on 80%; predictions corrected on unseen 20%",
                 "structural_associations": self.structural_edges(),
                 "predictive_associations": predictive[:5000],
                 "evaluation": evaluation, "predictions": predictions[:1000],
                 "structural_evaluation": structural_evaluation,
+                "band_evaluation": band_evaluation,
                 "selected_mode": selected_mode, "selected_evaluation": selected_evaluation,
                 "reinforced": sum(item["status"] == "reinforced" for item in predictive),
                 "weakened": sum(item["status"] == "weakened" for item in predictive),

@@ -1,7 +1,8 @@
 import unittest
 
 from representation_learning_v31 import (abstract_event, evaluate_representations,
-                                         learn_form_families, transform_transitions)
+                                         learn_form_families, learn_frequency_bands,
+                                         transform_transitions)
 
 
 class RepresentationLearningTest(unittest.TestCase):
@@ -29,6 +30,17 @@ class RepresentationLearningTest(unittest.TestCase):
         report = {"selected_scheme": "role_action", "learned_form_families": {}}
         self.assertEqual(transform_transitions(transitions, report),
                          {"agent|sees|object": {"agent|waits|object": 2}})
+
+    def test_frequency_bands_are_learned_without_fixed_corpus_boundaries(self):
+        transitions = []
+        for index in range(200):
+            prior = "agent|common|object" if index % 2 else f"agent|rare{index}|object"
+            outcome = "agent|continues|object" if index % 2 else f"agent|varies{index}|object"
+            transitions.append((prior, outcome, 1))
+        mapping, thresholds = learn_frequency_bands(transitions)
+        self.assertLess(thresholds[0], thresholds[1])
+        self.assertTrue(set(mapping.values()).issubset({"rare", "mid", "high"}))
+        self.assertEqual(mapping["common"], "high")
 
 
 if __name__ == "__main__":

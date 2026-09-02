@@ -69,7 +69,7 @@ def abstract_event(event: str, scheme: str, families: dict[str, str] | None = No
         return f"agent|{action}|{object_head}"
     if scheme == "learned_form_family":
         return f"agent|{(families or {}).get(action, action)}|object"
-    if scheme == "learned_frequency_class":
+    if scheme in {"learned_frequency_class", "learned_frequency_bands"}:
         return f"agent|{(action_classes or {}).get(action, 'rare')}|object"
     raise ValueError(f"unknown representation scheme: {scheme}")
 
@@ -112,6 +112,47 @@ def learn_frequency_classes(train: list[tuple[str, str, int]]) -> tuple[dict[str
             for action, count in counts.items()}, threshold
 
 
+def learn_frequency_bands(train: list[tuple[str, str, int]]) -> tuple[dict[str, str], tuple[int, int]]:
+    """Learn rare/mid/high action bands on an inner holdout."""
+    inner_train, inner_test = [], []
+    for prior, outcome, count in train:
+        key = hashlib.sha256(f"frequency-bands-inner:{prior}->{outcome}".encode()).digest()[0]
+        (inner_test if key % 5 == 0 else inner_train).append((prior, outcome, count))
+
+    def counts(items):
+        result = Counter()
+        for prior, outcome, count in items:
+            result[parts(prior)[1]] += count
+            result[parts(outcome)[1]] += count
+        return result
+
+    def score(low: int, high: int) -> tuple[int, int]:
+        frequency = counts(inner_train)
+        category = lambda event: ("high" if frequency[parts(event)[1]] >= high else
+                                  ("mid" if frequency[parts(event)[1]] >= low else "rare"))
+        choices, outcomes = defaultdict(Counter), Counter()
+        for prior, outcome, count in inner_train:
+            choices[category(prior)][category(outcome)] += count
+            outcomes[category(outcome)] += count
+        fallback = outcomes.most_common(1)[0][0] if outcomes else None
+        correct = baseline = 0
+        for prior, outcome, count in inner_test:
+            observed = category(outcome)
+            predicted = (choices[category(prior)].most_common(1)[0][0]
+                         if choices.get(category(prior)) else fallback)
+            correct += count * (predicted == observed)
+            baseline += count * (fallback == observed)
+        return correct - baseline, correct
+
+    values = (2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30)
+    low, high = max(((low, high) for low in values for high in values if low < high),
+                    key=lambda pair: (score(*pair), -pair[0], -pair[1]))
+    frequency = counts(train)
+    mapping = {action: ("high" if count >= high else ("mid" if count >= low else "rare"))
+               for action, count in frequency.items()}
+    return mapping, (low, high)
+
+
 def evaluate_representations(transitions: dict[str, dict[str, int]]) -> dict:
     train, test = [], []
     for prior, outcomes in transitions.items():
@@ -120,22 +161,24 @@ def evaluate_representations(transitions: dict[str, dict[str, int]]) -> dict:
     train_actions = {parts(event)[1] for prior, outcome, _ in train for event in (prior, outcome)}
     families = learn_form_families(train_actions)
     action_classes, frequency_threshold = learn_frequency_classes(train)
+    action_bands, frequency_band_thresholds = learn_frequency_bands(train)
     schemes = ("surface", "role_action", "role_action_object", "learned_form_family",
-               "learned_frequency_class")
+               "learned_frequency_class", "learned_frequency_bands")
     evaluations = []
     for scheme in schemes:
+        scheme_classes = action_bands if scheme == "learned_frequency_bands" else action_classes
         choices: dict[str, Counter[str]] = defaultdict(Counter)
         global_outcomes = Counter()
         for prior, outcome, count in train:
-            context = abstract_event(prior, scheme, families, action_classes)
-            result = abstract_event(outcome, scheme, families, action_classes)
+            context = abstract_event(prior, scheme, families, scheme_classes)
+            result = abstract_event(outcome, scheme, families, scheme_classes)
             choices[context][result] += count
             global_outcomes[result] += count
         fallback = global_outcomes.most_common(1)[0][0] if global_outcomes else None
         correct = baseline_correct = total = 0
         for prior, outcome, count in test:
-            context = abstract_event(prior, scheme, families, action_classes)
-            observed = abstract_event(outcome, scheme, families, action_classes)
+            context = abstract_event(prior, scheme, families, scheme_classes)
+            observed = abstract_event(outcome, scheme, families, scheme_classes)
             prediction = choices[context].most_common(1)[0][0] if choices.get(context) else fallback
             correct += count * (prediction == observed)
             baseline_correct += count * (fallback == observed)
@@ -145,7 +188,7 @@ def evaluate_representations(transitions: dict[str, dict[str, int]]) -> dict:
                             "accuracy": round(correct / total, 4) if total else 0.0,
                             "baseline_accuracy": round(baseline_correct / total, 4) if total else 0.0,
                             "coverage": round(sum(count for prior, _, count in test
-                                if abstract_event(prior, scheme, families, action_classes) in choices) / total, 4)
+                                if abstract_event(prior, scheme, families, scheme_classes) in choices) / total, 4)
                                 if total else 0.0})
     surface = next(item for item in evaluations if item["scheme"] == "surface")
     eligible = [item for item in evaluations if item["total"] >= 20
@@ -159,13 +202,16 @@ def evaluate_representations(transitions: dict[str, dict[str, int]]) -> dict:
             "evaluations": evaluations, "learned_form_families": families,
             "learned_action_classes": action_classes,
             "learned_frequency_threshold": frequency_threshold,
+            "learned_action_bands": action_bands,
+            "learned_frequency_band_thresholds": list(frequency_band_thresholds),
             "warning": "a compact spelling family is retained only when unseen prediction improves"}
 
 
 def transform_transitions(transitions: dict[str, dict[str, int]], report: dict) -> dict[str, dict[str, int]]:
     scheme = report.get("selected_scheme", "surface")
     families = report.get("learned_form_families", {})
-    action_classes = report.get("learned_action_classes", {})
+    action_classes = (report.get("learned_action_bands", {}) if scheme == "learned_frequency_bands"
+                      else report.get("learned_action_classes", {}))
     transformed: dict[str, dict[str, int]] = {}
     for prior, outcomes in transitions.items():
         context = abstract_event(prior, scheme, families, action_classes)
