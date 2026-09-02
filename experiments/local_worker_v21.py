@@ -1004,6 +1004,10 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             representation_report = read_json(runtime / "representation-memory.json")
             association_report = read_json(runtime / "association-memory.json")
             experience_report = read_json(runtime / "experience-revision.json")
+            if not causal_report or "selected_view" not in causal_report:
+                causal_report = evaluate_causal_views(
+                    memory.get("quality_event_transitions", {}), representation_report)
+                write_json(runtime / "causal-memory.json", causal_report)
             if not association_report or "selected_evaluation" not in association_report:
                 association_report = AssociationLearner(
                     memory.get("quality_event_transitions", {}),
