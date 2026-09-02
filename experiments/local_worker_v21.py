@@ -1005,7 +1005,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             representation_report = read_json(runtime / "representation-memory.json")
             association_report = read_json(runtime / "association-memory.json")
             experience_report = read_json(runtime / "experience-revision.json")
-            if not association_report:
+            if not association_report or "selected_evaluation" not in association_report:
                 association_report = AssociationLearner(
                     memory.get("quality_event_transitions", {}),
                     memory.get("quality_event_counts", {})).run()
