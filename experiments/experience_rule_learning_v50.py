@@ -23,9 +23,11 @@ def _source_holdout(source: str) -> bool:
     return hashlib.sha256(f"rule-source:{source}".encode()).digest()[0] % 5 == 0
 
 
-def learn_experience_rules(verified: dict, previous: dict | None = None) -> dict:
+def learn_experience_rules(verified: dict, previous: dict | None = None,
+                           dialogue_verification: dict | None = None) -> dict:
     """Run structure -> compare -> hypothesize -> source-holdout test -> revise."""
     previous = previous or {}
+    dialogue_verification = dialogue_verification or {}
     frames, train, test = [], [], []
     for sequence in verified.get("sequences", []):
         source = sequence.get("source_url", "")
@@ -45,6 +47,19 @@ def learn_experience_rules(verified: dict, previous: dict | None = None) -> dict
         for prior, outcome in zip(events, events[1:]):
             if _parts(prior)[0] == _parts(outcome)[0]:
                 target.append((source, prior, outcome))
+
+    # Admit independent web structures, never the local partner's generated examples.
+    dialogue_frames = []
+    for expression, item in dialogue_verification.get("expressions", {}).items():
+        hypothesis = item.get("structural_hypothesis") or {}
+        if (item.get("independent_sources", 0) < 2
+                or not item.get("hypothesis_status", "").startswith("supported_structural")):
+            continue
+        dialogue_frames.append({"experience_id": item.get("verification_id"),
+            "source_id": item.get("source_urls", []), "expression": expression,
+            "relation": hypothesis.get("predicted_role"), "contexts": item.get("contexts", []),
+            "certainty": "independent_web_structure",
+            "origin": "web_contexts_not_local_partner"})
 
     # Compare experiences sharing an action but differing in entity/object.
     groups: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
@@ -127,7 +142,8 @@ def learn_experience_rules(verified: dict, previous: dict | None = None) -> dict
         next_target = {"seed": " ".join(terms),
                        "reason": "seek an independent boundary case for a weakened rule",
                        "rule_id": item["rule_id"]}
-    summary = {"structured_experiences": len(frames), "comparison_groups": len(comparisons),
+    summary = {"structured_experiences": len(frames),
+               "dialogue_structures": len(dialogue_frames), "comparison_groups": len(comparisons),
                "candidate_rules": len(rules),
                "reusable_rules": sum(r["status"] == "reusable" for r in rules),
                "weakened_rules": sum(r["status"] == "weakened" for r in rules),
@@ -135,7 +151,8 @@ def learn_experience_rules(verified: dict, previous: dict | None = None) -> dict
                               "coverage": round(covered / total, 4) if total else 0.0,
                               "material_lift": material},
                "next_learning_target": next_target}
-    return {"version": 50, "frames": frames[-5000:], "comparisons": comparisons[:1000],
+    return {"version": 50, "frames": frames[-5000:], "dialogue_frames": dialogue_frames[-2000:],
+            "comparisons": comparisons[:1000],
             "rules": rules[:5000], "trials": trials[-2000:],
             "revision_history": revisions[-1000:], "summary": summary,
             "invariants": ["whole_source_holdout", "local_llm_has_zero_evidence_credit",

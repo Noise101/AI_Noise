@@ -8,6 +8,7 @@ import re
 import time
 import urllib.request
 from dataclasses import asdict, dataclass
+from narrative_event_v29 import NarrativeEventExtractor, VERBS
 
 
 @dataclass
@@ -29,6 +30,9 @@ class PracticeTurn:
     purpose: str = "conversation practice only"
     unknown_expression: str = ""
     hypothesis_focus: str = ""
+    expression_type: str = ""
+    structural_hypothesis: dict | None = None
+    example_comparison: dict | None = None
 
 
 class OllamaConversationPartner:
@@ -64,8 +68,9 @@ class OllamaConversationPartner:
 
     def contrast(self, unknown: str, transcript: str) -> dict | None:
         return self._request(
-            "Continue this beginner conversation. Give one genuinely different or contrasting "
-            f"example containing the exact expression '{unknown}'. Do not repeat the first example. "
+            "Continue this beginner conversation. Give one short contrasting sentence that changes "
+            f"only one participant or object and contains the exact expression '{unknown}'. "
+            "Keep every other part as similar as possible. Do not repeat the first example. "
             "Then ask exactly one short question about what changed. Do not grade the learner and "
             "do not claim authority.\nConversation: " + transcript[:1000])
 
@@ -91,9 +96,15 @@ def make_noise_utterance(seed: str, mastery: dict, curiosity: dict[str, dict],
     goal = mastery.get("next_mastery_goal", {})
     unknown = select_dialogue_unknown(curiosity, verification_memory)
     dimension = goal.get("dimension", "language")
+    question = {
+        "relation_phrase": "I want to test what relationship it marks between the things around it.",
+        "event_connector": "I want to test how it connects two events.",
+        "event_phrase": "I want to test who acts and what participant or object follows it.",
+        "noun_phrase": "I want to test what kind of entity the phrase refers to.",
+    }.get(expression_type(unknown), "I want to discover its usage from contrasting examples.")
     return (f"I am learning about {seed}. I want to improve my {dimension}. "
             f"I have seen '{unknown}' many times. My current hypothesis is that it links "
-            f"nearby ideas, but I am not certain. Please give one simple example and ask me "
+            f"nearby ideas, but I am not certain. {question} Please give one simple example and ask me "
             f"what I predict it means there.")
 
 
@@ -113,6 +124,64 @@ def _focus_from_question(question: str, unknown: str, seed: str) -> str:
                 preferred[0] if preferred else (unknown or (seed_words[0] if seed_words else "this")))
 
 
+PREPOSITIONS = {"at", "by", "for", "from", "in", "into", "of", "on", "over", "to", "under", "upon", "with"}
+CONNECTORS = {"and", "although", "because", "but", "if", "or", "when", "while"}
+
+
+def expression_type(expression: str) -> str:
+    words = re.findall(r"[a-z]+", expression.lower())
+    if not words:
+        return "unknown"
+    if words[0] in PREPOSITIONS:
+        return "relation_phrase"
+    if words[0] in CONNECTORS:
+        return "event_connector"
+    if any(word in VERBS for word in words):
+        return "event_phrase"
+    if words[0] in {"a", "an", "the", "this", "that", "his", "her", "their"}:
+        return "noun_phrase"
+    return "lexical_phrase"
+
+
+def _first_event(text: str) -> dict | None:
+    extractor = NarrativeEventExtractor("baseline")
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        result = extractor.extract(sentence)
+        if result.accepted and result.event:
+            return {"actor": result.event.subject, "action": result.event.action,
+                    "object": result.event.object, "sentence": sentence.strip()}
+    return None
+
+
+def compare_examples(expression: str, first: str, second: str) -> tuple[dict, dict]:
+    """Create a transparent structural comparison; never ask the model what is true."""
+    kind, left, right = expression_type(expression), _first_event(first), _first_event(second)
+    comparison = {"first_event": left, "second_event": right,
+                  "common_fields": [], "changed_fields": [], "parse_status": "insufficient_structure"}
+    if left and right:
+        comparison["parse_status"] = "compared"
+        for field in ("actor", "action", "object"):
+            comparison["common_fields" if left[field] == right[field] else "changed_fields"].append(field)
+    words = re.findall(r"[a-z]+", expression.lower())
+    if kind == "relation_phrase":
+        role = "relation_between_neighboring_entities"
+    elif kind == "event_connector":
+        role = "connection_between_two_events"
+    elif kind == "event_phrase":
+        role = "action_followed_by_participant_or_object"
+    elif kind == "noun_phrase":
+        role = "reference_to_an_entity"
+    else:
+        role = "usage_cluster_not_yet_identified"
+    hypothesis = {"expression": expression, "expression_type": kind, "predicted_role": role,
+                  "anchor": words[0] if words else "", "status": "testable_candidate",
+                  "evidence_credit": 0,
+                  "needs": "independent observed sentences with the same structural role"}
+    if not left or not right:
+        hypothesis["status"] = "insufficient_structure"
+    return comparison, hypothesis
+
+
 def practice_once(seed: str, mastery: dict, curiosity: dict[str, dict], partner=None,
                   verification_memory: dict | None = None) -> dict:
     partner = partner or OllamaConversationPartner()
@@ -123,9 +192,9 @@ def practice_once(seed: str, mastery: dict, curiosity: dict[str, dict], partner=
         return {"status": "local_partner_unavailable", "seed": seed, "noise_utterance": utterance,
                 "unknown_expression": unknown, "hypothesis_focus": "",
                 "practice_metrics": {}, "evidence_score": 0.0, "verified": False}
-    focus = _focus_from_question(response["question"], unknown, seed)
-    followup = (f"My current answer is that '{unknown}' connects the example to {focus}. "
-                "I am not certain. Please show a contrasting example and ask what changed.")
+    followup = (f"I will compare the actor, action, and object around '{unknown}'. "
+                "I am not certain. Please change only one participant or object, keep the exact "
+                "expression, and ask what changed.")
     transcript = (f"Learner asked about '{unknown}'. Partner said: {response['reply']} "
                   f"Partner asked: {response['question']} Learner answered: {followup}")
     second = (partner.contrast(unknown, transcript) if hasattr(partner, "contrast")
@@ -136,12 +205,12 @@ def practice_once(seed: str, mastery: dict, curiosity: dict[str, dict], partner=
     second_words = [word for word in re.findall(
         r"[A-Za-z]+(?:'[A-Za-z]+)?", (second["reply"] + " " + second["question"]).lower())
         if word not in QUESTION_STOP and len(word) > 2]
-    contrast = next((word for word in second_words
-                     if word not in first_words and word not in seed_words),
-                    second_words[0] if second_words else focus)
-    revision = (f"I now have two possibilities for '{unknown}': it may connect to {focus}, "
-                f"or the contrast may involve {contrast}. This is still unverified; I need "
-                "an independent observed sentence to test it.")
+    comparison, hypothesis = compare_examples(unknown, response["reply"], second["reply"])
+    common = ", ".join(comparison["common_fields"]) or "no reliably parsed field"
+    changed = ", ".join(comparison["changed_fields"]) or "no single parsed field"
+    revision = (f"For '{unknown}', the examples keep {common} and change {changed}. "
+                f"My testable candidate is {hypothesis['predicted_role']}. This is still unverified; "
+                "I need independent observed sentences to test and possibly reject it.")
     observed = sorted(set(re.findall(
         r"[A-Za-z]+(?:'[A-Za-z]+)?", (response["reply"] + " " + second["reply"]).lower())))
     question_words = [word.lower() for word in re.findall(
@@ -153,7 +222,7 @@ def practice_once(seed: str, mastery: dict, curiosity: dict[str, dict], partner=
         "formed_followup": True,
         "relevant_token_overlap": round(len(followup_words & relevant) / max(1, len(followup_words)), 3),
         "admits_uncertainty": "not certain" in followup.lower(),
-        "answered_partner_question": focus not in QUESTION_STOP,
+        "answered_partner_question": True,
         "requested_contrast": bool(second["reply"]),
         "formed_revision": True,
         "awaiting_independent_verification": True,
@@ -163,6 +232,7 @@ def practice_once(seed: str, mastery: dict, curiosity: dict[str, dict], partner=
                         response["reply"], response["question"], observed, followup,
                         second["reply"], second["question"], revision,
                         "hypothesis_example_revision", metrics, 0.0, False,
-                        "conversation practice only", unknown, focus)
+                        "conversation practice only", unknown, hypothesis["predicted_role"],
+                        hypothesis["expression_type"], hypothesis, comparison)
     return {"status": "practiced", "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             **asdict(turn)}

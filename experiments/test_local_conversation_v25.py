@@ -1,6 +1,7 @@
 import unittest
 
-from local_conversation_v25 import make_noise_utterance, practice_once, select_dialogue_unknown
+from local_conversation_v25 import (compare_examples, expression_type, make_noise_utterance,
+                                    practice_once, select_dialogue_unknown)
 
 
 class FakePartner:
@@ -13,6 +14,19 @@ class FakePartner:
 
 
 class LocalConversationTest(unittest.TestCase):
+    def test_expression_types_drive_different_questions(self):
+        self.assertEqual(expression_type("with the"), "relation_phrase")
+        self.assertEqual(expression_type("saw a"), "event_phrase")
+        self.assertEqual(expression_type("the girl"), "noun_phrase")
+
+    def test_noise_compares_events_instead_of_picking_a_question_word(self):
+        comparison, hypothesis = compare_examples(
+            "saw a", "The cat saw a mouse.", "The cat saw a bird.")
+        self.assertEqual(comparison["common_fields"], ["actor", "action"])
+        self.assertEqual(comparison["changed_fields"], ["object"])
+        self.assertEqual(hypothesis["predicted_role"],
+                         "action_followed_by_participant_or_object")
+        self.assertEqual(hypothesis["evidence_credit"], 0)
     def test_verified_repetition_loses_priority_to_an_untried_question(self):
         curiosity = {"phrase:of the": {"pressure": 100, "status": "wanting_to_know"},
                      "word:vine": {"pressure": 20, "status": "wanting_to_know"}}
@@ -43,6 +57,8 @@ class LocalConversationTest(unittest.TestCase):
         self.assertTrue(turn["practice_metrics"]["requested_contrast"])
         self.assertTrue(turn["practice_metrics"]["formed_revision"])
         self.assertIn("unverified", turn["noise_revision"])
+        self.assertIn("structural_hypothesis", turn)
+        self.assertIn("example_comparison", turn)
         self.assertEqual(len(partner.calls), 2)
         self.assertFalse(turn["practice_metrics"]["independent_evidence_added"])
 

@@ -76,12 +76,27 @@ def _contexts(expression: str, passage: str) -> list[dict]:
     return found[:5]
 
 
+def _structural_match(hypothesis: dict, context: dict) -> bool:
+    role = hypothesis.get("predicted_role")
+    before, after = context.get("before", []), context.get("after", [])
+    if role == "relation_between_neighboring_entities":
+        return bool(before and after)
+    if role == "connection_between_two_events":
+        return len(before) >= 2 and len(after) >= 2
+    if role == "action_followed_by_participant_or_object":
+        return bool(after)
+    if role == "reference_to_an_entity":
+        return True
+    return False
+
+
 def verify_dialogue_hypothesis(turn: dict, memory: dict,
                                sources: list[ObservationSource] | None = None,
                                network_budget: int = 2) -> dict:
     """Let deterministic Noise rules judge independent observations, never the partner."""
     expression = str(turn.get("unknown_expression") or "").strip().lower()
     focus = str(turn.get("hypothesis_focus") or "").strip().lower()
+    structural_hypothesis = turn.get("structural_hypothesis") or {}
     if not expression or len(expression) > 60:
         return {"status": "not_searchable", "expression": expression,
                 "final_judgment_made_by": "noise_evidence_rule_v1"}
@@ -107,8 +122,15 @@ def verify_dialogue_hypothesis(turn: dict, memory: dict,
         if any(focus in context["before"] + context["after"]
                for context in _contexts(expression, item.passage))
     } if focus else set()
+    structural_source_support = {
+        item.source for item in observations
+        if any(_structural_match(structural_hypothesis, context)
+               for context in _contexts(expression, item.passage))
+    } if structural_hypothesis.get("status") == "testable_candidate" else set()
     following = {tuple(context["after"][:2]) for context in contexts if context["after"]}
-    if len(source_focus_support) >= 2:
+    if len(structural_source_support) >= 2:
+        hypothesis_status = "supported_structural_candidate_not_meaning_proof"
+    elif len(source_focus_support) >= 2:
         hypothesis_status = "supported_candidate_not_meaning_proof"
     elif len(independent_sources) >= 2 and focus and not source_focus_support:
         hypothesis_status = "rejected_as_overspecific"
@@ -125,6 +147,8 @@ def verify_dialogue_hypothesis(turn: dict, memory: dict,
         "independent_sources": len(independent_sources), "source_names": independent_sources,
         "source_urls": sorted({item.url for item in observations}),
         "contexts": contexts[:12], "context_diversity": len(following),
+        "structural_hypothesis": structural_hypothesis,
+        "structural_supporting_sources": len(structural_source_support),
         "common_neighbors": Counter(neighboring).most_common(8),
         "partner_claim_used_as_evidence": False,
         "meaning_committed": False,
@@ -139,7 +163,10 @@ def verify_dialogue_hypothesis(turn: dict, memory: dict,
         "expressions_investigated": len(values),
         "independently_observed": sum(item.get("independent_sources", 0) >= 2 for item in values),
         "supported_candidates": sum(item.get("hypothesis_status") ==
-                                    "supported_candidate_not_meaning_proof" for item in values),
+                                    "supported_candidate_not_meaning_proof" or
+                                    item.get("hypothesis_status") ==
+                                    "supported_structural_candidate_not_meaning_proof"
+                                    for item in values),
         "rejected_overspecific": sum(item.get("hypothesis_status") ==
                                     "rejected_as_overspecific" for item in values),
         "unresolved": sum(item.get("hypothesis_status") == "unresolved" for item in values),

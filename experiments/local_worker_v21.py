@@ -281,7 +281,7 @@ def render_human_status(status: dict, now_epoch: float | None = None,
              f"人間科学観測   : {scaffold.get('observation_frames', 0):,}件（解釈 {scaffold.get('interpretations_committed', 0)}、仮説 {scaffold.get('hypotheses_committed', 0)}）",
              f"対話からWeb検証: {dialogue_verification.get('expressions_investigated', 0):,}表現（独立確認 {dialogue_verification.get('independently_observed', 0):,}、過剰仮説を棄却 {dialogue_verification.get('rejected_overspecific', 0):,}）",
              f"ローカルAIを正解採用: {dialogue_verification.get('local_llm_claims_accepted_as_fact', 0)}件",
-             f"構造化した経験 : {learned_rules.get('structured_experiences', 0):,}件（比較群 {learned_rules.get('comparison_groups', 0):,}）",
+             f"構造化した経験 : {learned_rules.get('structured_experiences', 0):,}件（対話Web構造 {learned_rules.get('dialogue_structures', 0):,}、比較群 {learned_rules.get('comparison_groups', 0):,}）",
              f"新しい経験規則 : 候補 {learned_rules.get('candidate_rules', 0):,}、再利用可能 {learned_rules.get('reusable_rules', 0):,}、弱化 {learned_rules.get('weakened_rules', 0):,}",
              (f"作品別の未見評価: {learned_eval.get('correct', 0)}/{learned_eval.get('total', 0)}、"
               f"単純基準 {learned_eval.get('baseline_correct', 0)}/{learned_eval.get('total', 0)}、"
@@ -1134,7 +1134,8 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         report["self_learning_policy"] = self_learning_policy
         rule_path = runtime / "experience-rule-memory.json"
         learned_rule_memory = learn_experience_rules(
-            verified_experience, read_json(rule_path))
+            verified_experience, read_json(rule_path),
+            read_json(runtime / "dialogue-web-verification.json"))
         write_json(rule_path, learned_rule_memory)
         report["learned_experience_rules"] = learned_rule_memory.get("summary", {})
         learning_transitions = verified_experience.get("transitions", {})

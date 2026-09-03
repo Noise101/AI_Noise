@@ -13,6 +13,19 @@ class FakeSource:
 
 
 class DialogueWebVerificationTest(unittest.TestCase):
+    def test_two_sources_can_support_a_structural_role_without_proving_meaning(self):
+        turn = {"unknown_expression": "with the", "hypothesis_focus": "",
+                "structural_hypothesis": {"status": "testable_candidate",
+                    "predicted_role": "relation_between_neighboring_entities"}}
+        result = verify_dialogue_hypothesis(turn, empty_verification_memory(), [
+            FakeSource("source-a", "A child walked with the dog."),
+            FakeSource("source-b", "A cup came with the meal."),
+        ])
+        self.assertEqual(result["hypothesis_status"],
+                         "supported_structural_candidate_not_meaning_proof")
+        self.assertEqual(result["structural_supporting_sources"], 2)
+        self.assertFalse(result["meaning_committed"])
+
     def test_noise_rejects_partner_focus_when_independent_contexts_disagree(self):
         turn = {"unknown_expression": "in the", "hypothesis_focus": "cat",
                 "partner_reply": "The local model says it connects to cat."}

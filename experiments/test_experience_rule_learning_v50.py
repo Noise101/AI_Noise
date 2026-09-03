@@ -5,6 +5,19 @@ from experience_rule_learning_v50 import learn_experience_rules
 
 
 class ExperienceRuleLearningTest(unittest.TestCase):
+    def test_only_independently_verified_dialogue_structure_is_admitted(self):
+        dialogue = {"expressions": {
+            "with the": {"verification_id": "ok", "independent_sources": 2,
+                "hypothesis_status": "supported_structural_candidate_not_meaning_proof",
+                "structural_hypothesis": {"predicted_role": "relation_between_neighboring_entities"},
+                "source_urls": ["a", "b"], "contexts": [{"before": ["walk"], "after": ["dog"]}]},
+            "made up": {"verification_id": "no", "independent_sources": 0,
+                "hypothesis_status": "unresolved"}}}
+        result = learn_experience_rules({"sequences": []}, dialogue_verification=dialogue)
+        self.assertEqual(result["summary"]["dialogue_structures"], 1)
+        self.assertEqual(result["dialogue_frames"][0]["origin"],
+                         "web_contexts_not_local_partner")
+
     @patch("experience_rule_learning_v50._source_holdout", side_effect=lambda source: source == "test")
     def test_structures_compares_tests_and_retains_counterexamples(self, _split):
         sequences = []
