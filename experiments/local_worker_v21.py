@@ -22,7 +22,7 @@ from web_cache import WEB_CACHE, NetworkBudgetExceeded
 from curiosity_drive_v23 import curiosity_pressure
 from mastery_drive_v24 import assess_language_mastery
 from local_conversation_v25 import practice_once
-from compact_runtime_v26 import compact_runtime
+from compact_runtime_v26 import compact_historical_seed_reports, compact_runtime
 from global_memory_v27 import empty_memory, mastery_report, merge_report
 from causal_experiment_v28 import evaluate_causal_views
 from causal_lab_v30 import run_lab
@@ -341,6 +341,9 @@ def runtime_bytes(runtime: Path) -> int:
 def enforce_storage_budget(runtime: Path, max_bytes: int) -> dict:
     """Apply the staged storage policy; max_bytes is the compaction threshold."""
     previous = read_json(runtime / "storage-status.json")
+    curriculum = read_json(runtime / "curriculum-state.json")
+    redundancy = compact_historical_seed_reports(
+        runtime, curriculum.get("current_seed"), max_files=250, apply=True)
     checked_epoch = time.time()
     runtime_before = runtime_bytes(runtime)
     cache_dir = WEB_CACHE.cache_dir if runtime.resolve() == DEFAULT_RUNTIME.resolve() else None
@@ -388,7 +391,9 @@ def enforce_storage_budget(runtime: Path, max_bytes: int) -> dict:
               "compaction_due": compaction_due,
               "compacted": compacted is not None,
               "last_compaction_epoch": last_compaction_epoch,
-              "bytes_reclaimed": 0 if not compacted else compacted["bytes_reclaimed"],
+              "bytes_reclaimed": ((0 if not compacted else compacted["bytes_reclaimed"])
+                                    + redundancy["bytes_reclaimed"]),
+              "redundancy_compaction": redundancy,
               "disk_free_bytes": disk_free,
               "minimum_free_bytes": DEFAULT_MIN_FREE_BYTES,
               "resume_free_bytes": DEFAULT_RESUME_FREE_BYTES,

@@ -11,6 +11,9 @@ from pathlib import Path
 from curiosity_drive_v23 import curiosity_pressure
 
 
+REPORT_COMPACTION_VERSION = 1
+
+
 def local_gap_ids(state: dict) -> set[str]:
     return {cycle.get("gap", {}).get("gap_id") for cycle in state.get("cycles", [])
             if cycle.get("gap", {}).get("gap_id")}
@@ -87,6 +90,79 @@ def atomic_json(path: Path, value: dict) -> int:
     temporary.write_text(payload, encoding="utf-8")
     temporary.replace(path)
     return len(payload.encode())
+
+
+def compact_seed_report(report: dict) -> tuple[dict, dict]:
+    """Keep seed evidence but remove reconstructible copies of global priors."""
+    if report.get("storage_compaction", {}).get("version") == REPORT_COMPACTION_VERSION:
+        return report, {"already_compacted": True}
+    knowledge = report.get("knowledge", {})
+    bootstrap = knowledge.get("bootstrap", {})
+    lexicon = knowledge.get("lexicon", {})
+    word_forms = lexicon.get("word_forms", {})
+    phrase_candidates = lexicon.get("phrase_candidates", [])
+    phrase_forms = {item.get("phrase") for item in phrase_candidates if item.get("phrase")}
+    conversation_cues = lexicon.get("conversation_cues", {})
+    compact_lexicon = {
+        name: lexicon.get(name, default) for name, default in (
+            ("sentences_seen", 0), ("character_inventory", 0), ("characters", {}),
+            ("word_forms", {}), ("grounded_meanings", []), ("phrase_candidates", []),
+            ("conversation_cues", {}), ("meaning_revisions", []),
+        )
+    }
+    compact_lexicon["researched_meanings"] = {
+        key: value for key, value in lexicon.get("researched_meanings", {}).items()
+        if key in word_forms and isinstance(value, dict) and value.get("accepted_sense")
+    }
+    compact_lexicon["researched_phrase_meanings"] = {
+        key: value for key, value in lexicon.get("researched_phrase_meanings", {}).items()
+        if key in phrase_forms and isinstance(value, dict) and value.get("accepted_sense")
+    }
+    compact_lexicon["researched_conversation_acts"] = {
+        key: value for key, value in lexicon.get("researched_conversation_acts", {}).items()
+        if key in conversation_cues and isinstance(value, dict) and value.get("accepted_sense")
+    }
+    knowledge["bootstrap"] = {
+        name: bootstrap.get(name) for name in (
+            "seed_concept", "first_generated_query", "sources",
+            "next_self_generated_goal", "generated_at") if name in bootstrap
+    }
+    knowledge["lexicon"] = compact_lexicon
+    report["knowledge"] = knowledge
+    state = report.get("state", {})
+    report["state"] = {name: state.get(name) for name in (
+        "seed", "stop_reason", "created_at", "updated_at") if name in state}
+    report["storage_compaction"] = {
+        "version": REPORT_COMPACTION_VERSION,
+        "kind": "historical_seed_evidence",
+        "reconstructible_global_priors_removed": True,
+    }
+    return report, {"already_compacted": False}
+
+
+def compact_historical_seed_reports(runtime: Path, current_seed: str | None = None,
+                                    max_files: int = 250, apply: bool = True) -> dict:
+    """Incrementally compact inactive reports without pausing normal learning."""
+    processed = reclaimed = 0
+    for path in sorted((runtime / "seeds").glob("*/latest-report.json")):
+        if processed >= max_files:
+            break
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            continue
+        if value.get("state", {}).get("seed") == current_seed:
+            continue
+        compacted, detail = compact_seed_report(value)
+        if detail["already_compacted"]:
+            continue
+        before = path.stat().st_size
+        after = atomic_json(path, compacted) if apply else len(
+            (json.dumps(compacted, ensure_ascii=False, separators=(",", ":")) + "\n").encode())
+        processed += 1
+        reclaimed += max(0, before - after)
+    return {"processed_reports": processed, "bytes_reclaimed": reclaimed,
+            "batch_limit": max_files, "status": "applied" if apply else "dry_run"}
 
 
 def compact_runtime(runtime: Path, apply: bool) -> dict:
