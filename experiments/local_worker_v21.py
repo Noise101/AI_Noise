@@ -47,6 +47,7 @@ from cooperative_world_v45 import empty_cooperative_memory, learn_cooperation
 from abstraction_world_v46 import (assess_open_transfer, empty_abstraction_memory,
                                    learn_abstractions)
 from verified_experience_v47 import select_experience_profile
+from experience_rule_learning_v50 import learn_experience_rules
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -254,6 +255,8 @@ def render_human_status(status: dict, now_epoch: float | None = None,
     abstraction_world = status.get("abstraction_world", {})
     scaffold = status.get("epistemic_scaffold", {})
     dialogue_verification = status.get("dialogue_verification", {})
+    learned_rules = status.get("learned_experience_rules", {})
+    learned_eval = learned_rules.get("evaluation", {})
     storage = status.get("storage", {})
     quality = status.get("developmental_quality")
     lines = ["Noise 学習状況", "=" * 34,
@@ -278,6 +281,11 @@ def render_human_status(status: dict, now_epoch: float | None = None,
              f"人間科学観測   : {scaffold.get('observation_frames', 0):,}件（解釈 {scaffold.get('interpretations_committed', 0)}、仮説 {scaffold.get('hypotheses_committed', 0)}）",
              f"対話からWeb検証: {dialogue_verification.get('expressions_investigated', 0):,}表現（独立確認 {dialogue_verification.get('independently_observed', 0):,}、過剰仮説を棄却 {dialogue_verification.get('rejected_overspecific', 0):,}）",
              f"ローカルAIを正解採用: {dialogue_verification.get('local_llm_claims_accepted_as_fact', 0)}件",
+             f"構造化した経験 : {learned_rules.get('structured_experiences', 0):,}件（比較群 {learned_rules.get('comparison_groups', 0):,}）",
+             f"新しい経験規則 : 候補 {learned_rules.get('candidate_rules', 0):,}、再利用可能 {learned_rules.get('reusable_rules', 0):,}、弱化 {learned_rules.get('weakened_rules', 0):,}",
+             (f"作品別の未見評価: {learned_eval.get('correct', 0)}/{learned_eval.get('total', 0)}、"
+              f"単純基準 {learned_eval.get('baseline_correct', 0)}/{learned_eval.get('total', 0)}、"
+              f"適用範囲 {100 * learned_eval.get('coverage', 0):.1f}%"),
              "", "限定実験世界（機構診断用・実能力ではない）", "-" * 34,
              f"第一段階       : {micro_world.get('status', '準備中')}",
              f"自分で行った実験: {micro_world.get('interventions', 0):,}回",
@@ -817,6 +825,17 @@ def structural_counterexample_candidate(experience_report: dict, visited: set[st
     return None
 
 
+def learned_rule_boundary_candidate(rule_memory: dict, visited: set[str]) -> dict | None:
+    """Let a failed source-held-out rule request its own independent boundary case."""
+    item = rule_memory.get("summary", {}).get("next_learning_target") or {}
+    seed = str(item.get("seed", "")).strip().lower()
+    if seed and seed not in visited and valid_curriculum_seed(seed):
+        return {"seed": seed, "score": 7.0, "reason": item.get(
+                    "reason", "seek an independent boundary case for a weakened rule"),
+                "parent_url": None, "rule_id": item.get("rule_id")}
+    return None
+
+
 def causal_comparison_candidate(causal_report: dict, visited: set[str]) -> dict | None:
     """Seek both sides of a real observational contrast; never invent its answer."""
     for item in causal_report.get("matched_contrasts", []):
@@ -925,6 +944,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
     verified_experience = read_json(runtime / "verified-experience.json")
     self_learning_policy = read_json(runtime / "self-learning-policy.json")
     dialogue_verification = read_json(runtime / "dialogue-web-verification.json")
+    learned_rules = read_json(runtime / "experience-rule-memory.json")
     return {
         "phase": phase,
         "seed": seed,
@@ -943,6 +963,8 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
                     "next_goal": mastery.get("next_mastery_goal")},
         "local_conversation": report.get("local_conversation"),
         "dialogue_verification": dialogue_verification.get("summary", {}),
+        "learned_experience_rules": report.get("learned_experience_rules") or
+                                    learned_rules.get("summary", {}),
         "storage": read_json(runtime / "storage-status.json"),
         "global_memory": report.get("global_memory") or read_json(
             runtime / "global-language-memory.json").get("totals", {}),
@@ -1110,6 +1132,11 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         write_json(runtime / "self-learning-policy.json", self_learning_policy)
         report["verified_experience"] = verified_experience.get("summary", {})
         report["self_learning_policy"] = self_learning_policy
+        rule_path = runtime / "experience-rule-memory.json"
+        learned_rule_memory = learn_experience_rules(
+            verified_experience, read_json(rule_path))
+        write_json(rule_path, learned_rule_memory)
+        report["learned_experience_rules"] = learned_rule_memory.get("summary", {})
         learning_transitions = verified_experience.get("transitions", {})
         coherent_transitions = verified_experience.get("coherent_transitions", learning_transitions)
         learning_event_counts = verified_experience.get("event_counts", {})
@@ -1201,9 +1228,15 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                 experience_report = ExperienceRevisionEngine(
                     coherent_transitions, contextual_transitions).run()
                 write_json(runtime / "experience-revision.json", experience_report)
+        learned_summary = learned_rule_memory.get("summary", {})
+        rule_gate_input = ({"summary": {
+            "reusable_rules": learned_summary.get("reusable_rules", 0),
+            "evaluation": learned_summary.get("evaluation", {})}}
+            if learned_summary.get("evaluation", {}).get("material_lift")
+            and learned_summary.get("reusable_rules", 0) > 0 else experience_report)
         abstraction_summary = assess_open_transfer(
             abstraction_memory, representation_report, association_report,
-            causal_report, experience_report)
+            causal_report, rule_gate_input)
         write_json(abstraction_path, abstraction_memory)
         report["abstraction_world"] = abstraction_summary
         error_path = runtime / "error-memory.json"
@@ -1291,7 +1324,9 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             visited = set(curriculum["completed_seeds"]) | set(curriculum["deferred_seeds"])
             discovered = discover_curriculum(report, visited, effective_network)
             if report.get("autonomy", {}).get("mode") == "counterexample_hunt":
-                targeted = causal_comparison_candidate(causal_report, visited)
+                targeted = learned_rule_boundary_candidate(learned_rule_memory, visited)
+                if not targeted:
+                    targeted = causal_comparison_candidate(causal_report, visited)
                 if not targeted:
                     targeted = repeated_grounding_candidate(verified_experience, visited)
                 if not targeted:
