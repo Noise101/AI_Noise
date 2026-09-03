@@ -34,7 +34,7 @@ class PracticeTurn:
 class OllamaConversationPartner:
     def __init__(self, base_url: str = "http://127.0.0.1:11434", model: str | None = None):
         self.base_url = base_url.rstrip("/")
-        self.model = model or os.environ.get("AI_NOISE_LOCAL_MODEL", "qwen3:4b")
+        self.model = model or os.environ.get("AI_NOISE_LOCAL_MODEL", "qwen3.8:27b")
 
     def _request(self, prompt: str) -> dict | None:
         schema = {"type": "object", "properties": {
@@ -58,6 +58,7 @@ class OllamaConversationPartner:
         return self._request(
             "You are a patient conversation partner for a beginning learner. "
             "Reply with at most two short child-level sentences, then ask exactly one short question. "
+            "The example must contain the exact expression quoted by the learner. "
             "Do not grade the learner and do not claim your reply is authoritative evidence.\n"
             f"Learner: {utterance[:600]}")
 
