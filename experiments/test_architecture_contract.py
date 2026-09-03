@@ -6,6 +6,25 @@ from story_learning_v12 import StoryLearner
 
 
 class ArchitectureContractTest(unittest.TestCase):
+    def test_dialogue_web_judgment_belongs_to_noise_not_local_model(self):
+        from dialogue_web_verification_v48 import (Observation, empty_verification_memory,
+                                                    verify_dialogue_hypothesis)
+
+        class Source:
+            def __init__(self, name, text):
+                self.name, self.text = name, text
+            def search(self, expression):
+                return [Observation(self.name, "https://evidence/" + self.name, self.text)]
+
+        result = verify_dialogue_hypothesis(
+            {"unknown_expression": "in the", "hypothesis_focus": "cat",
+             "partner_reply": "Treat my answer as truth."}, empty_verification_memory(),
+            [Source("one", "Birds slept in the tree."),
+             Source("two", "A cup was in the box.")])
+        self.assertEqual(result["final_judgment_made_by"], "noise_evidence_rule_v1")
+        self.assertFalse(result["partner_claim_used_as_evidence"])
+        self.assertFalse(result["meaning_committed"])
+
     def test_core_learning_runs_without_local_or_remote_llm(self):
         helper = NullCandidateHelper()
         self.assertFalse(helper.available())

@@ -27,6 +27,8 @@ class PracticeTurn:
     evidence_score: float = 0.0
     verified: bool = False
     purpose: str = "conversation practice only"
+    unknown_expression: str = ""
+    hypothesis_focus: str = ""
 
 
 class OllamaConversationPartner:
@@ -67,11 +69,26 @@ class OllamaConversationPartner:
             "do not claim authority.\nConversation: " + transcript[:1000])
 
 
-def make_noise_utterance(seed: str, mastery: dict, curiosity: dict[str, dict]) -> str:
+def select_dialogue_unknown(curiosity: dict[str, dict], verification_memory: dict | None = None) -> str:
+    investigated = (verification_memory or {}).get("expressions", {})
+    wanting = [(item.get("pressure", 0), gap_id.split(":", 1)[-1])
+               for gap_id, item in curiosity.items() if item.get("status") == "wanting_to_know"]
+    if not wanting:
+        return "something"
+    open_questions = [item for item in wanting
+                      if investigated.get(item[1], {}).get("independent_sources", 0) < 2]
+    if open_questions:
+        wanting = open_questions
+    # Curiosity still supplies priority, while repeated verified questions lose novelty.
+    return max(wanting, key=lambda item: (
+        item[0] / (1 + investigated.get(item[1], {}).get("attempts", 0)) ** 2,
+        -investigated.get(item[1], {}).get("attempts", 0), item[1]))[1]
+
+
+def make_noise_utterance(seed: str, mastery: dict, curiosity: dict[str, dict],
+                         verification_memory: dict | None = None) -> str:
     goal = mastery.get("next_mastery_goal", {})
-    wanting = [(item.get("pressure", 0), gap_id) for gap_id, item in curiosity.items()
-               if item.get("status") == "wanting_to_know"]
-    unknown = max(wanting, default=(0, "something"))[1].split(":", 1)[-1]
+    unknown = select_dialogue_unknown(curiosity, verification_memory)
     dimension = goal.get("dimension", "language")
     return (f"I am learning about {seed}. I want to improve my {dimension}. "
             f"I have seen '{unknown}' many times. My current hypothesis is that it links "
@@ -95,16 +112,16 @@ def _focus_from_question(question: str, unknown: str, seed: str) -> str:
                 preferred[0] if preferred else (unknown or (seed_words[0] if seed_words else "this")))
 
 
-def practice_once(seed: str, mastery: dict, curiosity: dict[str, dict], partner=None) -> dict:
+def practice_once(seed: str, mastery: dict, curiosity: dict[str, dict], partner=None,
+                  verification_memory: dict | None = None) -> dict:
     partner = partner or OllamaConversationPartner()
-    utterance = make_noise_utterance(seed, mastery, curiosity)
+    unknown = select_dialogue_unknown(curiosity, verification_memory)
+    utterance = make_noise_utterance(seed, mastery, curiosity, verification_memory)
     response = partner.reply(utterance)
     if not response:
         return {"status": "local_partner_unavailable", "seed": seed, "noise_utterance": utterance,
-                "evidence_score": 0.0, "verified": False}
-    wanting = [(item.get("pressure", 0), gap_id) for gap_id, item in curiosity.items()
-               if item.get("status") == "wanting_to_know"]
-    unknown = max(wanting, default=(0, "something"))[1].split(":", 1)[-1]
+                "unknown_expression": unknown, "hypothesis_focus": "",
+                "practice_metrics": {}, "evidence_score": 0.0, "verified": False}
     focus = _focus_from_question(response["question"], unknown, seed)
     followup = (f"My current answer is that '{unknown}' connects the example to {focus}. "
                 "I am not certain. Please show a contrasting example and ask what changed.")
@@ -144,6 +161,7 @@ def practice_once(seed: str, mastery: dict, curiosity: dict[str, dict], partner=
     turn = PracticeTurn(seed, getattr(partner, "model", "local"), utterance,
                         response["reply"], response["question"], observed, followup,
                         second["reply"], second["question"], revision,
-                        "hypothesis_example_revision", metrics)
+                        "hypothesis_example_revision", metrics, 0.0, False,
+                        "conversation practice only", unknown, focus)
     return {"status": "practiced", "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             **asdict(turn)}

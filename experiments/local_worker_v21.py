@@ -33,6 +33,8 @@ from epistemic_scaffold_v34 import observe_report, rebuild_scaffold, summarize a
 from error_memory_v35 import empty_error_memory, update_error_memory
 from visual_memory_v36 import (acquire_one as acquire_visual, empty_visual_memory,
                                enqueue as enqueue_visual, ground_depiction_labels)
+from dialogue_web_verification_v48 import (empty_verification_memory,
+                                           verify_dialogue_hypothesis)
 from experience_revision_v37 import ExperienceRevisionEngine
 from parser_self_revision_v38 import revise_parser
 from parser_audit_memory_v39 import (empty_audit_memory, ingest_report as audit_parser_report,
@@ -251,6 +253,7 @@ def render_human_status(status: dict, now_epoch: float | None = None,
     cooperative_world = status.get("cooperative_world", {})
     abstraction_world = status.get("abstraction_world", {})
     scaffold = status.get("epistemic_scaffold", {})
+    dialogue_verification = status.get("dialogue_verification", {})
     storage = status.get("storage", {})
     quality = status.get("developmental_quality")
     lines = ["Noise 学習状況", "=" * 34,
@@ -273,6 +276,8 @@ def render_human_status(status: dict, now_epoch: float | None = None,
              f"再解析で隔離   : {verified.get('quarantined_sentences', 0):,}文",
              f"自己選択した読解: {self_policy.get('selected_policy', '評価中')}（{self_policy.get('selection_status', '評価中')}）",
              f"人間科学観測   : {scaffold.get('observation_frames', 0):,}件（解釈 {scaffold.get('interpretations_committed', 0)}、仮説 {scaffold.get('hypotheses_committed', 0)}）",
+             f"対話からWeb検証: {dialogue_verification.get('expressions_investigated', 0):,}表現（独立確認 {dialogue_verification.get('independently_observed', 0):,}、過剰仮説を棄却 {dialogue_verification.get('rejected_overspecific', 0):,}）",
+             f"ローカルAIを正解採用: {dialogue_verification.get('local_llm_claims_accepted_as_fact', 0)}件",
              "", "限定実験世界（機構診断用・実能力ではない）", "-" * 34,
              f"第一段階       : {micro_world.get('status', '準備中')}",
              f"自分で行った実験: {micro_world.get('interventions', 0):,}回",
@@ -919,6 +924,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
     abstraction_world = read_json(runtime / "abstraction-world-memory.json")
     verified_experience = read_json(runtime / "verified-experience.json")
     self_learning_policy = read_json(runtime / "self-learning-policy.json")
+    dialogue_verification = read_json(runtime / "dialogue-web-verification.json")
     return {
         "phase": phase,
         "seed": seed,
@@ -936,6 +942,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
                     "weakest_dimension": mastery.get("weakest_dimension"),
                     "next_goal": mastery.get("next_mastery_goal")},
         "local_conversation": report.get("local_conversation"),
+        "dialogue_verification": dialogue_verification.get("summary", {}),
         "storage": read_json(runtime / "storage-status.json"),
         "global_memory": report.get("global_memory") or read_json(
             runtime / "global-language-memory.json").get("totals", {}),
@@ -1243,7 +1250,16 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                                                "next_mastery_goal": mastery["next_mastery_goal"]})
         compact_learning_history(curriculum)
         if local_conversation and seed not in curriculum["conversation_practiced_seeds"]:
-            turn = practice_once(seed, mastery, curriculum["curiosity_ledger"])
+            verification_path = runtime / "dialogue-web-verification.json"
+            verification_memory = read_json(verification_path) or empty_verification_memory()
+            turn = practice_once(seed, mastery, curriculum["curiosity_ledger"],
+                                 verification_memory=verification_memory)
+            verification = verify_dialogue_hypothesis(
+                turn, verification_memory, network_budget=min(2, effective_network))
+            turn["web_verification"] = verification
+            turn.setdefault("practice_metrics", {})["independent_evidence_added"] = (
+                verification.get("independent_sources", 0) > 0)
+            write_json(verification_path, verification_memory)
             dialogue_path = runtime / "dialogue-ledger.json"
             dialogue = read_json(dialogue_path) or {"turns": []}
             dialogue["turns"].append(turn)
@@ -1251,7 +1267,10 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             curriculum["conversation_practiced_seeds"].append(seed)
             report["local_conversation"] = {"status": turn["status"],
                                              "turns_total": len(dialogue["turns"]),
-                                             "evidence_score": 0.0}
+                                             "evidence_score": 0.0,
+                                             "web_verification": verification,
+                                             "noise_final_judgment": verification.get(
+                                                 "hypothesis_status", "unresolved")}
         write_json(curriculum_path, curriculum)
         merge_curiosity(curriculum, seed, report, round_number)
         write_json(runtime / "curiosity-priors.json", {

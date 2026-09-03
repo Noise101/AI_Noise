@@ -17,6 +17,7 @@ QUICK_MODULES = [
     "test_curiosity_drive_v23",
     "test_mastery_drive_v24",
     "test_local_conversation_v25",
+    "test_dialogue_web_verification_v48",
     "test_compact_runtime_v26",
     "test_global_memory_v27",
     "test_causal_experiment_v28",
