@@ -141,6 +141,7 @@ class AssociationLearner:
             class_baseline[outcome_class] += count
         class_fallback = class_baseline.most_common(1)[0][0] if class_baseline else None
         class_correct = class_baseline_correct = class_total = 0
+        class_predictions = []
         for prior, outcome, count in test:
             prior_class = action_classes.get(parts(prior)[1], "rare")
             observed_class = action_classes.get(parts(outcome)[1], "rare")
@@ -149,6 +150,11 @@ class AssociationLearner:
             class_correct += count * (prediction == observed_class)
             class_baseline_correct += count * (class_fallback == observed_class)
             class_total += count
+            class_predictions.append({"prior": prior, "prediction": prediction,
+                                      "observed": observed_class, "baseline": class_fallback,
+                                      "correct": prediction == observed_class,
+                                      "baseline_correct": class_fallback == observed_class,
+                                      "count": count})
         structural_evaluation = {
             "accuracy": round(class_correct / class_total, 4) if class_total else 0.0,
             "baseline_accuracy": round(class_baseline_correct / class_total, 4) if class_total else 0.0,
@@ -166,6 +172,7 @@ class AssociationLearner:
             band_baseline[outcome_band] += count
         band_fallback = band_baseline.most_common(1)[0][0] if band_baseline else None
         band_correct = band_baseline_correct = band_total = 0
+        band_predictions = []
         for prior, outcome, count in test:
             prior_band = action_bands.get(parts(prior)[1], "rare")
             observed_band = action_bands.get(parts(outcome)[1], "rare")
@@ -174,6 +181,11 @@ class AssociationLearner:
             band_correct += count * (prediction == observed_band)
             band_baseline_correct += count * (band_fallback == observed_band)
             band_total += count
+            band_predictions.append({"prior": prior, "prediction": prediction,
+                                     "observed": observed_band, "baseline": band_fallback,
+                                     "correct": prediction == observed_band,
+                                     "baseline_correct": band_fallback == observed_band,
+                                     "count": count})
         band_evaluation = {
             "accuracy": round(band_correct / band_total, 4) if band_total else 0.0,
             "baseline_accuracy": round(band_baseline_correct / band_total, 4) if band_total else 0.0,
@@ -187,6 +199,9 @@ class AssociationLearner:
                       (band_correct - band_baseline_correct, "learned_structural_bands",
                        band_evaluation)]
         _, selected_mode, selected_evaluation = max(candidates, key=lambda item: (item[0], item[1]))
+        selected_predictions = ({"exact_action": predictions,
+                                 "learned_structural_class": class_predictions,
+                                 "learned_structural_bands": band_predictions}[selected_mode])
         return {"version": 33,
                 "method": "associations learned on 80%; predictions corrected on unseen 20%",
                 "structural_associations": self.structural_edges(),
@@ -195,6 +210,7 @@ class AssociationLearner:
                 "structural_evaluation": structural_evaluation,
                 "band_evaluation": band_evaluation,
                 "selected_mode": selected_mode, "selected_evaluation": selected_evaluation,
+                "selected_predictions": selected_predictions[:1000],
                 "reinforced": sum(item["status"] == "reinforced" for item in predictive),
                 "weakened": sum(item["status"] == "weakened" for item in predictive),
                 "warning": "association guides recall and prediction; it is not causal evidence"}

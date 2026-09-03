@@ -115,6 +115,93 @@ def _competency_comparison_ja(world: dict, name: str) -> str:
     return f"{correct}/{total}、単純基準 {baseline}/{total}（{judgement}）"
 
 
+def capability_summary_lines(status: dict) -> list[str]:
+    """Translate telemetry into conservative, user-facing capability claims."""
+    global_memory = status.get("global_memory", {})
+    verified = status.get("verified_experience", {})
+    association = status.get("association", {})
+    exact = association.get("evaluation", {})
+    structural = association.get("selected_evaluation", association.get("evaluation", {}))
+    causal = status.get("causal_evaluation", {}).get("evaluation", {})
+    representation = status.get("representation", {}).get("selected_evaluation", {})
+    revision = status.get("experience_revision", {})
+    abstraction = status.get("abstraction_world", {})
+    gates = abstraction.get("open_transfer_gates", {})
+    structural_lift = structural.get("correct", 0) - structural.get("baseline_correct", 0)
+    causal_lift = causal.get("correct", 0) - causal.get("baseline_correct", 0)
+    level = ("次の行動の粗い頻度分類を学び始めた段階" if structural_lift > 0 else
+             "文章から経験を蓄積している初期段階")
+    return [
+        f"現在の段階     : {level}",
+        "実用会話       : 未到達（自由な質問応答ができるとはまだ確認されていない）",
+        (f"語彙           : {global_memory.get('word_forms', 0):,}語を識別、"
+         f"{global_memory.get('grounded_word_forms', 0):,}語に用法・意味の根拠あり"
+         "（説明能力とは別）"),
+        (f"出来事の読取り : {verified.get('accepted_sentences', verified.get('events', 0)):,}文を"
+         f"検証済み出来事として保持（完全な文章理解ではない）"),
+        (f"具体的行動予測 : {exact.get('correct', 0)}/{exact.get('total', 0)}、"
+         f"単純基準より {exact.get('correct', 0) - exact.get('baseline_correct', 0):+d}件"),
+        (f"粗い行動分類   : {structural.get('correct', 0)}/{structural.get('total', 0)}、"
+         f"単純基準より {structural_lift:+d}件"),
+        (f"因果予測       : {causal.get('correct', 0)}/{causal.get('total', 0)}、"
+         f"単純基準より {causal_lift:+d}件（因果理解の成立とはまだ言えない）"),
+        (f"抽象化・転用   : 実教材 {sum(bool(value) for value in gates.values())}/4項目、"
+         f"抽象予測 {representation.get('correct', 0)}/{representation.get('total', 0)}、"
+         f"再利用可能規則 {revision.get('reusable_rules', 0)}件"),
+    ]
+
+
+def _event_ja(event: str | None) -> str:
+    if not event:
+        return "予測なし"
+    subject, action, obj = (str(event).split("|", 2) + ["", ""])[:3]
+    return f"{subject or '誰か'} が {action or '何かする'}" + (f" → {obj.replace('_', ' ')}" if obj else "")
+
+
+def _prediction_ja(value: str | None) -> str:
+    return {"rare": "まれな行動", "mid": "中頻度の行動", "high": "頻出する行動",
+            "common": "よく現れる行動"}.get(value, value or "なし")
+
+
+def render_ability_report(status: dict, association_memory: dict,
+                          causal_memory: dict) -> str:
+    """Show what Noise can demonstrate on held-out evidence, with examples."""
+    lines = ["Noise 能力確認", "=" * 34, "", "結論", "-" * 34,
+             *capability_summary_lines(status), "", "未見データでの実演", "-" * 34]
+    selected = association_memory.get("selected_evaluation", {})
+    mode = association_memory.get("selected_mode", "評価前")
+    lines.append(
+        f"粗い行動分類方式: {mode} — {selected.get('correct', 0)}/{selected.get('total', 0)}、"
+        f"単純基準 {selected.get('baseline_correct', 0)}/{selected.get('total', 0)}")
+    examples = association_memory.get("selected_predictions", [])
+    useful = sorted(examples, key=lambda item: (
+        not (item.get("correct") and not item.get("baseline_correct")),
+        not item.get("correct"), str(item.get("prior"))))[:3]
+    if useful:
+        for index, item in enumerate(useful, 1):
+            result = "正解" if item.get("correct") else "不正解"
+            baseline = "単純基準は不正解" if not item.get("baseline_correct") else "単純基準も正解"
+            lines.extend([f"例{index}: {_event_ja(item.get('prior'))} の次を予測",
+                          f"      Noise={_prediction_ja(item.get('prediction'))} / 正解={_prediction_ja(item.get('observed'))}"
+                          f" → {result}（{baseline}）"])
+    else:
+        lines.append("具体例         : 次回評価更新後に表示可能")
+    causal = causal_memory.get("evaluation", {})
+    lines.extend(["", "因果候補の実演", "-" * 34,
+                  (f"未見評価       : {causal.get('correct', 0)}/{causal.get('total', 0)}、"
+                   f"単純基準 {causal.get('baseline_correct', 0)}/{causal.get('total', 0)}")])
+    causal_examples = causal_memory.get("preregistered_predictions", [])[:3]
+    for index, item in enumerate(causal_examples, 1):
+        lines.extend([f"例{index}: {_event_ja(item.get('prior'))} の後",
+                      f"      Noise={item.get('prediction') or 'なし'} / 実際={item.get('observed_after_registration') or 'なし'}"
+                      f" → {'正解' if item.get('correct') else '不正解'}"])
+    lines.extend(["", "注意", "-" * 34,
+                  "・ここでの正解は、学習に使っていない実教材の一部に対する予測です。",
+                  "・単語数や処理回数だけを能力とは判定しません。",
+                  "・限定実験世界の合格は、この実教材能力には加算していません。"])
+    return "\n".join(lines)
+
+
 def render_human_status(status: dict, now_epoch: float | None = None,
                         process_alive: bool | None = None) -> str:
     now_epoch = time.time() if now_epoch is None else now_epoch
@@ -175,6 +262,8 @@ def render_human_status(status: dict, now_epoch: float | None = None,
              f"起動後ラウンド : {status.get('rounds', 0)}",
              f"外部LLM利用    : {status.get('codex_or_remote_llm_calls', 0)}回",
              f"自律運転       : {autonomy.get('mode', '評価中')}（人の操作 {'必要' if autonomy.get('human_intervention_required') else '不要'}）",
+             "", "現在できること", "-" * 34,
+             *capability_summary_lines(status),
              "", "言語と経験", "-" * 34,
              f"採用教材       : {global_memory.get('curricula', 0):,}",
              f"単語           : {global_memory.get('word_forms', 0):,}（根拠あり {global_memory.get('grounded_word_forms', 0):,}）",
@@ -1306,6 +1395,9 @@ def main() -> None:
     status_parser.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
     status_ja_parser = subparsers.add_parser("status-ja", help="show an easy Japanese status summary")
     status_ja_parser.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
+    ability_ja_parser = subparsers.add_parser(
+        "ability-ja", help="demonstrate current capability on held-out evidence")
+    ability_ja_parser.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
     stop_parser = subparsers.add_parser("stop", help="request a safe stop between cycles")
     stop_parser.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
     args = parser.parse_args()
@@ -1315,6 +1407,12 @@ def main() -> None:
         return
     if args.command == "status-ja":
         print(render_human_status(read_json(args.runtime / "status.json")))
+        return
+    if args.command == "ability-ja":
+        print(render_ability_report(
+            read_json(args.runtime / "status.json"),
+            read_json(args.runtime / "association-memory.json"),
+            read_json(args.runtime / "causal-memory.json")))
         return
     if args.command == "stop":
         args.runtime.mkdir(parents=True, exist_ok=True)

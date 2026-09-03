@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 from local_worker_v21 import (_seed_from_title, developmental_source_quality, discover_curriculum,
                               discover_from_developmental_shelves, enforce_storage_budget, is_transient_error,
-                              compact_learning_history, merge_curiosity, read_json, render_human_status, status_record,
+                              compact_learning_history, merge_curiosity, read_json,
+                              render_ability_report, render_human_status, status_record,
                               parser_counterexample_candidate, structural_counterexample_candidate,
                               repeated_grounding_candidate, curriculum_strategy_allowed,
                               learned_curriculum_score, supervise, update_autonomy_state,
@@ -141,6 +142,29 @@ class LocalWorkerTest(unittest.TestCase):
         self.assertIn("因果予測", rendered)
         self.assertIn("基準と同じ", rendered)
         self.assertIn("管理対象合計   : 1.0GB", rendered)
+        self.assertIn("実用会話       : 未到達", rendered)
+
+    def test_ability_report_shows_honest_claims_and_examples(self):
+        status = {"global_memory": {"word_forms": 100, "grounded_word_forms": 40},
+                  "verified_experience": {"accepted_sentences": 30},
+                  "association": {"selected_evaluation": {
+                      "correct": 6, "baseline_correct": 4, "total": 10}},
+                  "causal_evaluation": {"evaluation": {
+                      "correct": 1, "baseline_correct": 1, "total": 5}},
+                  "representation": {"selected_evaluation": {"correct": 0, "total": 5}},
+                  "experience_revision": {"reusable_rules": 0},
+                  "abstraction_world": {"open_transfer_gates": {"a": True, "b": False}}}
+        association = {"selected_mode": "learned_structural_bands",
+                       "selected_evaluation": {"correct": 6, "baseline_correct": 4, "total": 10},
+                       "selected_predictions": [{"prior": "fox|saw|grapes",
+                           "prediction": "mid", "observed": "mid", "correct": True,
+                           "baseline_correct": False}]}
+        rendered = render_ability_report(status, association, {"evaluation": {
+            "correct": 1, "baseline_correct": 1, "total": 5}})
+        self.assertIn("実用会話       : 未到達", rendered)
+        self.assertIn("単純基準より +2件", rendered)
+        self.assertIn("fox が saw", rendered)
+        self.assertIn("Noise=中頻度の行動 / 正解=中頻度の行動", rendered)
 
     def test_human_status_warns_when_process_is_dead_and_heartbeat_stale(self):
         status = {"phase": "learning", "heartbeat": "2026-09-01T00:00:00Z", "pid": 123}
