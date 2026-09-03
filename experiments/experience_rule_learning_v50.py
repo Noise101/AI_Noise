@@ -52,7 +52,7 @@ def learn_experience_rules(verified: dict, previous: dict | None = None,
     dialogue_frames = []
     for expression, item in dialogue_verification.get("expressions", {}).items():
         hypothesis = item.get("structural_hypothesis") or {}
-        if (item.get("independent_sources", 0) < 2
+        if ((item.get("independent_sources") or 0) < 2
                 or not item.get("hypothesis_status", "").startswith("supported_structural")):
             continue
         dialogue_frames.append({"experience_id": item.get("verification_id"),

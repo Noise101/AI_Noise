@@ -17,6 +17,13 @@ USER_AGENT = "AI_Noise/0.48 (read-only hypothesis verification; https://github.c
 WORD = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
 
 
+def _count(value) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 @dataclass
 class Observation:
     source: str
@@ -102,7 +109,7 @@ def verify_dialogue_hypothesis(turn: dict, memory: dict,
                 "final_judgment_made_by": "noise_evidence_rule_v1"}
     records = memory.setdefault("expressions", {})
     previous = records.get(expression, {})
-    if previous.get("independent_sources", 0) >= 2:
+    if _count(previous.get("independent_sources")) >= 2:
         return {"status": "already_independently_observed", "expression": expression,
                 "hypothesis_status": previous.get("hypothesis_status", "unresolved"),
                 "final_judgment_made_by": "noise_evidence_rule_v1"}
@@ -156,12 +163,13 @@ def verify_dialogue_hypothesis(turn: dict, memory: dict,
     }
     memory.setdefault("observations", []).append(result)
     memory["observations"] = memory["observations"][-2000:]
-    old_attempts = previous.get("attempts", 0)
+    old_attempts = _count(previous.get("attempts"))
     records[expression] = {**result, "attempts": old_attempts + 1}
     values = list(records.values())
     memory["summary"] = {
         "expressions_investigated": len(values),
-        "independently_observed": sum(item.get("independent_sources", 0) >= 2 for item in values),
+        "independently_observed": sum(_count(item.get("independent_sources")) >= 2
+                                      for item in values),
         "supported_candidates": sum(item.get("hypothesis_status") ==
                                     "supported_candidate_not_meaning_proof" or
                                     item.get("hypothesis_status") ==

@@ -14,6 +14,12 @@ class FakePartner:
 
 
 class LocalConversationTest(unittest.TestCase):
+    def test_legacy_null_verification_counts_do_not_break_selection(self):
+        curiosity = {"phrase:of the": {"pressure": 3, "status": "wanting_to_know"}}
+        memory = {"expressions": {"of the": {"attempts": None,
+                                                "independent_sources": None}}}
+        self.assertEqual(select_dialogue_unknown(curiosity, memory), "of the")
+
     def test_expression_types_drive_different_questions(self):
         self.assertEqual(expression_type("with the"), "relation_phrase")
         self.assertEqual(expression_type("saw a"), "event_phrase")

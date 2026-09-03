@@ -12,11 +12,24 @@ from local_worker_v21 import (_seed_from_title, developmental_source_quality, di
                               render_ability_report, render_human_status, status_record,
                               parser_counterexample_candidate, structural_counterexample_candidate,
                               repeated_grounding_candidate, curriculum_strategy_allowed,
-                              learned_curriculum_score, supervise, update_autonomy_state,
+                              learned_curriculum_score, conversation_practice_summary,
+                              supervise, update_autonomy_state,
                               update_curriculum_strategy, work, write_json)
 
 
 class LocalWorkerTest(unittest.TestCase):
+    def test_legacy_null_conversation_metric_does_not_break_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            write_json(runtime / "dialogue-ledger.json", {"turns": [
+                {"practice_metrics": {"formed_followup": None,
+                                      "relevant_token_overlap": None}},
+                {"practice_metrics": {"formed_followup": True,
+                                      "relevant_token_overlap": 0.2}}]})
+            result = conversation_practice_summary(runtime)
+        self.assertEqual(result["evaluated_turns"], 2)
+        self.assertEqual(result["successful_followups"], 1)
+
     def test_low_yield_curriculum_route_deprioritizes_itself(self):
         curriculum = {"transitions": [{"to": f"seed{i}", "reason": "broad shelf"}
                                        for i in range(10)]}

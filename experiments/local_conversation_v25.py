@@ -81,14 +81,19 @@ def select_dialogue_unknown(curiosity: dict[str, dict], verification_memory: dic
                for gap_id, item in curiosity.items() if item.get("status") == "wanting_to_know"]
     if not wanting:
         return "something"
+    def count(value) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
     open_questions = [item for item in wanting
-                      if investigated.get(item[1], {}).get("independent_sources", 0) < 2]
+                      if count(investigated.get(item[1], {}).get("independent_sources")) < 2]
     if open_questions:
         wanting = open_questions
     # Curiosity still supplies priority, while repeated verified questions lose novelty.
     return max(wanting, key=lambda item: (
-        item[0] / (1 + investigated.get(item[1], {}).get("attempts", 0)) ** 2,
-        -investigated.get(item[1], {}).get("attempts", 0), item[1]))[1]
+        item[0] / (1 + count(investigated.get(item[1], {}).get("attempts"))) ** 2,
+        -count(investigated.get(item[1], {}).get("attempts")), item[1]))[1]
 
 
 def make_noise_utterance(seed: str, mastery: dict, curiosity: dict[str, dict],

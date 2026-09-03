@@ -517,8 +517,8 @@ def enforce_storage_budget(runtime: Path, max_bytes: int) -> dict:
 def conversation_practice_summary(runtime: Path) -> dict:
     turns = read_json(runtime / "dialogue-ledger.json").get("turns", [])
     evaluated = [turn for turn in turns if turn.get("practice_metrics")]
-    successful = sum(turn["practice_metrics"].get("formed_followup")
-                     and turn["practice_metrics"].get("relevant_token_overlap", 0) > 0
+    successful = sum(bool(turn["practice_metrics"].get("formed_followup"))
+                     and (turn["practice_metrics"].get("relevant_token_overlap") or 0) > 0
                      for turn in evaluated)
     return {"evaluated_turns": len(evaluated), "successful_followups": successful}
 

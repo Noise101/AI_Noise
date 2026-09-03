@@ -13,6 +13,12 @@ class FakeSource:
 
 
 class DialogueWebVerificationTest(unittest.TestCase):
+    def test_legacy_null_attempt_count_is_treated_as_zero(self):
+        memory = empty_verification_memory()
+        memory["expressions"]["in the"] = {"attempts": None, "independent_sources": None}
+        verify_dialogue_hypothesis({"unknown_expression": "in the"}, memory, [])
+        self.assertEqual(memory["expressions"]["in the"]["attempts"], 1)
+
     def test_two_sources_can_support_a_structural_role_without_proving_meaning(self):
         turn = {"unknown_expression": "with the", "hypothesis_focus": "",
                 "structural_hypothesis": {"status": "testable_candidate",
