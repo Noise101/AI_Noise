@@ -81,6 +81,7 @@ PHASE_JA = {
     "curriculum_transition": "次の教材へ移動中", "transient_error_wait": "一時エラーから再試行待ち",
     "supervisor_retry_wait": "監督機構による再試行待ち", "resource_paused": "外部取得の再開待ち",
     "storage_check": "容量確認中", "curriculum_exhausted": "教材候補を再探索中",
+    "capability_plateau": "能力停滞のため無効な収集を停止",
     "worker_error_wait": "内部エラーから復旧待ち", "stopped_by_user": "ユーザー操作で停止",
     "round_budget_exhausted": "指定回数を完了", "error": "エラー停止",
 }
@@ -228,7 +229,8 @@ def render_human_status(status: dict, now_epoch: float | None = None,
     age = None if heartbeat_epoch is None else max(0, int(now_epoch - heartbeat_epoch))
     stale = age is None or age > 120
     phase = status.get("phase", "unknown")
-    healthy = process_alive and not stale and phase not in {"error", "stopped_by_user"}
+    healthy = (process_alive and not stale
+               and phase not in {"error", "stopped_by_user", "capability_plateau"})
     health = "正常に稼働" if healthy else "確認が必要"
     global_memory = status.get("global_memory", {})
     mastery = status.get("mastery", {})
@@ -268,6 +270,7 @@ def render_human_status(status: dict, now_epoch: float | None = None,
              f"起動後ラウンド : {status.get('rounds', 0)}",
              f"外部LLM利用    : {status.get('codex_or_remote_llm_calls', 0)}回",
              f"自律運転       : {autonomy.get('mode', '評価中')}（人の操作 {'必要' if autonomy.get('human_intervention_required') else '不要'}）",
+             f"自律判断       : {autonomy.get('reason', '評価中')}",
              "", "現在できること", "-" * 34,
              *capability_summary_lines(status),
              "", "言語と経験", "-" * 34,
@@ -616,29 +619,69 @@ def compact_learning_history(curriculum: dict) -> None:
 
 
 def update_autonomy_state(curriculum: dict, report: dict) -> dict:
-    """Detect a measured plateau and change observation strategy without human prompting."""
+    """Escalate a measured plateau; never disguise more collection as learning."""
     revision = report.get("experience_revision", {})
     global_memory = report.get("global_memory", {})
+    association = report.get("association", {}).get("selected_evaluation", {})
+    causal = report.get("causal_evaluation", {}).get("evaluation", {})
+    representation = report.get("representation", {}).get("selected_evaluation", {})
     snapshot = {"curricula": global_memory.get("curricula", 0),
                 "structural_correct": revision.get("evaluation", {}).get("correct", 0),
                 "structural_total": revision.get("evaluation", {}).get("total", 0),
                 "structural_coverage": revision.get("evaluation", {}).get("coverage", 0.0),
                 "reusable_rules": revision.get("reusable_rules", 0),
-                "failure_patterns": len(revision.get("failure_patterns", []))}
+                "failure_patterns": len(revision.get("failure_patterns", [])),
+                "association_lift": association.get("correct", 0) - association.get("baseline_correct", 0),
+                "causal_lift": causal.get("correct", 0) - causal.get("baseline_correct", 0),
+                "representation_correct": representation.get("correct", 0)}
     history = curriculum.setdefault("capability_history", [])
     if not history or history[-1].get("curricula") != snapshot["curricula"]:
         history.append(snapshot)
         curriculum["capability_history"] = history[-200:]
-    window = curriculum["capability_history"][-30:]
+    history = curriculum["capability_history"]
+    window = history[-30:]
+
+    def improved(left: dict, right: dict) -> bool:
+        return (right.get("association_lift", 0) > left.get("association_lift", 0)
+                or right.get("causal_lift", 0) > left.get("causal_lift", 0)
+                or right.get("representation_correct", 0) > left.get("representation_correct", 0)
+                or right.get("reusable_rules", 0) > left.get("reusable_rules", 0))
+
     plateau = (len(window) >= 10
                and window[-1]["curricula"] - window[0]["curricula"] >= 20
-               and window[-1]["structural_total"] > window[0]["structural_total"]
-               and window[-1]["structural_correct"] <= window[0]["structural_correct"])
-    state = {"mode": "counterexample_hunt" if plateau else "normal_curriculum",
-             "plateau_detected": plateau, "observations_compared": len(window),
-             "reason": ("structural tests grew without another correct prediction" if plateau else
-                        "no sustained measured plateau in the current window"),
-             "human_intervention_required": False}
+               and not improved(window[0], window[-1]))
+    previous = curriculum.get("autonomy_state", {})
+    previous_mode = previous.get("mode")
+    mode_started = previous.get("mode_started_curricula", snapshot["curricula"])
+    intervention_start = previous.get("intervention_start_snapshot")
+    if previous_mode == "capability_plateau" and intervention_start:
+        if improved(intervention_start, snapshot):
+            mode, reason = "normal_curriculum", "a new held-out capability gain cleared the plateau"
+            mode_started, intervention_start = snapshot["curricula"], None
+        else:
+            mode, reason = ("capability_plateau",
+                            "bounded intervention failed; more acquisition is disabled")
+    elif previous_mode == "counterexample_hunt" and intervention_start:
+        intervention_spent = snapshot["curricula"] - mode_started
+        if improved(intervention_start, snapshot):
+            mode, reason = "normal_curriculum", "counterexample intervention improved held-out ability"
+            mode_started, intervention_start = snapshot["curricula"], None
+        elif intervention_spent >= 40:
+            mode, reason = ("capability_plateau",
+                            "40 targeted curricula produced no held-out capability gain; acquisition stopped")
+        else:
+            mode, reason = "counterexample_hunt", "testing a bounded counterexample intervention"
+    elif plateau:
+        mode, reason = "counterexample_hunt", "held-out ability did not improve across 20 curricula"
+        mode_started, intervention_start = snapshot["curricula"], dict(snapshot)
+    else:
+        mode, reason = "normal_curriculum", "no sustained measured capability plateau"
+        mode_started, intervention_start = snapshot["curricula"], None
+    state = {"mode": mode, "plateau_detected": plateau,
+             "observations_compared": len(window), "reason": reason,
+             "mode_started_curricula": mode_started,
+             "intervention_start_snapshot": intervention_start,
+             "human_intervention_required": mode == "capability_plateau"}
     curriculum["autonomy_state"] = state
     return state
 
@@ -1306,6 +1349,10 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                                              "noise_final_judgment": verification.get(
                                                  "hypothesis_status", "unresolved")}
         write_json(curriculum_path, curriculum)
+        if report.get("autonomy", {}).get("mode") == "capability_plateau":
+            latest = status_record(seed, runtime, "capability_plateau", round_number, report)
+            write_json(status_path, latest)
+            return latest
         merge_curiosity(curriculum, seed, report, round_number)
         write_json(runtime / "curiosity-priors.json", {
             gap_id: {"pressure": item.get("pressure", 0.0), "status": item.get("status")}
@@ -1407,7 +1454,7 @@ def supervise(seed: str, runtime: Path, max_rounds: int, interval: float,
             result = status_record(current_seed, runtime, "worker_error_wait", 0,
                                    error=f"{type(error).__name__}: {error}")
             result["traceback"] = traceback.format_exc()[-4000:]
-        if result.get("phase") == "stopped_by_user" or stop_path.exists():
+        if result.get("phase") in {"stopped_by_user", "capability_plateau"} or stop_path.exists():
             return result
         if max_rounds > 0:
             return result

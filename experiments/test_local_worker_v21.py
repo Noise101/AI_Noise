@@ -59,6 +59,38 @@ class LocalWorkerTest(unittest.TestCase):
         self.assertEqual(state["mode"], "counterexample_hunt")
         self.assertFalse(state["human_intervention_required"])
 
+    def test_autonomy_stops_collection_when_bounded_intervention_has_no_gain(self):
+        curriculum = {}
+        for index in range(12):
+            report = {"global_memory": {"curricula": 100 + index * 2},
+                      "association": {"selected_evaluation": {"correct": 2, "baseline_correct": 4}},
+                      "causal_evaluation": {"evaluation": {"correct": 1, "baseline_correct": 1}},
+                      "representation": {"selected_evaluation": {"correct": 0}},
+                      "experience_revision": {"evaluation": {"correct": 1, "total": 100 + index * 4},
+                                              "reusable_rules": 0}}
+            state = update_autonomy_state(curriculum, report)
+        self.assertEqual(state["mode"], "counterexample_hunt")
+        start = state["mode_started_curricula"]
+        for index in range(1, 22):
+            report["global_memory"]["curricula"] = start + index * 2
+            state = update_autonomy_state(curriculum, report)
+        self.assertEqual(state["mode"], "capability_plateau")
+        self.assertTrue(state["human_intervention_required"])
+
+    def test_autonomy_returns_to_normal_only_after_measured_gain(self):
+        curriculum = {"autonomy_state": {"mode": "counterexample_hunt",
+            "mode_started_curricula": 100,
+            "intervention_start_snapshot": {"association_lift": -2, "causal_lift": 0,
+                "representation_correct": 0, "reusable_rules": 0}}}
+        report = {"global_memory": {"curricula": 110},
+                  "association": {"selected_evaluation": {"correct": 5, "baseline_correct": 4}},
+                  "causal_evaluation": {"evaluation": {"correct": 1, "baseline_correct": 1}},
+                  "representation": {"selected_evaluation": {"correct": 0}},
+                  "experience_revision": {"evaluation": {"correct": 1, "total": 120},
+                                          "reusable_rules": 0}}
+        state = update_autonomy_state(curriculum, report)
+        self.assertEqual(state["mode"], "normal_curriculum")
+
     def test_parser_failure_can_request_a_nearby_observation(self):
         audit = {"summary": {"rejection_reasons": {"invalid_structural_subject": 3}},
                  "records": {"x": {"audit_id": "x", "quarantined": True,
