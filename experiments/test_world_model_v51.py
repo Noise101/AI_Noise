@@ -1,8 +1,38 @@
+import random
 import unittest
 
 from world_model_v51 import (BENCHMARK_REGIME, FINAL_QUERY_BUDGET, build_sequences,
                              choose_benchmark_sources, collection_key, narrative_sequence,
                              narrative_source, parse_frame, passes_gain_gate, train_and_evaluate)
+
+
+# Positive control: a genuine (noisy) prior-action -> next-action Markov chain, so the
+# pipeline's detection power can be checked on data with real learnable structure, not
+# only on garbage data it must correctly reject (see diverse_audit_for_sources below).
+CYCLE_ACTORS = ("fox", "hare", "wolf", "mouse", "bird", "lion", "deer", "owl", "goat", "crow")
+CYCLE_ACTIONS = ("saw", "found", "ate", "left")
+CYCLE_OBJECTS = {"saw": "food", "found": "food", "ate": "food", "left": "home"}
+CYCLE_NEXT = {"saw": "found", "found": "ate", "ate": "left", "left": "saw"}
+
+
+def noisy_markov_chain_audit(collections=90, steps=8, noise_rate=0.25, seed=1234):
+    """Every collection follows the same prior-action -> next-action rule, with a
+    noise_rate chance per step of a uniformly random deviation instead."""
+    rng = random.Random(seed)
+    records = {}
+    for index in range(collections):
+        actor = CYCLE_ACTORS[index % len(CYCLE_ACTORS)]
+        url = f"https://story.example/Animal_Stories_{index}/chapter"
+        action = CYCLE_ACTIONS[index % len(CYCLE_ACTIONS)]
+        sentences = [f"The {actor} {action} {CYCLE_OBJECTS[action]}."]
+        for _ in range(steps - 1):
+            true_next = CYCLE_NEXT[action]
+            action = rng.choice(CYCLE_ACTIONS) if rng.random() < noise_rate else true_next
+            sentences.append(f"The {actor} {action} {CYCLE_OBJECTS[action]}.")
+        for position, sentence in enumerate(sentences):
+            records[f"{index}:{position}"] = {"source_url": url, "source_position": position,
+                "sentence": sentence, "curriculum_admitted": True}
+    return {"records": records}
 
 
 def audit_for_sources(count=30):
@@ -111,6 +141,29 @@ class WorldModelV51Test(unittest.TestCase):
         audit = diverse_audit_for_sources()
         self.assertGreater(len({row["sentence"] for row in audit["records"].values()}), 20)
         result = train_and_evaluate(audit)
+        self.assertTrue(result["benchmark"]["locked"])
+        self.assertEqual(result["selected_mode"], "frequency_baseline")
+
+    def test_pipeline_detects_a_genuine_noisy_but_learnable_pattern(self):
+        # Positive control: every prior-action -> next-action test must clear the
+        # strict, Bonferroni-corrected gates on data that actually has structure,
+        # not just correctly reject data that doesn't (see the test above). A 25%
+        # per-step noise rate keeps this from being a near-deterministic strawman.
+        result = train_and_evaluate(noisy_markov_chain_audit())
+        self.assertTrue(result["benchmark"]["locked"])
+        self.assertNotEqual(result["selected_mode"], "frequency_baseline")
+        self.assertEqual(result["selection_status"], "accepted_final_gain")
+        selected = result["selected_evaluation"]
+        self.assertGreater(selected["lift"], 30)
+        self.assertLess(selected["one_sided_sign_p"], 1e-6)
+        final = result["final_attempt"]["evaluation"]
+        self.assertLess(final["one_sided_sign_p"], 1e-6)
+
+    def test_pipeline_rejects_a_prior_action_rule_when_there_is_no_real_signal(self):
+        # Same generator, same collection/example counts, but noise_rate=1.0 means
+        # prior action carries no information about the next one: the mechanism
+        # must not manufacture a detection out of pure noise at this scale either.
+        result = train_and_evaluate(noisy_markov_chain_audit(noise_rate=1.0, seed=42))
         self.assertTrue(result["benchmark"]["locked"])
         self.assertEqual(result["selected_mode"], "frequency_baseline")
 
