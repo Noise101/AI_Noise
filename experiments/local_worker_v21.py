@@ -134,10 +134,13 @@ def capability_summary_lines(status: dict) -> list[str]:
     gates = abstraction.get("open_transfer_gates", {})
     world_model = status.get("world_model", {})
     world_eval = world_model.get("selected_evaluation", {})
+    benchmark = world_model.get("benchmark", {})
     structural_lift = structural.get("correct", 0) - structural.get("baseline_correct", 0)
     causal_lift = causal.get("correct", 0) - causal.get("baseline_correct", 0)
     world_lift = world_eval.get("lift", 0)
-    level = ("固定した未知作品で経験遷移を予測できる段階" if world_lift > 0 else
+    level = ("独立作品集が揃うまで評価を保留し、訓練経験を蓄積している段階"
+             if not benchmark.get("locked") else
+             "固定した未知作品で経験遷移を予測できる段階" if world_lift > 0 else
              "状態世界モデルを固定未知作品で検証している段階")
     return [
         f"現在の段階     : {level}",
@@ -156,9 +159,13 @@ def capability_summary_lines(status: dict) -> list[str]:
         (f"抽象化・転用   : 実教材 {sum(bool(value) for value in gates.values())}/4項目、"
          f"抽象予測 {representation.get('correct', 0)}/{representation.get('total', 0)}、"
          f"再利用可能規則 {revision.get('reusable_rules', 0)}件"),
-        (f"状態世界モデル : {world_eval.get('correct', 0)}/{world_eval.get('total', 0)}、"
-         f"固定基準より {world_eval.get('lift', 0):+d}件"
-         f"（{world_model.get('selected_mode', '評価前')}）"),
+        ((f"状態世界モデル : 評価保留（適格な独立作品集 "
+          f"{benchmark.get('eligible_collection_count', 0)}/"
+          f"{benchmark.get('required_collection_count', 0)}）")
+         if not benchmark.get("locked") else
+         (f"状態世界モデル : {world_eval.get('correct', 0)}/{world_eval.get('total', 0)}、"
+          f"固定基準より {world_eval.get('lift', 0):+d}件"
+          f"（{world_model.get('selected_mode', '評価前')}）")),
     ]
 
 
@@ -655,8 +662,7 @@ def update_autonomy_state(curriculum: dict, report: dict) -> dict:
     def improved(left: dict, right: dict) -> bool:
         # Only the locked, source-disjoint v51 benchmark can clear a plateau.
         # Legacy moving holdouts remain diagnostics and cannot manufacture progress.
-        return (right.get("world_model_lift", 0) > left.get("world_model_lift", 0)
-                or right.get("world_reusable_rules", 0) > left.get("world_reusable_rules", 0))
+        return right.get("world_model_lift", 0) > left.get("world_model_lift", 0)
 
     plateau = (len(window) >= 10
                and window[-1]["curricula"] - window[0]["curricula"] >= 20

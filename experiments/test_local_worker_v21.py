@@ -94,6 +94,18 @@ class LocalWorkerTest(unittest.TestCase):
         state = update_autonomy_state(curriculum, report)
         self.assertEqual(state["mode"], "normal_curriculum")
 
+    def test_rule_count_growth_alone_cannot_clear_plateau(self):
+        curriculum = {"autonomy_state": {"mode": "counterexample_hunt",
+            "mode_started_curricula": 100,
+            "intervention_start_snapshot": {"world_model_lift": 2,
+                                               "world_reusable_rules": 5}}}
+        report = {"global_memory": {"curricula": 110},
+                  "world_model": {"selected_evaluation": {"lift": 2},
+                                  "reusable_rules": [{}] * 9},
+                  "experience_revision": {"evaluation": {"correct": 0, "total": 0}}}
+        state = update_autonomy_state(curriculum, report)
+        self.assertEqual(state["mode"], "counterexample_hunt")
+
     def test_parser_failure_can_request_a_nearby_observation(self):
         audit = {"summary": {"rejection_reasons": {"invalid_structural_subject": 3}},
                  "records": {"x": {"audit_id": "x", "quarantined": True,
