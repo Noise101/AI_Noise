@@ -641,6 +641,7 @@ def update_autonomy_state(curriculum: dict, report: dict) -> dict:
     representation = report.get("representation", {}).get("selected_evaluation", {})
     world_model = report.get("world_model", {})
     world = world_model.get("selected_evaluation", {})
+    benchmark_locked = bool(world_model.get("benchmark", {}).get("locked", False))
     snapshot = {"curricula": global_memory.get("curricula", 0),
                 "structural_correct": revision.get("evaluation", {}).get("correct", 0),
                 "structural_total": revision.get("evaluation", {}).get("total", 0),
@@ -651,7 +652,8 @@ def update_autonomy_state(curriculum: dict, report: dict) -> dict:
                 "causal_lift": causal.get("correct", 0) - causal.get("baseline_correct", 0),
                 "representation_correct": representation.get("correct", 0),
                 "world_model_lift": world.get("lift", 0),
-                "world_reusable_rules": len(world_model.get("reusable_rules", []))}
+                "world_reusable_rules": len(world_model.get("reusable_rules", [])),
+                "benchmark_locked": benchmark_locked}
     history = curriculum.setdefault("capability_history", [])
     if not history or history[-1].get("curricula") != snapshot["curricula"]:
         history.append(snapshot)
@@ -664,14 +666,29 @@ def update_autonomy_state(curriculum: dict, report: dict) -> dict:
         # Legacy moving holdouts remain diagnostics and cannot manufacture progress.
         return right.get("world_model_lift", 0) > left.get("world_model_lift", 0)
 
-    plateau = (len(window) >= 10
+    # improved() trusts world_model_lift alone, but train_and_evaluate pins that
+    # value to 0 until the collection-disjoint v51 benchmark unlocks.  Declaring a
+    # plateau during that structurally-frozen window created a non-recoverable
+    # deadlock: the plateau halts acquisition (work() returns before
+    # discover_curriculum), so the benchmark never reaches its collection quota,
+    # so world_model_lift can never move.  Defer plateau detection until both ends
+    # of the comparison window are measured against a locked benchmark.
+    measurable_window = (len(window) >= 10 and window[0].get("benchmark_locked")
+                         and window[-1].get("benchmark_locked"))
+    plateau = (measurable_window
                and window[-1]["curricula"] - window[0]["curricula"] >= 20
                and not improved(window[0], window[-1]))
     previous = curriculum.get("autonomy_state", {})
     previous_mode = previous.get("mode")
     mode_started = previous.get("mode_started_curricula", snapshot["curricula"])
     intervention_start = previous.get("intervention_start_snapshot")
-    if previous_mode == "capability_plateau" and intervention_start:
+    if not benchmark_locked:
+        # The plateau signal is unmeasurable; never enter or stay in a plateau,
+        # and drop any intervention state a pre-fix run may have persisted.
+        mode, reason = ("normal_curriculum",
+                        "world-model benchmark not yet unlocked; capability plateau undetectable")
+        mode_started, intervention_start = snapshot["curricula"], None
+    elif previous_mode == "capability_plateau" and intervention_start:
         if improved(intervention_start, snapshot):
             mode, reason = "normal_curriculum", "a new held-out capability gain cleared the plateau"
             mode_started, intervention_start = snapshot["curricula"], None

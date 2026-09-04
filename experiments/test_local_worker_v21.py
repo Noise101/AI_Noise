@@ -52,6 +52,8 @@ class LocalWorkerTest(unittest.TestCase):
         state = None
         for index in range(12):
             report = {"global_memory": {"curricula": 100 + index * 2},
+                      "world_model": {"selected_evaluation": {"lift": 0},
+                                      "benchmark": {"locked": True}},
                       "experience_revision": {"evaluation": {
                           "correct": 1, "total": 100 + index * 4, "coverage": 0.1},
                           "reusable_rules": 0, "failure_patterns": [{"pattern": "x"}]}}
@@ -66,6 +68,8 @@ class LocalWorkerTest(unittest.TestCase):
                       "association": {"selected_evaluation": {"correct": 2, "baseline_correct": 4}},
                       "causal_evaluation": {"evaluation": {"correct": 1, "baseline_correct": 1}},
                       "representation": {"selected_evaluation": {"correct": 0}},
+                      "world_model": {"selected_evaluation": {"lift": 0},
+                                      "benchmark": {"locked": True}},
                       "experience_revision": {"evaluation": {"correct": 1, "total": 100 + index * 4},
                                               "reusable_rules": 0}}
             state = update_autonomy_state(curriculum, report)
@@ -88,6 +92,7 @@ class LocalWorkerTest(unittest.TestCase):
                   "causal_evaluation": {"evaluation": {"correct": 1, "baseline_correct": 1}},
                   "representation": {"selected_evaluation": {"correct": 0}},
                   "world_model": {"selected_evaluation": {"lift": 3},
+                                  "benchmark": {"locked": True},
                                   "reusable_rules": [{"context": "x"}]},
                   "experience_revision": {"evaluation": {"correct": 1, "total": 120},
                                           "reusable_rules": 0}}
@@ -101,10 +106,42 @@ class LocalWorkerTest(unittest.TestCase):
                                                "world_reusable_rules": 5}}}
         report = {"global_memory": {"curricula": 110},
                   "world_model": {"selected_evaluation": {"lift": 2},
+                                  "benchmark": {"locked": True},
                                   "reusable_rules": [{}] * 9},
                   "experience_revision": {"evaluation": {"correct": 0, "total": 0}}}
         state = update_autonomy_state(curriculum, report)
         self.assertEqual(state["mode"], "counterexample_hunt")
+
+    def test_plateau_is_not_declared_while_world_model_benchmark_is_unmeasurable(self):
+        # Before the v51 benchmark unlocks, world_model_lift is structurally 0, so
+        # no run of curricula may be read as a capability plateau.
+        curriculum = {}
+        state = None
+        for index in range(45):
+            report = {"global_memory": {"curricula": 100 + index * 2},
+                      "world_model": {"selected_evaluation": {"lift": 0},
+                                      "benchmark": {"locked": False,
+                                                    "eligible_collection_count": 26}},
+                      "experience_revision": {"evaluation": {"correct": 1, "total": 400},
+                                              "reusable_rules": 0, "failure_patterns": []}}
+            state = update_autonomy_state(curriculum, report)
+        self.assertEqual(state["mode"], "normal_curriculum")
+        self.assertFalse(state["human_intervention_required"])
+
+    def test_persisted_plateau_is_released_when_benchmark_still_not_ready(self):
+        # A plateau written by the pre-fix logic must not trap the worker forever.
+        curriculum = {"autonomy_state": {"mode": "capability_plateau",
+            "mode_started_curricula": 1418,
+            "intervention_start_snapshot": {"world_model_lift": 0, "curricula": 1418},
+            "human_intervention_required": True}}
+        report = {"global_memory": {"curricula": 1460},
+                  "world_model": {"selected_evaluation": {"lift": 0},
+                                  "benchmark": {"locked": False}},
+                  "experience_revision": {"evaluation": {"correct": 0, "total": 0}}}
+        state = update_autonomy_state(curriculum, report)
+        self.assertEqual(state["mode"], "normal_curriculum")
+        self.assertFalse(state["human_intervention_required"])
+        self.assertIsNone(state["intervention_start_snapshot"])
 
     def test_parser_failure_can_request_a_nearby_observation(self):
         audit = {"summary": {"rejection_reasons": {"invalid_structural_subject": 3}},
