@@ -81,11 +81,14 @@ class LocalWorkerTest(unittest.TestCase):
         curriculum = {"autonomy_state": {"mode": "counterexample_hunt",
             "mode_started_curricula": 100,
             "intervention_start_snapshot": {"association_lift": -2, "causal_lift": 0,
-                "representation_correct": 0, "reusable_rules": 0}}}
+                "representation_correct": 0, "reusable_rules": 0,
+                "world_model_lift": 0, "world_reusable_rules": 0}}}
         report = {"global_memory": {"curricula": 110},
                   "association": {"selected_evaluation": {"correct": 5, "baseline_correct": 4}},
                   "causal_evaluation": {"evaluation": {"correct": 1, "baseline_correct": 1}},
                   "representation": {"selected_evaluation": {"correct": 0}},
+                  "world_model": {"selected_evaluation": {"lift": 3},
+                                  "reusable_rules": [{"context": "x"}]},
                   "experience_revision": {"evaluation": {"correct": 1, "total": 120},
                                           "reusable_rules": 0}}
         state = update_autonomy_state(curriculum, report)

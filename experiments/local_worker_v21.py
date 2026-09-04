@@ -48,6 +48,7 @@ from abstraction_world_v46 import (assess_open_transfer, empty_abstraction_memor
                                    learn_abstractions)
 from verified_experience_v47 import select_experience_profile
 from experience_rule_learning_v50 import learn_experience_rules
+from world_model_v51 import train_and_evaluate as train_world_model
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -131,10 +132,13 @@ def capability_summary_lines(status: dict) -> list[str]:
     revision = status.get("experience_revision", {})
     abstraction = status.get("abstraction_world", {})
     gates = abstraction.get("open_transfer_gates", {})
+    world_model = status.get("world_model", {})
+    world_eval = world_model.get("selected_evaluation", {})
     structural_lift = structural.get("correct", 0) - structural.get("baseline_correct", 0)
     causal_lift = causal.get("correct", 0) - causal.get("baseline_correct", 0)
-    level = ("次の行動の粗い頻度分類を学び始めた段階" if structural_lift > 0 else
-             "文章から経験を蓄積している初期段階")
+    world_lift = world_eval.get("lift", 0)
+    level = ("固定した未知作品で経験遷移を予測できる段階" if world_lift > 0 else
+             "状態世界モデルを固定未知作品で検証している段階")
     return [
         f"現在の段階     : {level}",
         "実用会話       : 未到達（自由な質問応答ができるとはまだ確認されていない）",
@@ -143,15 +147,18 @@ def capability_summary_lines(status: dict) -> list[str]:
          "（説明能力とは別）"),
         (f"出来事の読取り : {verified.get('accepted_sentences', verified.get('events', 0)):,}文を"
          f"検証済み出来事として保持（完全な文章理解ではない）"),
-        (f"具体的行動予測 : {exact.get('correct', 0)}/{exact.get('total', 0)}、"
+        (f"旧式・具体行動 : {exact.get('correct', 0)}/{exact.get('total', 0)}、"
          f"単純基準より {exact.get('correct', 0) - exact.get('baseline_correct', 0):+d}件"),
-        (f"粗い行動分類   : {structural.get('correct', 0)}/{structural.get('total', 0)}、"
+        (f"旧式・頻度分類 : {structural.get('correct', 0)}/{structural.get('total', 0)}、"
          f"単純基準より {structural_lift:+d}件"),
         (f"因果予測       : {causal.get('correct', 0)}/{causal.get('total', 0)}、"
          f"単純基準より {causal_lift:+d}件（因果理解の成立とはまだ言えない）"),
         (f"抽象化・転用   : 実教材 {sum(bool(value) for value in gates.values())}/4項目、"
          f"抽象予測 {representation.get('correct', 0)}/{representation.get('total', 0)}、"
          f"再利用可能規則 {revision.get('reusable_rules', 0)}件"),
+        (f"状態世界モデル : {world_eval.get('correct', 0)}/{world_eval.get('total', 0)}、"
+         f"固定基準より {world_eval.get('lift', 0):+d}件"
+         f"（{world_model.get('selected_mode', '評価前')}）"),
     ]
 
 
@@ -625,6 +632,8 @@ def update_autonomy_state(curriculum: dict, report: dict) -> dict:
     association = report.get("association", {}).get("selected_evaluation", {})
     causal = report.get("causal_evaluation", {}).get("evaluation", {})
     representation = report.get("representation", {}).get("selected_evaluation", {})
+    world_model = report.get("world_model", {})
+    world = world_model.get("selected_evaluation", {})
     snapshot = {"curricula": global_memory.get("curricula", 0),
                 "structural_correct": revision.get("evaluation", {}).get("correct", 0),
                 "structural_total": revision.get("evaluation", {}).get("total", 0),
@@ -633,7 +642,9 @@ def update_autonomy_state(curriculum: dict, report: dict) -> dict:
                 "failure_patterns": len(revision.get("failure_patterns", [])),
                 "association_lift": association.get("correct", 0) - association.get("baseline_correct", 0),
                 "causal_lift": causal.get("correct", 0) - causal.get("baseline_correct", 0),
-                "representation_correct": representation.get("correct", 0)}
+                "representation_correct": representation.get("correct", 0),
+                "world_model_lift": world.get("lift", 0),
+                "world_reusable_rules": len(world_model.get("reusable_rules", []))}
     history = curriculum.setdefault("capability_history", [])
     if not history or history[-1].get("curricula") != snapshot["curricula"]:
         history.append(snapshot)
@@ -642,10 +653,10 @@ def update_autonomy_state(curriculum: dict, report: dict) -> dict:
     window = history[-30:]
 
     def improved(left: dict, right: dict) -> bool:
-        return (right.get("association_lift", 0) > left.get("association_lift", 0)
-                or right.get("causal_lift", 0) > left.get("causal_lift", 0)
-                or right.get("representation_correct", 0) > left.get("representation_correct", 0)
-                or right.get("reusable_rules", 0) > left.get("reusable_rules", 0))
+        # Only the locked, source-disjoint v51 benchmark can clear a plateau.
+        # Legacy moving holdouts remain diagnostics and cannot manufacture progress.
+        return (right.get("world_model_lift", 0) > left.get("world_model_lift", 0)
+                or right.get("world_reusable_rules", 0) > left.get("world_reusable_rules", 0))
 
     plateau = (len(window) >= 10
                and window[-1]["curricula"] - window[0]["curricula"] >= 20
@@ -988,6 +999,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
     self_learning_policy = read_json(runtime / "self-learning-policy.json")
     dialogue_verification = read_json(runtime / "dialogue-web-verification.json")
     learned_rules = read_json(runtime / "experience-rule-memory.json")
+    world_model = read_json(runtime / "world-model-v51.json")
     return {
         "phase": phase,
         "seed": seed,
@@ -1008,6 +1020,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "dialogue_verification": dialogue_verification.get("summary", {}),
         "learned_experience_rules": report.get("learned_experience_rules") or
                                     learned_rules.get("summary", {}),
+        "world_model": report.get("world_model") or world_model,
         "storage": read_json(runtime / "storage-status.json"),
         "global_memory": report.get("global_memory") or read_json(
             runtime / "global-language-memory.json").get("totals", {}),
@@ -1181,6 +1194,10 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             read_json(runtime / "dialogue-web-verification.json"))
         write_json(rule_path, learned_rule_memory)
         report["learned_experience_rules"] = learned_rule_memory.get("summary", {})
+        world_path = runtime / "world-model-v51.json"
+        world_model = train_world_model(parser_audit_memory, read_json(world_path))
+        write_json(world_path, world_model)
+        report["world_model"] = world_model
         learning_transitions = verified_experience.get("transitions", {})
         coherent_transitions = verified_experience.get("coherent_transitions", learning_transitions)
         learning_event_counts = verified_experience.get("event_counts", {})
@@ -1372,7 +1389,11 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             visited = set(curriculum["completed_seeds"]) | set(curriculum["deferred_seeds"])
             discovered = discover_curriculum(report, visited, effective_network)
             if report.get("autonomy", {}).get("mode") == "counterexample_hunt":
-                targeted = learned_rule_boundary_candidate(learned_rule_memory, visited)
+                world_target = world_model.get("next_learning_target") or {}
+                targeted = (world_target if world_target.get("seed") not in visited
+                            and valid_curriculum_seed(world_target.get("seed", "")) else None)
+                if not targeted:
+                    targeted = learned_rule_boundary_candidate(learned_rule_memory, visited)
                 if not targeted:
                     targeted = causal_comparison_candidate(causal_report, visited)
                 if not targeted:
