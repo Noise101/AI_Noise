@@ -105,13 +105,25 @@ class NarrativeEventExtractor:
 
         excluded_subjects = (ARTICLES | POSSESSIVES | FUNCTION_WORDS if strict
                              else ARTICLES | POSSESSIVES)
-        subject_candidates = [word for word in words[:verb_index]
-                              if word not in excluded_subjects]
+        pre_verb = words[:verb_index]
+        if strict:
+            # A noun inside a prepositional phrase (or a second conjoined noun) that
+            # sits between the subject and the verb must not be promoted to subject.
+            cut = next((i for i, word in enumerate(pre_verb) if word in SUBJECT_STOP), None)
+            if cut:
+                pre_verb = pre_verb[:cut]
+        subject_candidates = [word for word in pre_verb if word not in excluded_subjects]
         if not subject_candidates:
             return EventExtraction(sentence, False, None, "missing_subject", 0.0, verb_index)
-        subject = (subject_candidates[0] if self.policy in {"clause_head", "compact_roles"}
-                   or strict
-                   else subject_candidates[-1])
+        if self.policy in {"clause_head", "compact_roles"}:
+            subject = subject_candidates[0]
+        elif strict:
+            # The head noun follows any leading adjectives; skip trailing "-ly" adverbs
+            # so "The hungry fox saw grapes." yields "fox", not "hungry".
+            subject = next((word for word in reversed(subject_candidates)
+                            if not word.endswith("ly")), subject_candidates[-1])
+        else:
+            subject = subject_candidates[-1]
         if subject in SUBJECT_STOP:
             return EventExtraction(sentence, False, None, "invalid_structural_subject", 0.0,
                                    verb_index)

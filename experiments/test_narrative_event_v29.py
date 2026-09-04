@@ -42,6 +42,19 @@ class NarrativeEventExtractorTest(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertEqual(result.reason, "invalid_structural_subject")
 
+    def test_strict_policy_picks_head_noun_not_leading_adjective(self):
+        result = NarrativeEventExtractor("developmental_grounded_24").extract(
+            "The hungry fox saw grapes.")
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.event.subject, "fox")
+        self.assertEqual(result.event.action, "saw")
+
+    def test_strict_policy_ignores_prepositional_noun_between_subject_and_verb(self):
+        result = NarrativeEventExtractor("developmental_grounded_24").extract(
+            "The fox in the forest saw a rabbit.")
+        self.assertTrue(result.accepted)
+        self.assertEqual(result.event.subject, "fox")
+
     def test_extracts_ordered_events_from_multiple_action_clauses(self):
         results = self.extractor.extract_multiple(
             "The fox pushed the tree, the bird flew away, and the fruit fell down.")

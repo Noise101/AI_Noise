@@ -1,8 +1,8 @@
 import unittest
 
-from world_model_v51 import (BENCHMARK_REGIME, build_sequences, choose_benchmark_sources,
-                             collection_key, narrative_sequence, narrative_source, parse_frame,
-                             passes_gain_gate, train_and_evaluate)
+from world_model_v51 import (BENCHMARK_REGIME, FINAL_QUERY_BUDGET, build_sequences,
+                             choose_benchmark_sources, collection_key, narrative_sequence,
+                             narrative_source, parse_frame, passes_gain_gate, train_and_evaluate)
 
 
 def audit_for_sources(count=30):
@@ -15,6 +15,13 @@ def audit_for_sources(count=30):
             records[f"{source}:{position}"] = {"source_url": url, "seed": f"story {source}",
                 "source_position": position, "sentence": sentence, "curriculum_admitted": True}
     return {"records": records}
+
+
+def _linear_audit(sentences):
+    return {"records": {str(index): {"source_url": "https://story.example/fox/chapter",
+                                     "source_position": index, "sentence": sentence,
+                                     "curriculum_admitted": True}
+                        for index, sentence in enumerate(sentences)}}
 
 
 def diverse_audit_for_sources(count=30):
@@ -138,6 +145,19 @@ class WorldModelV51Test(unittest.TestCase):
         frames = next(iter(build_sequences(audit).values()))["frames"]
         self.assertNotIn("hungry", frames[-1]["known_states"])
 
+    def test_frame_subject_is_head_noun_not_leading_adjective(self):
+        frame = parse_frame("The hungry fox saw grapes.")
+        self.assertIsNotNone(frame)
+        self.assertEqual(frame["actor"], "fox")
+        self.assertEqual(frame["action"], "saw")
+
+    def test_non_conflicting_conditions_accumulate_instead_of_superseding(self):
+        frames = next(iter(build_sequences(_linear_audit([
+            "The fox was hungry.", "The fox was brave.", "The fox ate food."])).values()))["frames"]
+        self.assertIn("hungry", frames[-1]["known_states"])
+        self.assertIn("brave", frames[-1]["known_states"])
+        self.assertEqual(frames[1]["superseded_states"], [])
+
     def test_new_condition_supersedes_old_condition(self):
         audit = {"records": {}}
         for index, sentence in enumerate(("The fox was hungry.", "The fox found food.",
@@ -165,6 +185,49 @@ class WorldModelV51Test(unittest.TestCase):
         if result["final_attempt"] is None:
             again = train_and_evaluate(audit_for_sources(35), result)
             self.assertIsNone(again["final_attempt"])
+
+    def test_early_final_miss_is_rechecked_after_training_growth(self):
+        audit = audit_for_sources(40)
+        baseline = train_and_evaluate(audit)
+        model_id = baseline["final_attempt"]["model_id"]
+        # A data-starved first final query that failed must not be a permanent verdict.
+        starved_miss = {"model_id": model_id, "training_examples": 2, "query_index": 1,
+                        "trials": [], "evaluation": {"total": 4, "lift": 0, "coverage": 0.0,
+                                                     "one_sided_sign_p": 1.0}}
+        previous = {"final_attempt": starved_miss, "final_attempt_history": [starved_miss]}
+        rechecked = train_and_evaluate(audit, previous)
+        self.assertEqual(rechecked["final_queries_used"], 2)
+        self.assertNotEqual(rechecked["selection_status"],
+                            "final_holdout_query_budget_exhausted_no_confirmed_gain")
+
+    def test_final_query_is_not_repeated_before_the_next_training_milestone(self):
+        audit = audit_for_sources(40)
+        baseline = train_and_evaluate(audit)
+        model_id = baseline["final_attempt"]["model_id"]
+        recent_miss = {"model_id": model_id,
+                       "training_examples": baseline["training"]["examples"],
+                       "query_index": 1, "trials": [],
+                       "evaluation": {"total": 4, "lift": 0, "coverage": 0.0,
+                                      "one_sided_sign_p": 1.0}}
+        previous = {"final_attempt": recent_miss, "final_attempt_history": [recent_miss]}
+        held = train_and_evaluate(audit, previous)
+        self.assertEqual(held["final_queries_used"], 1)
+        self.assertEqual(held["selection_status"],
+                         "awaiting_training_growth_for_next_final_query")
+
+    def test_final_holdout_query_budget_is_finite(self):
+        audit = audit_for_sources(40)
+        baseline = train_and_evaluate(audit)
+        model_id = baseline["final_attempt"]["model_id"]
+        miss = {"model_id": model_id, "training_examples": 1, "query_index": 1, "trials": [],
+                "evaluation": {"total": 4, "lift": 0, "coverage": 0.0, "one_sided_sign_p": 1.0}}
+        previous = {"final_attempt": miss,
+                    "final_attempt_history": [dict(miss) for _ in range(FINAL_QUERY_BUDGET)]}
+        exhausted = train_and_evaluate(audit, previous)
+        self.assertEqual(exhausted["final_queries_used"], FINAL_QUERY_BUDGET)
+        self.assertEqual(exhausted["selected_mode"], "frequency_baseline")
+        self.assertEqual(exhausted["selection_status"],
+                         "final_holdout_query_budget_exhausted_no_confirmed_gain")
 
     def test_failure_target_rotates_across_patterns(self):
         first = train_and_evaluate(audit_for_sources())
