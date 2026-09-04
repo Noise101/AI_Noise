@@ -13,7 +13,8 @@ from local_worker_v21 import (_seed_from_title, developmental_source_quality, di
                               parser_counterexample_candidate, structural_counterexample_candidate,
                               repeated_grounding_candidate, curriculum_strategy_allowed,
                               learned_curriculum_score, conversation_practice_summary,
-                              supervise, update_autonomy_state,
+                              supervise, update_autonomy_state, COLLECTION_STALL_ROUNDS,
+                              update_collection_progress,
                               update_curriculum_strategy, work, write_json)
 
 
@@ -142,6 +143,62 @@ class LocalWorkerTest(unittest.TestCase):
         self.assertEqual(state["mode"], "normal_curriculum")
         self.assertFalse(state["human_intervention_required"])
         self.assertIsNone(state["intervention_start_snapshot"])
+
+    def test_collection_progress_detects_a_stall_and_recovers_on_growth(self):
+        curriculum = {}
+        world_model = {"benchmark": {"locked": False, "eligible_collection_count": 5}}
+        stalled = False
+        for _ in range(COLLECTION_STALL_ROUNDS - 1):
+            stalled = update_collection_progress(curriculum, world_model)
+        self.assertFalse(stalled)
+        self.assertTrue(update_collection_progress(curriculum, world_model))
+        # A newly admitted independent collection resets the stall counter.
+        world_model = {"benchmark": {"locked": False, "eligible_collection_count": 6}}
+        self.assertFalse(update_collection_progress(curriculum, world_model))
+        self.assertEqual(curriculum["collection_progress"]["unchanged_rounds"], 0)
+
+    def test_collection_progress_is_irrelevant_once_benchmark_is_locked(self):
+        curriculum = {"collection_progress": {"count": 30, "unchanged_rounds": 999}}
+        stalled = update_collection_progress(curriculum, {"benchmark": {"locked": True}})
+        self.assertFalse(stalled)
+        self.assertNotIn("collection_progress", curriculum)
+
+    @patch("local_worker_v21.update_collection_progress", return_value=True)
+    @patch("local_worker_v21.discover_from_developmental_shelves")
+    @patch("local_worker_v21.discover_curriculum")
+    @patch("local_worker_v21.run_cycle")
+    def test_stalled_collection_growth_forces_a_shelf_search(
+            self, run_cycle, discover, shelves, _stalled):
+        # discover_curriculum alone already fills the frontier from a known
+        # collection; a stall must still add the shelf route's candidates.
+        discover.return_value = [{"seed": "known collection page", "score": 2.5,
+                                  "reason": "unvisited page in an observed story collection",
+                                  "parent_url": "source"}]
+        shelves.return_value = [{"seed": "brand new shelf title", "score": 1.0,
+                                 "reason": "unread title selected from a developmental shelf",
+                                 "parent_url": "shelf"}]
+        run_cycle.return_value = {"state": {"completed_gap_ids": [],
+                                            "stop_reason": "no_unresolved_executable_gap"},
+                                  "current_gaps": [], "knowledge": {}, "web_usage": {}}
+        with tempfile.TemporaryDirectory() as directory:
+            work("seed", Path(directory), 1, 0, 1, 1, 1, local_conversation=False)
+        self.assertTrue(shelves.called)
+
+    @patch("local_worker_v21.update_collection_progress", return_value=False)
+    @patch("local_worker_v21.discover_from_developmental_shelves")
+    @patch("local_worker_v21.discover_curriculum")
+    @patch("local_worker_v21.run_cycle")
+    def test_shelf_search_is_not_forced_while_collections_are_still_growing(
+            self, run_cycle, discover, shelves, _not_stalled):
+        discover.return_value = [{"seed": "known collection page", "score": 2.5,
+                                  "reason": "unvisited page in an observed story collection",
+                                  "parent_url": "source"}]
+        run_cycle.return_value = {"state": {"completed_gap_ids": [],
+                                            "stop_reason": "no_unresolved_executable_gap"},
+                                  "current_gaps": [], "knowledge": {}, "web_usage": {}}
+        with tempfile.TemporaryDirectory() as directory:
+            work("seed", Path(directory), 1, 0, 1, 1, 1, local_conversation=False)
+        self.assertFalse(shelves.called)
 
     def test_parser_failure_can_request_a_nearby_observation(self):
         audit = {"summary": {"rejection_reasons": {"invalid_structural_subject": 3}},

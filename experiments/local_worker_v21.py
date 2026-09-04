@@ -760,6 +760,33 @@ def developmental_source_quality(report: dict) -> dict:
     return assess_source_quality(report)
 
 
+COLLECTION_STALL_ROUNDS = 25
+
+
+def update_collection_progress(curriculum: dict, world_model: dict) -> bool:
+    """Detect when independent eligible narrative collections have stopped growing.
+
+    "unvisited page in an observed story collection" keeps finding new pages
+    inside collections the world model already counts (it is by far the
+    highest-volume discovery route), so the frontier rarely empties and the
+    shelf fallback -- the route that finds genuinely new collections -- almost
+    never runs.  Once growth stalls for COLLECTION_STALL_ROUNDS discovery
+    cycles, the caller should force a shelf search alongside the normal
+    candidates instead of waiting for the frontier to run dry on its own.
+    """
+    benchmark = world_model.get("benchmark", {})
+    if benchmark.get("locked"):
+        curriculum.pop("collection_progress", None)
+        return False
+    count = benchmark.get("eligible_collection_count", 0)
+    progress = curriculum.setdefault("collection_progress", {"count": count, "unchanged_rounds": 0})
+    if count > progress.get("count", 0):
+        progress["count"], progress["unchanged_rounds"] = count, 0
+    else:
+        progress["unchanged_rounds"] = progress.get("unchanged_rounds", 0) + 1
+    return progress["unchanged_rounds"] >= COLLECTION_STALL_ROUNDS
+
+
 def discover_curriculum(report: dict, visited: set[str], network: int) -> list[dict]:
     """Generate next seeds from observed evidence links and learned concepts."""
     candidates: dict[str, dict] = {}
@@ -1411,6 +1438,10 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             curriculum[url_bucket] = sorted(set(curriculum[url_bucket]) | set(quality_urls))
             visited = set(curriculum["completed_seeds"]) | set(curriculum["deferred_seeds"])
             discovered = discover_curriculum(report, visited, effective_network)
+            if update_collection_progress(curriculum, world_model):
+                known_discovered = {item["seed"] for item in discovered}
+                discovered.extend(item for item in discover_from_developmental_shelves(
+                    visited, effective_network) if item["seed"] not in known_discovered)
             if report.get("autonomy", {}).get("mode") == "counterexample_hunt":
                 world_target = world_model.get("next_learning_target") or {}
                 targeted = (world_target if world_target.get("seed") not in visited
