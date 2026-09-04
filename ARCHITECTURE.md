@@ -23,6 +23,9 @@ This principle outranks convenience, benchmark appearance, fluent output, and sh
 13. **A local model may be a conversation environment, not a teacher.** Noise constructs its own utterance from its mastery goal and curiosity ledger. Local-model replies create turn-taking and language observations with evidence score zero; they cannot satisfy lexical, conceptual, or causal gates without independent evidence.
 14. **Global knowledge has one canonical owner.** Cross-curriculum curiosity and future shared beliefs live once in a global ledger. Per-seed states store only local observations and references to global priors; copying the entire global ledger into every experience is forbidden.
 15. **Experiences are local; learned capability is global.** A seed report preserves what happened in one curriculum. Accepted lexical beliefs and accumulated event transitions live in one cross-curriculum memory, are loaded before the next experience, and are evaluated globally. Reports store only the delta from that prior.
+16. **Capability requires a frozen external test.** Growing vocabulary, stored observations, rounds, and performance on a moving holdout are diagnostics, not capability growth. Benchmark sources and examples are frozen, excluded from training, and split by whole source into model-selection and untouched final sets.
+17. **Choosing a representation is not evaluating it.** A parser, representation, or predictor selected on one set must independently beat its paired frequency baseline on the final set. Failure on either set retains the baseline and the failed candidate as a counterexample.
+18. **Bounded-world success has zero real-world credit.** Procedural micro-world stages may demonstrate that a mechanism executes, but their scores cannot satisfy real-reading, language, abstraction-transfer, or causal gates.
 
 ## Forbidden substitutions
 
@@ -56,5 +59,9 @@ Before merging a version, answer:
 - What evidence would reverse the belief?
 - Does the feature still work with the local LLM disabled?
 - Are fluent output and genuine learned state clearly separated?
+- Is the reported improvement measured on frozen examples that never selected the model?
+- Does the paired comparison beat the exact baseline on both selection and final source sets?
+
+These gates are exercised by `test_architecture_contract.py`, `test_world_model_v51.py`, and `test_local_worker_v21.py`. Passing them prevents several known false claims, but it does not prove intelligence or semantic understanding.
 
 If these questions cannot be answered, the version is not an advance toward the project objective.

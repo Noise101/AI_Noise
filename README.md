@@ -15,7 +15,7 @@
   → 再予測
 ```
 
-LLMと学習済みモデルは使用していません。v35までの中核はPython標準ライブラリだけで動作します。v36のローカル画像特徴抽出だけはPillowを使い、読み取り専用のWikimedia APIへ接続します。Pillowは画像の縮小と画素統計にだけ使い、学習済み認識器ではありません。
+LLMと学習済みモデルは中核学習に使用していません。v51までの中核はPython標準ライブラリだけで動作します。v36のローカル画像特徴抽出だけはPillowを使い、読み取り専用のWikimedia APIへ接続します。Pillowは画像の縮小と画素統計にだけ使い、学習済み認識器ではありません。
 
 ```bash
 python3 -m pip install -r requirements-visual.txt
@@ -23,7 +23,13 @@ python3 -m pip install -r requirements-visual.txt
 
 ## 現在地
 
-`experiments/unified_agent_v9.py` が現在の統合版です。以下を単一の継続学習ループにまとめています。
+`experiments/unified_agent_v9.py` は限定二値世界の統合実験です。実教材を読む現在の常駐経路は `experiments/local_worker_v21.py`、その中で検証中の第二世代経験モデルは `experiments/world_model_v51.py` です。
+
+v51は文を、元文と出典を残したまま `主体・状態・目的・行動・対象・否定・談話結果` の観察フレームへ変換し、同一主体の状態と目的を複数場面で保持します。学習作品と固定評価作品を分離し、さらに評価作品を方式選択用と最終試験用へ作品単位で分けます。両方で頻度基準を10%以上上回り、対応比較の片側符号検定を通った候補だけを採用します。
+
+2026-09-04時点の実データ再評価では、最良候補は選択側では改善しても独立最終側で十分な改善を示さず、`frequency_baseline`を維持しています。これは未達を意味し、能力獲得の主張ではありません。
+
+v9は以下を単一の限定世界ループにまとめています。
 
 - 結果を観測する前の事前予測
 - 予測誤差による自己評価
@@ -76,6 +82,38 @@ python3 -m unittest discover -v
 | v19 | 日本語多義語の文脈接地・引用付き結論・反証訂正 |
 
 各版は`experiments/`内に独立した実行可能ファイルとして残しています。
+
+### v37-v51の現行監査対象
+
+READMEの更新が実装より遅れ、v37以降が外部から追跡しにくい状態になっていました。現行の主要経路は次の通りです。
+
+- v37: 実経験規則の反例保持と再利用判定
+- v38-v39: 解析方式の自己比較と原文監査台帳
+- v41-v46: 限定世界での因果・道具・他者・共同・抽象化機構診断
+- v47-v49: 原文の再解析、作品単位holdout、発達段階プロファイル選択
+- v48: ローカルAIとの対話仮説を独立Web文脈で検証
+- v50: 出典分離した経験規則、反例、規則改訂履歴
+- v51: 状態・目的を持つ複数場面世界モデルと凍結二段階評価
+
+限定世界v41-v46の合格は機構診断であり、実教材能力へ加算しません。実教材での主評価はv51の固定最終試験です。
+
+## 外部監査用リンク
+
+監査基準コミットは[`742c30f`](https://github.com/Noise101/AI_Noise/commit/742c30f)です。GitHubの画面を展開できない監査ツール向けに、生ファイルも直接リンクします。
+
+- [`world_model_v51.py` raw](https://raw.githubusercontent.com/Noise101/AI_Noise/742c30f/experiments/world_model_v51.py)
+- [`local_worker_v21.py` raw](https://raw.githubusercontent.com/Noise101/AI_Noise/742c30f/experiments/local_worker_v21.py)
+- [`test_world_model_v51.py` raw](https://raw.githubusercontent.com/Noise101/AI_Noise/742c30f/experiments/test_world_model_v51.py)
+- [`test_local_worker_v21.py` raw](https://raw.githubusercontent.com/Noise101/AI_Noise/742c30f/experiments/test_local_worker_v21.py)
+
+```bash
+git clone https://github.com/Noise101/AI_Noise.git
+cd AI_Noise
+git checkout 742c30f
+python3 experiments/run_tests.py --profile full --quiet
+```
+
+当該コミットでは226テストが合格しました。ただしテスト合格は能力獲得の証明ではなく、分離条件・不変条件・失敗時の不採用を含む実装検査です。
 
 ## 次の課題
 

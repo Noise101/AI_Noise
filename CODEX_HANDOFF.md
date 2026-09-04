@@ -39,6 +39,15 @@ Read `ARCHITECTURE.md` before changing the learning path. Its invariants are the
 - `v30`: removes fox/grapes-specific concept extraction, learns relation-group candidates from repeated distributions, resolves only local explicit coreference, filters and caps the developmental frontier, routes observed Japanese chunks into the Japanese learner, measures Noise's own follow-up skill without crediting partner claims, bases mastery on audited evidence, tests intervention machinery in a separate zero-world-credit lab, and compacts mastery history.
 - `v31`: compares surface, role, role+object-head, and experience-derived spelling-family event representations on deterministic holdout data. An abstraction is adopted and revision-logged only if it beats both surface and frequency baseline. The first live evaluation increased coverage to 0.413 but tied baseline accuracy at 0.0435, so it correctly retained surface representation. Grounded component meanings may create revisable phrase compositions; repeated dialogue punctuation patterns may ground structural conversation functions.
 - `v32`: scores each audited source by narrative-event yield, child-length sentences, words recurring across at least three curricula, subject recurrence, and dialogue form. Only current-level sources enter canonical memory or spawn descendants. Migration archives pre-v32 memory/curriculum and rebuilds both from raw reports; a preflight admitted 11 of 939 reports and rejected biography, encyclopedia, and travel-text drift.
+- `v33-v36`: adds association learning, an observation-only human-science scaffold, persistent error memory, and image-depiction memory. Association is explicitly not causal evidence and image depictions are not treated as real-world perception.
+- `v37-v40`: retains failed structural rules and parser counterexamples, compares parser policies on held-out sources, audits every accepted/rejected sentence, and quarantines legacy parsing errors.
+- `v41-v46`: tests active causality, tools, other agents, cooperation, and abstraction in bounded procedural worlds. These stages are mechanism diagnostics only and contribute zero credit to real-reading capability.
+- `v47-v49`: rebuilds prediction evidence from retained source sentences, uses whole-source holdouts, and selects developmental sentence complexity only on unseen-source performance.
+- `v48`: local-model conversation produces hypotheses with zero evidence credit; only independently observed Web contexts may support a structural hypothesis.
+- `v50`: structures independently sourced experiences, retains counterexamples, and promotes a rule only after source-held-out success.
+- `v51`: introduces state/goal/action/result observation frames, persistent per-actor state across scenes, a locked narrative-source benchmark, disjoint model-selection and final source sets, paired baseline comparisons, and automatic rejection when improvement does not replicate.
+
+The active real-material path is `local_worker_v21.py` plus `world_model_v51.py`; `unified_agent_v9.py` is only the bounded binary-world experiment. At commit `742c30f`, the live v51 model remained at the frequency baseline after the stricter independent-final gate. Do not describe that as learned capability.
 
 The latest live v18 run generated the query `きつね つる`, selected `イソップ童話集/きつねとつる`, and induced many repeated chunks. Only `きつね` and `つる` were corroborated by both Japanese Wiktionary and an exact/redirected Japanese Wikipedia page. `つる` remains meaning-ambiguous even though its boundary is accepted.
 
@@ -51,6 +60,13 @@ python3 -m unittest discover -v
 ```
 
 Use `python3 run_tests.py --profile quick --quiet` while iterating, then the full profile before a milestone commit.
+
+External auditors that cannot browse GitHub trees can use these immutable raw URLs:
+
+- https://raw.githubusercontent.com/Noise101/AI_Noise/742c30f/experiments/world_model_v51.py
+- https://raw.githubusercontent.com/Noise101/AI_Noise/742c30f/experiments/local_worker_v21.py
+- https://raw.githubusercontent.com/Noise101/AI_Noise/742c30f/experiments/test_world_model_v51.py
+- https://raw.githubusercontent.com/Noise101/AI_Noise/742c30f/experiments/test_local_worker_v21.py
 
 Live read-only checks:
 
@@ -66,7 +82,7 @@ python3 local_worker_v21.py status
 
 ## Next concrete work
 
-Replace the shallow event parser with a generic, transparent narrative-event representation that rejects metadata, normalizes auxiliaries, and keeps provenance. Evaluate it on unseen child-level English and Japanese sentences before rerunning v28. Do not loosen v28 thresholds merely to obtain a positive causal result.
+Improve the v51 heuristic observation parser without changing the locked benchmark examples. The present state/goal frames are auditable but still limited to explicit simple clauses. A new parser or representation must beat the frequency baseline on both the source-disjoint selection set and untouched final set; do not loosen thresholds to manufacture a positive result.
 
 ## Safety and integrity
 
