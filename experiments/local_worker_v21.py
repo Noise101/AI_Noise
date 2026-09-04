@@ -160,8 +160,11 @@ def capability_summary_lines(status: dict) -> list[str]:
          f"抽象予測 {representation.get('correct', 0)}/{representation.get('total', 0)}、"
          f"再利用可能規則 {revision.get('reusable_rules', 0)}件"),
         ((f"状態世界モデル : 評価保留（適格な独立作品集 "
-          f"{benchmark.get('eligible_collection_count', 0)}/"
-          f"{benchmark.get('required_collection_count', 0)}）")
+          f"{benchmark.get('eligible_collection_count', 0)}件、選抜/確認 各"
+          f"{benchmark.get('candidate_selection_examples', 0)}/"
+          f"{benchmark.get('minimum_selection_examples', 0)}件、訓練 "
+          f"{benchmark.get('candidate_train_examples', 0)}/"
+          f"{benchmark.get('minimum_train_examples', 0)}件）")
          if not benchmark.get("locked") else
          (f"状態世界モデル : {world_eval.get('correct', 0)}/{world_eval.get('total', 0)}、"
           f"固定基準より {world_eval.get('lift', 0):+d}件"

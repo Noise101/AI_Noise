@@ -54,6 +54,21 @@ def _linear_audit(sentences):
                         for index, sentence in enumerate(sentences)}}
 
 
+def rich_audit_for_sources(count=25, sentences_per_source=12):
+    """Fewer, longer collections than audit_for_sources -- enough per-collection
+    volume to test readiness by example count rather than collection count."""
+    records = {}
+    cycle = ("The fox saw food.", "The fox found food.", "The fox ate food.",
+             "The fox left home.")
+    for source in range(count):
+        url = f"https://story.example/Animal_Stories_{source}/chapter"
+        sentences = [cycle[index % len(cycle)] for index in range(sentences_per_source)]
+        for position, sentence in enumerate(sentences):
+            records[f"{source}:{position}"] = {"source_url": url, "source_position": position,
+                "sentence": sentence, "curriculum_admitted": True}
+    return {"records": records}
+
+
 def diverse_audit_for_sources(count=30):
     stories = (
         ("fox", "cold", "find", "shelter"), ("hare", "tired", "seek", "water"),
@@ -119,6 +134,24 @@ class WorldModelV51Test(unittest.TestCase):
         self.assertFalse(result["benchmark"]["locked"])
         self.assertEqual(result["training"]["source_count"], 15)
         self.assertEqual(result["selection_status"], "benchmark_not_ready")
+        # Readiness is now reported as example counts, not a bare collection count.
+        self.assertIn("candidate_selection_examples", result["benchmark"])
+        self.assertIn("minimum_train_examples", result["benchmark"])
+
+    def test_benchmark_unlocks_below_the_old_thirty_collection_floor_when_examples_suffice(self):
+        # 25 collections would have failed the old len(groups) < 30 gate outright,
+        # regardless of how much evidence each one carried. Readiness must now be
+        # judged by whether the resulting selection/final/train split actually has
+        # enough predictive pairs (12 sentences/collection here comfortably does).
+        audit = rich_audit_for_sources(count=25, sentences_per_source=12)
+        sequences = build_sequences(audit)
+        self.assertEqual(len({collection_key(url) for url in sequences}), 25)
+        self.assertTrue(choose_benchmark_sources(sequences))
+        result = train_and_evaluate(audit)
+        self.assertTrue(result["benchmark"]["locked"])
+        self.assertGreaterEqual(result["benchmark"]["selection_examples"], 15)
+        self.assertGreaterEqual(result["benchmark"]["final_examples"], 15)
+        self.assertGreaterEqual(result["training"]["examples"], 15)
 
     def test_same_collection_is_never_split_between_training_and_benchmark(self):
         audit = audit_for_sources(30)

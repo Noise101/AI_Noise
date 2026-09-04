@@ -45,8 +45,11 @@ CONTRADICTORY_STATE_GROUPS = (
 )
 BENCHMARK_REGIME = "collection_disjoint_preregistered_v2"
 MIN_BENCHMARK_GROUPS = 20
-MIN_TRAIN_GROUPS = 10
 FAMILY_ALPHA = .05
+# Shared with passes_gain_gate: an evaluation (or a training pool) below this
+# many predictive pairs is too small to trust, whether it's a selection/final
+# holdout or the training side of the collection-disjoint split.
+MINIMUM_EVALUATION_TOTAL = 15
 
 
 def source_key(url: str) -> str:
@@ -196,24 +199,76 @@ def build_sequences(audit: dict) -> dict[str, dict]:
     return sequences
 
 
-def choose_benchmark_sources(sequences: dict[str, dict], previous: dict | None = None) -> list[str]:
+def examples_from(sequences: dict[str, dict], sources: set[str]) -> list[tuple[list[dict], dict, str]]:
+    examples = []
+    for url in sorted(sources):
+        frames = sequences.get(url, {}).get("frames", [])
+        for index in range(1, len(frames)):
+            # Actor changes are narrative adjacency, not an actor-state transition.
+            if frames[index - 1]["actor"] != frames[index]["actor"]:
+                continue
+            examples.append((frames[max(0, index - 2):index], frames[index], url))
+    return examples
+
+
+def balanced_source_split(examples: list[tuple[list[dict], dict, str]]) -> set[str]:
+    """Divide a benchmark's whole sources between its selection and final halves,
+    keeping each source's examples together (never split across the two)."""
+    counts = Counter(url for _, _, url in examples)
+    selection, totals = set(), [0, 0]
+    for url, count in sorted(counts.items(), key=lambda item: (-item[1], source_key(item[0]))):
+        side = 0 if totals[0] <= totals[1] else 1
+        if side == 0:
+            selection.add(url)
+        totals[side] += count
+    return selection
+
+
+def _candidate_benchmark(sequences: dict[str, dict], minimum_total: int,
+                         minimum_train_examples: int) -> dict:
+    """Build the ranked candidate benchmark and judge readiness by whether its
+    selection/final split, and the remaining training pool, actually carry
+    enough predictive pairs -- not by how many collections exist. A handful of
+    long collections can satisfy this before thirty short ones would, and
+    thirty very short ones might still not."""
+    groups: dict[str, list[str]] = defaultdict(list)
+    for url, sequence in sequences.items():
+        if narrative_source(url) and narrative_sequence(sequence):
+            groups[collection_key(url)].append(url)
+    empty = {"ready": False, "benchmark_urls": [], "eligible_collection_count": len(groups),
+             "selection_examples": 0, "final_examples": 0, "train_examples": 0}
+    if not groups:
+        return empty
+    ranked_groups = sorted(groups, key=lambda group: hashlib.sha256(
+        f"fixed-world-benchmark:{group}".encode()).hexdigest())
+    selected_groups = set(ranked_groups[:min(40, max(MIN_BENCHMARK_GROUPS,
+                                                len(ranked_groups) // 3))])
+    benchmark_urls = sorted(url for group in selected_groups for url in groups[group])
+    train_sources = {url for group in ranked_groups if group not in selected_groups
+                     for url in groups[group]}
+    raw_benchmark = examples_from(sequences, set(benchmark_urls))
+    selection_sources = balanced_source_split(raw_benchmark)
+    selection_examples = sum(1 for _, _, url in raw_benchmark if url in selection_sources)
+    final_examples = len(raw_benchmark) - selection_examples
+    train_examples = len(examples_from(sequences, train_sources))
+    ready = (selection_examples >= minimum_total and final_examples >= minimum_total
+            and train_examples >= minimum_train_examples)
+    return {"ready": ready, "benchmark_urls": benchmark_urls,
+            "eligible_collection_count": len(groups), "selection_examples": selection_examples,
+            "final_examples": final_examples, "train_examples": train_examples}
+
+
+def choose_benchmark_sources(sequences: dict[str, dict], previous: dict | None = None,
+                             minimum_total: int = MINIMUM_EVALUATION_TOTAL,
+                             minimum_train_examples: int = MINIMUM_EVALUATION_TOTAL) -> list[str]:
     """Freeze an eligible collection-disjoint set, or postpone without fallback."""
     previous = previous or {}
     prior_benchmark = previous.get("benchmark", {})
     locked = prior_benchmark.get("source_urls")
     if locked and prior_benchmark.get("selection_regime") == BENCHMARK_REGIME:
         return list(locked)
-    groups: dict[str, list[str]] = defaultdict(list)
-    for url, sequence in sequences.items():
-        if narrative_source(url) and narrative_sequence(sequence):
-            groups[collection_key(url)].append(url)
-    if len(groups) < MIN_BENCHMARK_GROUPS + MIN_TRAIN_GROUPS:
-        return []
-    ranked_groups = sorted(groups, key=lambda group: hashlib.sha256(
-        f"fixed-world-benchmark:{group}".encode()).hexdigest())
-    selected_groups = set(ranked_groups[:min(40, max(MIN_BENCHMARK_GROUPS,
-                                                len(ranked_groups) // 3))])
-    return sorted(url for group in selected_groups for url in groups[group])
+    candidate = _candidate_benchmark(sequences, minimum_total, minimum_train_examples)
+    return candidate["benchmark_urls"] if candidate["ready"] else []
 
 
 def context_key(history: list[dict], mode: str) -> str:
@@ -254,25 +309,13 @@ FINAL_QUERY_BUDGET = 5
 FINAL_TRAIN_GROWTH_FACTOR = 2
 
 
-def passes_gain_gate(evaluation: dict, minimum_total: int = 15,
+def passes_gain_gate(evaluation: dict, minimum_total: int = MINIMUM_EVALUATION_TOTAL,
                      alpha: float = FAMILY_ALPHA / (len(MODES) * 2)) -> bool:
     required = max(3, (evaluation.get("total", 0) + 9) // 10)
     return (evaluation.get("total", 0) >= minimum_total
             and evaluation.get("lift", 0) >= required
             and evaluation.get("coverage", 0.0) >= .1
             and evaluation.get("one_sided_sign_p", 1.0) <= alpha)
-
-
-def examples_from(sequences: dict[str, dict], sources: set[str]) -> list[tuple[list[dict], dict, str]]:
-    examples = []
-    for url in sorted(sources):
-        frames = sequences.get(url, {}).get("frames", [])
-        for index in range(1, len(frames)):
-            # Actor changes are narrative adjacency, not an actor-state transition.
-            if frames[index - 1]["actor"] != frames[index]["actor"]:
-                continue
-            examples.append((frames[max(0, index - 2):index], frames[index], url))
-    return examples
 
 
 def train_and_evaluate(audit: dict, previous: dict | None = None) -> dict:
@@ -286,13 +329,20 @@ def train_and_evaluate(audit: dict, previous: dict | None = None) -> dict:
     frozen_examples = previous.get("benchmark_examples")
 
     if not benchmark_urls:
-        eligible_groups = {collection_key(url) for url, sequence in sequences.items()
-                           if narrative_source(url) and narrative_sequence(sequence)}
+        # choose_benchmark_sources already judged readiness by example count; redo
+        # that (cheap) computation here purely to report what it found.
+        candidate = _candidate_benchmark(sequences, MINIMUM_EVALUATION_TOTAL,
+                                         MINIMUM_EVALUATION_TOTAL)
         return {"version": 51,
-                "benchmark": {"locked": False, "status": "insufficient_eligible_collections",
+                "benchmark": {"locked": False, "status": "insufficient_benchmark_examples",
                     "selection_regime": BENCHMARK_REGIME, "source_urls": [], "source_count": 0,
-                    "eligible_collection_count": len(eligible_groups),
-                    "required_collection_count": MIN_BENCHMARK_GROUPS + MIN_TRAIN_GROUPS,
+                    "eligible_collection_count": candidate["eligible_collection_count"],
+                    "candidate_selection_examples": candidate["selection_examples"],
+                    "candidate_final_examples": candidate["final_examples"],
+                    "candidate_train_examples": candidate["train_examples"],
+                    "minimum_selection_examples": MINIMUM_EVALUATION_TOTAL,
+                    "minimum_final_examples": MINIMUM_EVALUATION_TOTAL,
+                    "minimum_train_examples": MINIMUM_EVALUATION_TOTAL,
                     "selection_examples": 0, "final_examples": 0, "examples": 0,
                     "fingerprint": None},
                 "training": {"source_count": len(sequences),
@@ -308,18 +358,9 @@ def train_and_evaluate(audit: dict, previous: dict | None = None) -> dict:
                     "reason": "collect independent eligible narrative collections before evaluation"},
                 "revision_history": list(previous.get("revision_history", []))[-200:],
                 "invariants": ["no_non_narrative_benchmark_fallback",
-                    "minimum_training_collections_preserved", "collection_disjoint_split"],
-                "limitations": ["benchmark deliberately postponed until enough independent collections exist"]}
-
-    def balanced_source_split(examples: list[tuple[list[dict], dict, str]]) -> set[str]:
-        counts = Counter(url for _, _, url in examples)
-        selection, totals = set(), [0, 0]
-        for url, count in sorted(counts.items(), key=lambda item: (-item[1], source_key(item[0]))):
-            side = 0 if totals[0] <= totals[1] else 1
-            if side == 0:
-                selection.add(url)
-            totals[side] += count
-        return selection
+                    "minimum_training_examples_preserved", "collection_disjoint_split"],
+                "limitations": ["benchmark deliberately postponed until its selection/final split "
+                                "and remaining training pool would each carry enough examples"]}
 
     if (frozen_examples and previous.get("benchmark", {}).get("selection_regime")
             == BENCHMARK_REGIME):
