@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 import os
@@ -23,6 +24,7 @@ from curiosity_drive_v23 import curiosity_pressure
 from mastery_drive_v24 import assess_language_mastery
 from local_conversation_v25 import practice_once
 from compact_runtime_v26 import compact_historical_seed_reports, compact_runtime
+from curriculum_scoring import curriculum_strategy_allowed, learned_curriculum_score
 from global_memory_v27 import empty_memory, mastery_report, merge_report
 from causal_experiment_v28 import evaluate_causal_views
 from causal_lab_v30 import run_lab
@@ -440,6 +442,55 @@ def read_json(path: Path) -> dict:
         return {}
 
 
+EVENTS_LOG_ROTATE_LINES = 5000
+EVENTS_LOG_KEEP_LINES = 2000
+
+
+def append_events(runtime: Path, module: str, curricula: int, events: list[dict]) -> None:
+    """Append a module's emitted_events to the shared decision-replay log.
+
+    events.jsonl is a *decision* log, not a state log: it lets a reader
+    reconstruct WHEN and WHY a benchmark lock, a selected-mode switch, or a
+    reusable-rule appearance/disappearance happened -- the sequence of
+    decisions -- not the underlying evaluation numbers. Reconstructing those
+    numbers still requires re-running the owning module against the historical
+    audit data; see the module-level docstring in world_model_v51.py.
+    """
+    if not events:
+        return
+    path = runtime / "events.jsonl"
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    with path.open("a", encoding="utf-8") as handle:
+        for event in events:
+            record = {"ts": timestamp, "curricula": curricula, "module": module, **event}
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def rotate_events_log(runtime: Path) -> dict:
+    """Archive the oldest events.jsonl lines once the live log grows past a
+    threshold. This only ever moves lines out of the live tail file into a
+    gzip-compressed archive that this worker never reads back -- it cannot
+    silently corrupt a from-scratch decision replay, only move older history
+    to cold storage that a replay tool can still read directly.
+    """
+    path = runtime / "events.jsonl"
+    if not path.exists():
+        return {"rotated": False}
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if len(lines) <= EVENTS_LOG_ROTATE_LINES:
+        return {"rotated": False, "lines": len(lines)}
+    archive_dir = runtime / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archived, kept = lines[:-EVENTS_LOG_KEEP_LINES], lines[-EVENTS_LOG_KEEP_LINES:]
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    archive_path = archive_dir / f"events-{stamp}.jsonl.gz"
+    with gzip.open(archive_path, "wt", encoding="utf-8") as handle:
+        handle.write("\n".join(archived) + "\n")
+    path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+    return {"rotated": True, "archived_lines": len(archived), "kept_lines": len(kept),
+            "archive_path": str(archive_path.relative_to(runtime))}
+
+
 def is_transient_error(error: Exception) -> bool:
     text = f"{type(error).__name__}: {error}".lower()
     if any(marker in text for marker in ("http error 403", "http error 404", "http error 410")):
@@ -506,6 +557,10 @@ def enforce_storage_budget(runtime: Path, max_bytes: int) -> dict:
     if compaction_due:
         compacted = compact_runtime(runtime, True)
         last_compaction_epoch = checked_epoch
+    # events.jsonl grows independently of the byte-budget compaction above (it
+    # is tiny compared to the managed-bytes threshold), so it is rotated on
+    # its own line-count trigger every check rather than gated on compaction_due.
+    events_log_rotation = rotate_events_log(runtime)
     runtime_after = runtime_bytes(runtime)
     cache_after = runtime_bytes(cache_dir) if cache_dir and cache_dir.exists() else 0
     after = runtime_after + cache_after
@@ -522,6 +577,7 @@ def enforce_storage_budget(runtime: Path, max_bytes: int) -> dict:
               "bytes_reclaimed": ((0 if not compacted else compacted["bytes_reclaimed"])
                                     + redundancy["bytes_reclaimed"]),
               "redundancy_compaction": redundancy,
+              "events_log_rotation": events_log_rotation,
               "disk_free_bytes": disk_free,
               "minimum_free_bytes": DEFAULT_MIN_FREE_BYTES,
               "resume_free_bytes": DEFAULT_RESUME_FREE_BYTES,
@@ -761,20 +817,6 @@ def update_curriculum_strategy(curriculum: dict, seed: str, admitted: bool) -> d
     item["status"] = ("deprioritized" if item["attempts"] >= 10
                       and item["admission_rate"] < 0.2 else "active")
     return {"strategy": strategy, **item}
-
-
-def curriculum_strategy_allowed(curriculum: dict, candidate: dict) -> bool:
-    performance = curriculum.get("strategy_performance", {}).get(candidate.get("reason"), {})
-    return performance.get("status") != "deprioritized"
-
-
-def learned_curriculum_score(curriculum: dict, candidate: dict) -> float:
-    """Rank routes by their observed developmental yield with a Beta prior."""
-    base = candidate.get("score", 0.0)
-    performance = curriculum.get("strategy_performance", {}).get(candidate.get("reason"), {})
-    admitted, rejected = performance.get("admitted", 0), performance.get("rejected", 0)
-    expected_yield = (admitted + 1) / (admitted + rejected + 2)
-    return base * (0.5 + expected_yield)
 
 
 def developmental_source_quality(report: dict) -> dict:
@@ -1271,6 +1313,8 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         report["learned_experience_rules"] = learned_rule_memory.get("summary", {})
         world_path = runtime / "world-model-v51.json"
         world_model = train_world_model(parser_audit_memory, read_json(world_path))
+        append_events(runtime, "world_model_v51", memory.get("totals", {}).get("curricula", 0),
+                     world_model.pop("emitted_events", []))
         write_json(world_path, world_model)
         report["world_model"] = world_model
         learning_transitions = verified_experience.get("transitions", {})

@@ -4,7 +4,7 @@ import unittest
 from world_model_v51 import (BENCHMARK_REGIME, FINAL_QUERY_BUDGET, build_sequences,
                              choose_benchmark_sources, classify_trend, collection_key,
                              narrative_sequence, narrative_source, parse_frame, passes_gain_gate,
-                             train_and_evaluate)
+                             rule_status, train_and_evaluate)
 
 
 # Positive control: a genuine (noisy) prior-action -> next-action Markov chain, so the
@@ -200,6 +200,77 @@ class WorldModelV51Test(unittest.TestCase):
         result = train_and_evaluate(noisy_markov_chain_audit(noise_rate=1.0, seed=42))
         self.assertTrue(result["benchmark"]["locked"])
         self.assertEqual(result["selected_mode"], "frequency_baseline")
+
+    def test_benchmark_lock_emits_an_event_exactly_once(self):
+        audit = noisy_markov_chain_audit()
+        first = train_and_evaluate(audit)
+        locked_events = [event for event in first["emitted_events"]
+                         if event["event_type"] == "benchmark_locked"]
+        self.assertEqual(len(locked_events), 1)
+        self.assertEqual(locked_events[0]["before"], {"locked": False})
+        self.assertTrue(locked_events[0]["after"]["locked"])
+        second = train_and_evaluate(audit, first)
+        self.assertFalse(any(event["event_type"] == "benchmark_locked"
+                             for event in second["emitted_events"]))
+
+    def test_selected_mode_switch_emits_an_event(self):
+        audit = noisy_markov_chain_audit()
+        first = train_and_evaluate(audit)
+        fake_previous = dict(first)
+        fake_previous["selected_mode"] = "some_other_model_id"
+        second = train_and_evaluate(audit, fake_previous)
+        mode_events = [event for event in second["emitted_events"]
+                      if event["event_type"] == "selected_mode_changed"]
+        self.assertEqual(len(mode_events), 1)
+        self.assertEqual(mode_events[0]["before"], {"selected_mode": "some_other_model_id"})
+        self.assertEqual(mode_events[0]["after"], {"selected_mode": first["selected_mode"]})
+
+    def test_reusable_rules_changed_event_reports_additions_and_stable_ids(self):
+        audit = noisy_markov_chain_audit()
+        first = train_and_evaluate(audit)
+        self.assertTrue(first["reusable_rules"])
+        self.assertTrue(all("rule_id" in rule for rule in first["reusable_rules"]))
+        added_events = [event for event in first["emitted_events"]
+                        if event["event_type"] == "reusable_rules_changed"]
+        self.assertEqual(len(added_events), 1)
+        self.assertEqual(added_events[0]["added_count"], len(first["reusable_rules"]))
+        self.assertEqual(added_events[0]["removed_count"], 0)
+        # Re-running on unchanged data must not report spurious churn, and the
+        # same context+prediction must hash to the same rule_id every time.
+        second = train_and_evaluate(audit, first)
+        self.assertFalse(any(event["event_type"] == "reusable_rules_changed"
+                             for event in second["emitted_events"]))
+        self.assertEqual({rule["rule_id"] for rule in second["reusable_rules"]},
+                         {rule["rule_id"] for rule in first["reusable_rules"]})
+
+    def test_rule_status_reflects_held_out_evidence_and_confidence_trend(self):
+        self.assertEqual(rule_status(held_out_hits=0, held_out_trials=0, confidence=.9,
+                                     prior_confidence=None), "reusable")
+        self.assertEqual(rule_status(held_out_hits=0, held_out_trials=5, confidence=.9,
+                                     prior_confidence=None), "weakened")
+        self.assertEqual(rule_status(held_out_hits=3, held_out_trials=5, confidence=.7,
+                                     prior_confidence=.85), "tentative")
+        self.assertEqual(rule_status(held_out_hits=3, held_out_trials=5, confidence=.9,
+                                     prior_confidence=.7), "reusable")
+        # A rule with zero held-out evidence is weakened even if confidence improved.
+        self.assertEqual(rule_status(held_out_hits=0, held_out_trials=2, confidence=.95,
+                                     prior_confidence=.7), "weakened")
+
+    def test_reusable_rule_confidence_decline_is_logged_as_a_revision(self):
+        audit = noisy_markov_chain_audit()
+        first = train_and_evaluate(audit)
+        rule = first["reusable_rules"][0]
+        inflated_previous = dict(first)
+        inflated_previous["reusable_rules"] = [
+            {**item, "confidence": 1.0} if item["rule_id"] == rule["rule_id"] else item
+            for item in first["reusable_rules"]]
+        second = train_and_evaluate(audit, inflated_previous)
+        matching = next(r for r in second["reusable_rules"] if r["rule_id"] == rule["rule_id"])
+        self.assertEqual(matching["status"], "tentative")
+        self.assertTrue(any(revision["rule_id"] == rule["rule_id"]
+                            and revision["before"] == "reusable"
+                            and revision["after"] == "tentative"
+                            for revision in second["rule_revision_history"]))
 
     def test_small_or_unpaired_gain_cannot_clear_gate(self):
         self.assertFalse(passes_gain_gate({"total": 30, "lift": 3, "coverage": 1.0,

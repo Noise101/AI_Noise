@@ -1,3 +1,4 @@
+import gzip
 import json
 import tempfile
 import unittest
@@ -6,13 +7,15 @@ from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
-from local_worker_v21 import (_seed_from_title, developmental_source_quality, discover_curriculum,
+from local_worker_v21 import (_seed_from_title, append_events, developmental_source_quality,
+                              discover_curriculum,
                               discover_from_developmental_shelves, enforce_storage_budget, is_transient_error,
                               compact_learning_history, merge_curiosity, read_json,
                               render_ability_report, render_human_status, status_record,
                               parser_counterexample_candidate, structural_counterexample_candidate,
                               repeated_grounding_candidate, curriculum_strategy_allowed,
                               learned_curriculum_score, conversation_practice_summary,
+                              rotate_events_log, EVENTS_LOG_ROTATE_LINES, EVENTS_LOG_KEEP_LINES,
                               supervise, update_autonomy_state, COLLECTION_STALL_ROUNDS,
                               update_collection_progress,
                               update_curriculum_strategy, work, write_json)
@@ -291,6 +294,78 @@ class LocalWorkerTest(unittest.TestCase):
             write_json(path, {"phase": "learning"})
             self.assertEqual(read_json(path), {"phase": "learning"})
             self.assertFalse(path.with_suffix(".json.tmp").exists())
+
+    def test_append_events_writes_one_jsonl_line_per_event_with_module_and_curricula(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            append_events(runtime, "world_model_v51", 1500,
+                          [{"event_type": "benchmark_locked", "before": {"locked": False},
+                            "after": {"locked": True}, "reason": "example"}])
+            append_events(runtime, "world_model_v51", 1500, [])  # a no-op must not touch the file
+            lines = (runtime / "events.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(lines), 1)
+            record = json.loads(lines[0])
+            self.assertEqual(record["module"], "world_model_v51")
+            self.assertEqual(record["curricula"], 1500)
+            self.assertEqual(record["event_type"], "benchmark_locked")
+            self.assertIn("ts", record)
+
+    def test_append_events_with_no_events_does_not_create_the_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            append_events(runtime, "world_model_v51", 0, [])
+            self.assertFalse((runtime / "events.jsonl").exists())
+
+    def test_rotate_events_log_archives_the_oldest_lines_past_the_threshold(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            path = runtime / "events.jsonl"
+            lines = [json.dumps({"n": index}) for index in range(EVENTS_LOG_ROTATE_LINES + 50)]
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            result = rotate_events_log(runtime)
+            self.assertTrue(result["rotated"])
+            live = path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(live), EVENTS_LOG_KEEP_LINES)
+            self.assertEqual(json.loads(live[0])["n"],
+                             EVENTS_LOG_ROTATE_LINES + 50 - EVENTS_LOG_KEEP_LINES)
+            archive_path = runtime / result["archive_path"]
+            self.assertTrue(archive_path.exists())
+            with gzip.open(archive_path, "rt", encoding="utf-8") as handle:
+                archived_lines = handle.read().splitlines()
+            self.assertEqual(len(archived_lines), EVENTS_LOG_ROTATE_LINES + 50 - EVENTS_LOG_KEEP_LINES)
+            self.assertEqual(json.loads(archived_lines[0])["n"], 0)
+            # A second call below the threshold must be a no-op.
+            self.assertFalse(rotate_events_log(runtime)["rotated"])
+
+    def test_decision_replay_reconstructs_the_decision_sequence_from_the_log_alone(self):
+        """Verifies decision replay (not full state replay, see world_model_v51's
+        module docstring): reading events.jsonl alone -- never touching the
+        world-model snapshot -- must recover when and why the benchmark locked
+        and the selected mode switched."""
+        from world_model_v51 import train_and_evaluate
+        from test_world_model_v51 import noisy_markov_chain_audit
+        audit = noisy_markov_chain_audit()
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            first = train_and_evaluate(audit)
+            append_events(runtime, "world_model_v51", 100, first.pop("emitted_events", []))
+            forced_previous = dict(first)
+            forced_previous["selected_mode"] = "some_other_model_id"
+            second = train_and_evaluate(audit, forced_previous)
+            append_events(runtime, "world_model_v51", 140, second.pop("emitted_events", []))
+
+            events = [json.loads(line) for line in
+                     (runtime / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+        lock_events = [event for event in events if event["event_type"] == "benchmark_locked"]
+        mode_events = [event for event in events if event["event_type"] == "selected_mode_changed"]
+        self.assertEqual(len(lock_events), 1)
+        self.assertEqual(lock_events[0]["curricula"], 100)
+        self.assertFalse(lock_events[0]["before"]["locked"])
+        self.assertTrue(lock_events[0]["after"]["locked"])
+        self.assertEqual(len(mode_events), 1)
+        self.assertEqual(mode_events[0]["curricula"], 140)
+        self.assertEqual(mode_events[0]["before"]["selected_mode"], "some_other_model_id")
+        self.assertEqual(mode_events[0]["after"]["selected_mode"], second["selected_mode"])
 
     def test_human_status_explains_health_and_baselines_in_japanese(self):
         status = {"phase": "between_rounds", "seed": "fox grapes",

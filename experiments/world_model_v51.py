@@ -3,6 +3,15 @@
 
 This is deliberately symbolic and inspectable.  It does not claim that a parsed
 sentence is understood: every frame retains its source sentence and confidence.
+
+Decision replay, not full state replay: train_and_evaluate recomputes every
+number from scratch from the raw audit each call; nothing here is derived
+solely from accumulated events.  The `emitted_events` this module returns (see
+train_and_evaluate) let a caller reconstruct WHEN and WHY a benchmark lock,
+selected-mode switch, or reusable-rule appearance/disappearance happened -- the
+sequence of decisions -- not the underlying evaluation numbers themselves.
+Reconstructing those requires re-running this code against the historical
+parser-audit-memory.json, same as today.
 """
 
 from __future__ import annotations
@@ -222,6 +231,30 @@ def classify_trend(points: list[dict], key: str, window: int = 10, min_delta: fl
     return "flat"
 
 
+def rule_status(held_out_hits: int, held_out_trials: int, confidence: float,
+                prior_confidence: float | None) -> str:
+    """Classify a reusable rule's health, mirroring experience_rule_learning_v50's
+    reusable/weakened/tentative vocabulary with signals that fit a *frozen*
+    holdout instead of a growing one:
+
+    - held_out_hits/held_out_trials is a one-shot quality flag against the
+      locked selection/final split -- it does not grow across cycles, so a
+      rule that is trained on plenty of support but never once matches the
+      frozen holdout is "weakened" immediately, not after some number of
+      empty cycles.
+    - confidence *is* time-varying (recomputed from the ever-growing train
+      set every cycle), so a real decline against the prior cycle's value
+      means new evidence is arriving that contradicts this rule -- flagged
+      "tentative" as an early warning before it falls out of the reusable
+      list entirely.
+    """
+    if held_out_trials > 0 and held_out_hits == 0:
+        return "weakened"
+    if prior_confidence is not None and confidence < prior_confidence:
+        return "tentative"
+    return "reusable"
+
+
 def examples_from(sequences: dict[str, dict], sources: set[str]) -> list[tuple[list[dict], dict, str]]:
     examples = []
     for url in sorted(sources):
@@ -380,12 +413,26 @@ def train_and_evaluate(audit: dict, previous: dict | None = None) -> dict:
                 "next_learning_target": {"seed": "simple animal story",
                     "reason": "collect independent eligible narrative collections before evaluation"},
                 "revision_history": list(previous.get("revision_history", []))[-200:],
+                "rule_revision_history": list(previous.get("rule_revision_history", []))[-200:],
                 "learning_curve": list(previous.get("learning_curve", [])),
                 "learning_curve_trend": previous.get("learning_curve_trend", "insufficient_data"),
+                "emitted_events": [],
                 "invariants": ["no_non_narrative_benchmark_fallback",
                     "minimum_training_examples_preserved", "collection_disjoint_split"],
                 "limitations": ["benchmark deliberately postponed until its selection/final split "
                                 "and remaining training pool would each carry enough examples"]}
+
+    # Past this point the benchmark is ready; record the lock transition once,
+    # the moment it first happens (previous.benchmark.locked is False/missing).
+    emitted_events = []
+    if not previous.get("benchmark", {}).get("locked"):
+        emitted_events.append({
+            "event_type": "benchmark_locked",
+            "before": {"locked": False},
+            "after": {"locked": True, "collection_count": len(benchmark_groups),
+                      "source_count": len(benchmark_urls)},
+            "reason": "candidate benchmark's selection/final split and remaining "
+                      "training pool cleared the example-count readiness gate"})
 
     if (frozen_examples and previous.get("benchmark", {}).get("selection_regime")
             == BENCHMARK_REGIME):
@@ -516,18 +563,83 @@ def train_and_evaluate(audit: dict, previous: dict | None = None) -> dict:
     old_mode = previous.get("selected_mode")
     revisions = list(previous.get("revision_history", []))
     if old_mode and old_mode != selected_mode:
+        mode_switch_reason = "fixed unseen-source evaluation changed model ranking"
         revisions.append({"before": old_mode, "after": selected_mode,
-                          "reason": "fixed unseen-source evaluation changed model ranking",
+                          "reason": mode_switch_reason,
                           "benchmark_fingerprint": hashlib.sha256(
                               "\n".join(benchmark_urls).encode()).hexdigest()[:16]})
+        emitted_events.append({"event_type": "selected_mode_changed",
+                               "before": {"selected_mode": old_mode},
+                               "after": {"selected_mode": selected_mode},
+                               "reason": mode_switch_reason})
     diagnostic_id = selected_mode if selected else (best_candidate or {}).get("model_id")
     chosen_model = models.get(diagnostic_id, {"rules": {}, "selection_trials": []})
+    # A rule's identity (rule_id) survives across cycles by hashing its
+    # context+prediction, mirroring experience_rule_learning_v50's pattern, so
+    # its held-out performance and confidence can be compared cycle over cycle
+    # instead of being rebuilt from nothing every time.
+    previous_rules_by_id = {item["rule_id"]: item for item in previous.get("reusable_rules", [])
+                            if item.get("rule_id")}
+    selection_trials_by_context: dict[str, list[dict]] = defaultdict(list)
+    for trial in chosen_model["selection_trials"]:
+        selection_trials_by_context[trial["context"]].append(trial)
+    if final_attempt and final_attempt.get("model_id") == diagnostic_id:
+        for trial in final_attempt.get("trials", []):
+            selection_trials_by_context[trial["context"]].append(trial)
+    rule_revisions = list(previous.get("rule_revision_history", []))
     reusable = []
     for key, outcomes in (chosen_model["rules"].items() if selected else []):
         prediction, support = outcomes.most_common(1)[0]
-        if support >= 3 and support / sum(outcomes.values()) >= .7:
-            reusable.append({"context": key, "prediction": prediction, "support": support,
-                             "confidence": round(support / sum(outcomes.values()), 4)})
+        if support < 3 or support / sum(outcomes.values()) < .7:
+            continue
+        confidence = round(support / sum(outcomes.values()), 4)
+        rule_id = hashlib.sha256(f"{key}->{prediction}".encode()).hexdigest()[:16]
+        # held_out_hits/held_out_trials: a one-shot quality flag against the
+        # frozen selection/final split, NOT a cumulative counter added to each
+        # cycle -- that split never grows, so summing it across cycles would
+        # just multiply the same fixed fact rather than reflect new evidence.
+        trials_here = selection_trials_by_context.get(key, [])
+        held_out_hits = sum(1 for trial in trials_here if trial["correct"])
+        held_out_trials = len(trials_here)
+        prior_rule = previous_rules_by_id.get(rule_id, {})
+        status = rule_status(held_out_hits, held_out_trials, confidence,
+                             prior_rule.get("confidence"))
+        rule = {"rule_id": rule_id, "context": key, "prediction": prediction,
+                "support": support, "confidence": confidence,
+                "held_out_hits": held_out_hits, "held_out_trials": held_out_trials,
+                "status": status}
+        prior_status = prior_rule.get("status")
+        if prior_status and prior_status != status:
+            rule_revisions.append({"rule_id": rule_id, "context": key, "prediction": prediction,
+                                   "before": prior_status, "after": status,
+                                   "reason": ("no held-out evidence in the frozen split"
+                                              if status == "weakened" else
+                                              "confidence declined against growing training data"
+                                              if status == "tentative" else
+                                              "held-out evidence and confidence recovered")})
+        reusable.append(rule)
+    rule_revision_history = rule_revisions[-200:]
+    # A rule_id appearing/disappearing between cycles is itself a decision worth
+    # logging. Previous rules saved before rule_id existed have none, so the
+    # first post-upgrade cycle reports everything as newly "added" -- a
+    # one-time migration artifact, not a real churn spike.
+    current_rule_ids = {item["rule_id"] for item in reusable}
+    added_ids = sorted(current_rule_ids - set(previous_rules_by_id))
+    removed_ids = sorted(set(previous_rules_by_id) - current_rule_ids)
+    if added_ids or removed_ids:
+        reusable_by_id = {item["rule_id"]: item for item in reusable}
+        emitted_events.append({
+            "event_type": "reusable_rules_changed",
+            "before": {"count": len(previous_rules_by_id)},
+            "after": {"count": len(reusable)},
+            "added": [{"context": reusable_by_id[rule_id]["context"],
+                       "prediction": reusable_by_id[rule_id]["prediction"]}
+                      for rule_id in added_ids[:20]],
+            "removed": [{"context": previous_rules_by_id[rule_id]["context"],
+                        "prediction": previous_rules_by_id[rule_id]["prediction"]}
+                       for rule_id in removed_ids[:20]],
+            "added_count": len(added_ids), "removed_count": len(removed_ids),
+            "reason": "support/confidence over the current selected model's rules changed"})
     counterexamples = [trial for trial in chosen_model["selection_trials"] if not trial["correct"]]
     patterns = Counter((trial["context"], trial["predicted"], trial["observed"])
                        for trial in counterexamples)
@@ -587,7 +699,9 @@ def train_and_evaluate(audit: dict, previous: dict | None = None) -> dict:
                  "count": count} for pattern, count in patterns.most_common(100)],
             "target_history": target_history, "next_learning_target": target,
             "revision_history": revisions[-200:],
+            "rule_revision_history": rule_revision_history,
             "learning_curve": learning_curve, "learning_curve_trend": learning_curve_trend,
+            "emitted_events": emitted_events,
             "invariants": ["benchmark_sources_are_locked", "benchmark_examples_are_frozen",
                            "benchmark_sources_never_train", "selection_and_final_are_disjoint",
                            "whole_collection_split", "familywise_error_is_bonferroni_corrected",

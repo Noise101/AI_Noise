@@ -49,6 +49,12 @@ AI_Noise belief update
 
 If the helper is absent, slow, malformed, repetitive, or low quality, the pipeline continues with autonomous enumeration and search. A larger local model is not a remedy for a missing learning mechanism.
 
+## Decision replay, not state replay
+
+`.local/events.jsonl` is an append-only, cross-module log (`{ts, curricula, module, event_type, before, after, reason}` per line) of discrete state-changing decisions: a benchmark locking, a selected representation switching, a reusable rule appearing or disappearing. It exists to answer "when and why did the system decide this" without trusting a human's memory of a status snapshot, and it coexists with (does not replace) each module's own bounded `revision_history`-style fields, which the algorithms themselves still read.
+
+This is **decision replay, not full state replay**. Reading `events.jsonl` alone can reconstruct the *sequence of decisions* a module made and why. It cannot reconstruct the *evaluation numbers* behind those decisions (a `correct`/`total`/`lift` at some past point) — every module here recomputes those from scratch from the raw audit each call; nothing is derived solely from accumulated events. Reproducing a past number still requires re-running the owning module against the historical audit data, exactly as before this log existed. Do not describe this mechanism, or extend it, as if it captured a replayable world state — it captures a history of decisions about that state.
+
 ## Review gate
 
 Before merging a version, answer:
