@@ -1,6 +1,7 @@
 import unittest
+from collections import Counter
 
-from association_learning_v33 import AssociationLearner, classify_trend
+from association_learning_v33 import AssociationLearner, classify_trend, predict_with_backoff
 
 
 class AssociationLearningTest(unittest.TestCase):
@@ -53,6 +54,41 @@ class AssociationLearningTest(unittest.TestCase):
                            for index, value in enumerate((8, 7, 6, 5, 2, 1, 0, -1, -2, -3))]
         self.assertEqual(classify_trend(declining_curve, "lift", window=10, min_delta=1),
                          "declining")
+
+    def test_predict_with_backoff_falls_back_to_the_action_cue_when_all_cues_are_thin(self):
+        links = {"subject:fox": Counter({"ate": 1}),
+                 "action:waits": Counter({"leaves": 1}),
+                 "object:tree": Counter({"ate": 1})}
+        prediction, level, cues = predict_with_backoff("fox|waits|tree", links, fallback="ate")
+        self.assertEqual(level, "action_only_backoff")
+        self.assertEqual(prediction, "leaves")
+        self.assertEqual(cues, ["action:waits"])
+
+    def test_predict_with_backoff_votes_across_cues_once_they_clear_the_support_floor(self):
+        links = {"subject:fox": Counter({"leaves": 5}),
+                 "action:waits": Counter({"leaves": 4}),
+                 "object:tree": Counter({"leaves": 3})}
+        prediction, level, cues = predict_with_backoff("fox|waits|tree", links, fallback="ate")
+        self.assertEqual(level, "cue_vote")
+        self.assertEqual(prediction, "leaves")
+        self.assertEqual(set(cues), {"subject:fox", "action:waits", "object:tree"})
+
+    def test_predict_with_backoff_falls_back_to_the_global_majority_when_nothing_was_seen(self):
+        prediction, level, cues = predict_with_backoff("fox|waits|tree", {}, fallback="ate")
+        self.assertEqual((prediction, level, cues), ("ate", "global_fallback", []))
+
+    def test_backoff_candidate_is_evaluated_and_reported_alongside_the_others(self):
+        transitions = {}
+        for index in range(80):
+            prior = f"fox|waits|tree_{index}"
+            outcome = f"fox|eats|fruit_{index}" if index % 5 else f"fox|leaves|fruit_{index}"
+            transitions[prior] = {outcome: 1}
+        report = AssociationLearner(transitions).run()
+        self.assertIn("backoff_evaluation", report)
+        self.assertGreater(report["backoff_evaluation"]["total"], 0)
+        self.assertIn(report["selected_mode"],
+                      {"exact_action", "learned_structural_class", "learned_structural_bands",
+                       "cue_hierarchy_backoff"})
 
     def test_structural_action_classes_are_compared_with_their_own_baseline(self):
         transitions = {}

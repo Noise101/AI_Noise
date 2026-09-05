@@ -357,6 +357,36 @@ MODES = ("action", "action_state", "action_goal", "action_state_goal",
          "action_state_goal_result", "action_state_goal_result_history",
          "shape", "shape_history")
 
+# Hierarchical backoff: an ADDITIONAL candidate that walks from the most
+# granular action-family context toward coarser ones whenever a level's
+# support falls below MIN_RULE_SUPPORT, instead of betting everything on one
+# fixed granularity. This competes for selection under the exact same gates
+# as the eight fixed-granularity MODES above; it does not change how those
+# eight are themselves evaluated (flat_resolver's behavior against them is
+# byte-for-byte what evaluate() did before this existed).
+#
+# Design choice flagged, not asserted as obviously correct: the chain below
+# strips exactly one context component per step (result+history -> result ->
+# goal -> state -> action-only), which differs from a literal reading of an
+# earlier example that skipped "action_state_goal" directly from
+# "action_state_goal_result" to "action_state". Both are defensible; this one
+# was picked for not skipping a level. The chain also only covers the
+# "action_state_goal_result_history" family -- "action_goal" and the
+# "shape"/"shape_history" family are not backed off into it, so a rule that
+# only clears its support threshold under "action_goal" or "shape" gets no
+# benefit from this candidate. Revisit both choices if warranted.
+BACKOFF_MODE = "hierarchical_backoff"
+BACKOFF_START_MODE = "action_state_goal_result_history"
+MIN_RULE_SUPPORT = 3
+MODE_BACKOFF_PARENT = {
+    "action_state_goal_result_history": "action_state_goal_result",
+    "action_state_goal_result": "action_state_goal",
+    "action_state_goal": "action_state",
+    "action_state": "action",
+    "action": None,
+}
+ALL_EVALUATION_MODES = MODES + (BACKOFF_MODE,)
+
 # The fixed benchmark's final split may be re-queried a small, bounded number of
 # times -- once when it first unlocks and again each time the training set doubles
 # -- so an early, data-starved miss is not a permanent verdict.  Every one of these
@@ -365,8 +395,38 @@ FINAL_QUERY_BUDGET = 5
 FINAL_TRAIN_GROWTH_FACTOR = 2
 
 
+def flat_resolver(rules: dict[str, Counter], mode: str):
+    """Resolve a prediction at exactly one fixed granularity -- the behavior
+    every one of the eight fixed MODES has always had, unchanged."""
+    def resolve(history: list[dict]) -> tuple[str | None, str | None, str | None, int]:
+        key = context_key(history, mode)
+        counter = rules.get(key)
+        if counter:
+            return counter.most_common(1)[0][0], mode, key, sum(counter.values())
+        return None, mode, key, 0
+    return resolve
+
+
+def backoff_resolver(rules_by_mode: dict[str, dict[str, Counter]], start_mode: str):
+    """Resolve a prediction by walking MODE_BACKOFF_PARENT from start_mode
+    toward coarser contexts until a level's support clears MIN_RULE_SUPPORT,
+    recording exactly which level answered."""
+    def resolve(history: list[dict]) -> tuple[str | None, str | None, str | None, int]:
+        current = start_mode
+        while current is not None:
+            table = rules_by_mode.get(current, {})
+            key = context_key(history, current)
+            counter = table.get(key)
+            support = sum(counter.values()) if counter else 0
+            if counter and support >= MIN_RULE_SUPPORT:
+                return counter.most_common(1)[0][0], current, key, support
+            current = MODE_BACKOFF_PARENT.get(current)
+        return None, None, None, 0
+    return resolve
+
+
 def passes_gain_gate(evaluation: dict, minimum_total: int = MINIMUM_EVALUATION_TOTAL,
-                     alpha: float = FAMILY_ALPHA / (len(MODES) * 2)) -> bool:
+                     alpha: float = FAMILY_ALPHA / (len(ALL_EVALUATION_MODES) * 2)) -> bool:
     required = max(3, (evaluation.get("total", 0) + 9) // 10)
     return (evaluation.get("total", 0) >= minimum_total
             and evaluation.get("lift", 0) >= required
@@ -464,20 +524,26 @@ def train_and_evaluate(audit: dict, previous: dict | None = None) -> dict:
 
     evaluations, models = [], {}
 
-    def evaluate(rules: dict, fallback: str | None, task: str,
-                 examples: list[tuple[list[dict], dict, str]], mode: str) -> tuple[dict, list[dict]]:
+    def evaluate(resolve, fallback: str | None, task: str,
+                 examples: list[tuple[list[dict], dict, str]]) -> tuple[dict, list[dict]]:
         correct = baseline = covered = wins = losses = 0
         trials = []
         for history, outcome, url in examples:
             observed = outcome_label(outcome, task)
-            key = context_key(history, mode)
-            predicted = rules[key].most_common(1)[0][0] if key in rules else fallback
+            candidate_prediction, resolved_mode, key, support = resolve(history)
+            predicted = candidate_prediction if candidate_prediction is not None else fallback
             correct += predicted == observed
             baseline += fallback == observed
             wins += predicted == observed and fallback != observed
             losses += predicted != observed and fallback == observed
-            covered += key in rules
+            covered += candidate_prediction is not None
             trials.append({"source_id": source_key(url), "context": key,
+                           # Audit trail for hierarchical backoff: which granularity
+                           # actually answered this prediction, and how much training
+                           # support backed it. For the eight fixed-granularity modes
+                           # this always equals their own mode/key -- only the
+                           # hierarchical_backoff candidate can show a coarser one.
+                           "resolved_mode": resolved_mode, "resolved_support": support,
                            "predicted": predicted, "observed": observed,
                            "baseline": fallback, "correct": predicted == observed,
                            "baseline_correct": fallback == observed,
@@ -499,36 +565,57 @@ def train_and_evaluate(audit: dict, previous: dict | None = None) -> dict:
     for task in ("exact_action", "experience_transition"):
         global_outcomes = Counter(outcome_label(outcome, task) for _, outcome, _ in train)
         fallback = global_outcomes.most_common(1)[0][0] if global_outcomes else None
+        rules_by_mode: dict[str, dict[str, Counter[str]]] = {}
         for mode in MODES:
             rules: dict[str, Counter[str]] = defaultdict(Counter)
             for history, outcome, _ in train:
                 rules[context_key(history, mode)][outcome_label(outcome, task)] += 1
-            selection, selection_trials = evaluate(rules, fallback, task, selection_test, mode)
+            rules_by_mode[mode] = rules
+            selection, selection_trials = evaluate(flat_resolver(rules, mode), fallback, task,
+                                                   selection_test)
             model_id = f"{task}:{mode}"
             evaluations.append({"model_id": model_id, "task": task, "mode": mode,
                                 "selection": selection, **selection})
-            models[model_id] = {"rules": rules, "selection_trials": selection_trials}
+            models[model_id] = {"rules": rules, "mode": mode, "resolver_kind": "flat",
+                                "selection_trials": selection_trials}
+        # Hierarchical backoff competes as one additional candidate under the
+        # same gates as the eight fixed-granularity modes above (see
+        # BACKOFF_MODE's definition for what this does and does not cover).
+        backoff_selection, backoff_selection_trials = evaluate(
+            backoff_resolver(rules_by_mode, BACKOFF_START_MODE), fallback, task, selection_test)
+        backoff_model_id = f"{task}:{BACKOFF_MODE}"
+        evaluations.append({"model_id": backoff_model_id, "task": task, "mode": BACKOFF_MODE,
+                            "selection": backoff_selection, **backoff_selection})
+        models[backoff_model_id] = {"rules": rules_by_mode[BACKOFF_START_MODE],
+                                    "mode": BACKOFF_MODE, "resolver_kind": "backoff",
+                                    "rules_by_mode": rules_by_mode,
+                                    "selection_trials": backoff_selection_trials}
     finalists = [item for item in evaluations if passes_gain_gate(item["selection"])]
     candidate = max(finalists, key=lambda item: (item["selection"]["lift"],
                     item["selection"]["correct"], item["selection"]["coverage"],
-                    -MODES.index(item["mode"]), item["task"] == "exact_action"), default=None)
+                    -ALL_EVALUATION_MODES.index(item["mode"]), item["task"] == "exact_action"),
+                    default=None)
     prior_final = previous.get("final_attempt")
     final_history = list(previous.get("final_attempt_history", []))
     if prior_final and not final_history:
         # Migrate a pre-existing single "one-time" attempt into the bounded history.
         final_history = [prior_final]
     final_attempt = prior_final
-    final_alpha = FAMILY_ALPHA / (len(MODES) * 2 * FINAL_QUERY_BUDGET)
+    final_alpha = FAMILY_ALPHA / (len(ALL_EVALUATION_MODES) * 2 * FINAL_QUERY_BUDGET)
     last_final_train = final_history[-1].get("training_examples", 0) if final_history else 0
     milestone_reached = (not final_history
                          or len(train) >= max(1, last_final_train) * FINAL_TRAIN_GROWTH_FACTOR)
     budget_left = len(final_history) < FINAL_QUERY_BUDGET
     selected = None
     if candidate and milestone_reached and budget_left:
-        final, final_trials = evaluate(models[candidate["model_id"]]["rules"],
+        candidate_model = models[candidate["model_id"]]
+        resolve = (backoff_resolver(candidate_model["rules_by_mode"], BACKOFF_START_MODE)
+                  if candidate_model["resolver_kind"] == "backoff" else
+                  flat_resolver(candidate_model["rules"], candidate_model["mode"]))
+        final, final_trials = evaluate(resolve,
             Counter(outcome_label(outcome, candidate["task"]) for _, outcome, _ in train
                     ).most_common(1)[0][0] if train else None,
-            candidate["task"], final_test, candidate["mode"])
+            candidate["task"], final_test)
         final_attempt = {"model_id": candidate["model_id"], "evaluation": final,
                          "trials": final_trials,
                          "training_examples": len(train),
@@ -587,6 +674,13 @@ def train_and_evaluate(audit: dict, previous: dict | None = None) -> dict:
         for trial in final_attempt.get("trials", []):
             selection_trials_by_context[trial["context"]].append(trial)
     rule_revisions = list(previous.get("rule_revision_history", []))
+    # chosen_model["rules"] is always a flat, single-granularity table (for
+    # hierarchical_backoff this is specifically BACKOFF_START_MODE's table --
+    # its finest level, the only one exposed here; see BACKOFF_MODE's
+    # docstring), so every reusable rule below is tagged with the one
+    # granularity it actually came from, regardless of which model_id was chosen.
+    rules_granularity = (BACKOFF_START_MODE if chosen_model.get("resolver_kind") == "backoff"
+                         else chosen_model.get("mode"))
     reusable = []
     for key, outcomes in (chosen_model["rules"].items() if selected else []):
         prediction, support = outcomes.most_common(1)[0]
@@ -605,7 +699,7 @@ def train_and_evaluate(audit: dict, previous: dict | None = None) -> dict:
         status = rule_status(held_out_hits, held_out_trials, confidence,
                              prior_rule.get("confidence"))
         rule = {"rule_id": rule_id, "context": key, "prediction": prediction,
-                "support": support, "confidence": confidence,
+                "support": support, "confidence": confidence, "mode": rules_granularity,
                 "held_out_hits": held_out_hits, "held_out_trials": held_out_trials,
                 "status": status}
         prior_status = prior_rule.get("status")

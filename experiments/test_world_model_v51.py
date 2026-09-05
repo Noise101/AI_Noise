@@ -1,10 +1,12 @@
 import random
 import unittest
+from collections import Counter
 
-from world_model_v51 import (BENCHMARK_REGIME, FINAL_QUERY_BUDGET, build_sequences,
+from world_model_v51 import (BACKOFF_MODE, BACKOFF_START_MODE, BENCHMARK_REGIME,
+                             FINAL_QUERY_BUDGET, backoff_resolver, build_sequences,
                              choose_benchmark_sources, classify_trend, collection_key,
-                             narrative_sequence, narrative_source, parse_frame, passes_gain_gate,
-                             rule_status, train_and_evaluate)
+                             context_key, flat_resolver, narrative_sequence, narrative_source,
+                             parse_frame, passes_gain_gate, rule_status, train_and_evaluate)
 
 
 # Positive control: a genuine (noisy) prior-action -> next-action Markov chain, so the
@@ -271,6 +273,76 @@ class WorldModelV51Test(unittest.TestCase):
                             and revision["before"] == "reusable"
                             and revision["after"] == "tentative"
                             for revision in second["rule_revision_history"]))
+
+    def test_backoff_resolver_walks_to_a_coarser_level_when_the_fine_one_is_sparse(self):
+        frame = {"action": "saw", "states": [], "goals": [], "known_states": [],
+                "active_goals": [], "polarity": "positive", "discourse": "continuation"}
+        history = [frame]
+        fine_key = context_key(history, BACKOFF_START_MODE)
+        coarse_key = context_key(history, "action")
+        rules_by_mode = {
+            BACKOFF_START_MODE: {fine_key: Counter({"ate": 1})},  # support=1, too sparse
+            "action_state_goal_result": {}, "action_state_goal": {}, "action_state": {},
+            "action": {coarse_key: Counter({"found": 6, "ate": 1})},  # support=7, clears threshold
+        }
+        resolve = backoff_resolver(rules_by_mode, BACKOFF_START_MODE)
+        prediction, resolved_mode, key, support = resolve(history)
+        self.assertEqual(resolved_mode, "action")
+        self.assertEqual(prediction, "found")
+        self.assertEqual(support, 7)
+        self.assertEqual(key, coarse_key)
+
+    def test_backoff_resolver_prefers_the_finest_level_when_it_already_has_enough_support(self):
+        frame = {"action": "saw", "states": [], "goals": [], "known_states": [],
+                "active_goals": [], "polarity": "positive", "discourse": "continuation"}
+        history = [frame]
+        fine_key = context_key(history, BACKOFF_START_MODE)
+        rules_by_mode = {
+            BACKOFF_START_MODE: {fine_key: Counter({"ate": 5})},
+            "action_state_goal_result": {}, "action_state_goal": {}, "action_state": {},
+            "action": {},
+        }
+        resolve = backoff_resolver(rules_by_mode, BACKOFF_START_MODE)
+        prediction, resolved_mode, key, support = resolve(history)
+        self.assertEqual(resolved_mode, BACKOFF_START_MODE)
+        self.assertEqual(prediction, "ate")
+        self.assertEqual(support, 5)
+
+    def test_backoff_resolver_returns_none_when_no_level_has_any_evidence(self):
+        frame = {"action": "saw", "states": [], "goals": [], "known_states": [],
+                "active_goals": [], "polarity": "positive", "discourse": "continuation"}
+        resolve = backoff_resolver({}, BACKOFF_START_MODE)
+        prediction, resolved_mode, key, support = resolve([frame])
+        self.assertIsNone(prediction)
+        self.assertIsNone(resolved_mode)
+        self.assertEqual(support, 0)
+
+    def test_flat_resolver_behaves_exactly_as_the_pre_backoff_lookup_did(self):
+        frame = {"action": "saw", "states": [], "goals": [], "known_states": [],
+                "active_goals": [], "polarity": "positive", "discourse": "continuation"}
+        history = [frame]
+        key = context_key(history, "action")
+        resolve = flat_resolver({key: Counter({"found": 4})}, "action")
+        prediction, resolved_mode, resolved_key, support = resolve(history)
+        self.assertEqual((prediction, resolved_mode, resolved_key, support),
+                         ("found", "action", key, 4))
+        empty_resolve = flat_resolver({}, "action")
+        self.assertEqual(empty_resolve(history), (None, "action", key, 0))
+
+    def test_hierarchical_backoff_is_evaluated_as_an_additional_candidate(self):
+        result = train_and_evaluate(noisy_markov_chain_audit())
+        model_ids = {evaluation["model_id"] for evaluation in result["evaluations"]}
+        self.assertIn(f"exact_action:{BACKOFF_MODE}", model_ids)
+        self.assertIn(f"experience_transition:{BACKOFF_MODE}", model_ids)
+
+    def test_trials_record_which_granularity_resolved_each_prediction(self):
+        result = train_and_evaluate(noisy_markov_chain_audit())
+        self.assertTrue(result["counterexamples"])
+        for trial in result["counterexamples"]:
+            self.assertIn("resolved_mode", trial)
+            self.assertIn("resolved_support", trial)
+        if result["reusable_rules"]:
+            self.assertTrue(all("mode" in rule for rule in result["reusable_rules"]))
 
     def test_small_or_unpaired_gain_cannot_clear_gate(self):
         self.assertFalse(passes_gain_gate({"total": 30, "lift": 3, "coverage": 1.0,

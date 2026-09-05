@@ -42,6 +42,43 @@ def held_out(prior: str, outcome: str) -> bool:
     return hashlib.sha256(f"association:{prior}->{outcome}".encode()).digest()[0] % 5 == 0
 
 
+# Hierarchical backoff, mirroring world_model_v51's: an ADDITIONAL candidate
+# representation competing under the same selection logic as exact_action /
+# learned_structural_class / learned_structural_bands below, not a change to
+# how any of those three are themselves computed. This module votes across
+# several cues per prediction rather than looking up one fixed context key, so
+# "backing off" means dropping thin cues from the vote instead of walking a
+# fixed mode chain: subject:/object: cues are drawn from an effectively open
+# vocabulary and are exactly the ones found sparse in the audit that requested
+# this (support=1 for 473/720 = 65.7% of predictive_associations); action:
+# alone is the coarsest, densest cue (a small, bounded verb vocabulary) and is
+# the natural floor to fall back on before the global majority.
+MIN_CUE_SUPPORT = 3
+
+
+def predict_with_backoff(prior: str, links: dict[str, Counter[str]],
+                         fallback: str | None) -> tuple[str | None, str, list[str]]:
+    """Vote across cues with enough of their own support to trust; if none
+    clear MIN_CUE_SUPPORT, fall back to the action-only cue alone (even if
+    thin); if that cue was never seen either, fall back to the global
+    majority. Returns (prediction, resolved_level, cues_used) so callers can
+    record which granularity actually produced the prediction."""
+    cues = features(prior)
+    scores = Counter()
+    used = []
+    for cue in cues:
+        table = links.get(cue)
+        if table and sum(table.values()) >= MIN_CUE_SUPPORT:
+            scores.update(table)
+            used.append(cue)
+    if scores:
+        return scores.most_common(1)[0][0], "cue_vote", used
+    action_cue = next((cue for cue in cues if cue.startswith("action:")), None)
+    if action_cue and links.get(action_cue):
+        return links[action_cue].most_common(1)[0][0], "action_only_backoff", [action_cue]
+    return fallback, "global_fallback", []
+
+
 def classify_trend(points: list[dict], key: str, window: int = 10, min_delta: float = 0.0) -> str:
     """A lightweight improving/flat/declining read on the tail of a learning curve.
 
@@ -130,6 +167,30 @@ class AssociationLearner:
             covered += count * bool(used)
             predictions.append({"prior": prior, "prediction": predicted, "observed": observed,
                                 "cues": used, "correct": success, "count": count})
+        # Hierarchical backoff: an additional candidate representation, evaluated
+        # on the exact same held-out pairs, competing for selection alongside
+        # exact_action/learned_structural_class/learned_structural_bands below.
+        backoff_correct = backoff_baseline_correct = backoff_total = backoff_covered = 0
+        backoff_predictions = []
+        for prior, outcome, count in test:
+            observed = outcome_action(outcome)
+            prediction, resolved_level, used_cues = predict_with_backoff(prior, links, fallback)
+            success = prediction == observed
+            backoff_correct += count * success
+            backoff_baseline_correct += count * (fallback == observed)
+            backoff_total += count
+            backoff_covered += count * (resolved_level != "global_fallback")
+            backoff_predictions.append({"prior": prior, "prediction": prediction,
+                                        "observed": observed, "resolved_level": resolved_level,
+                                        "cues": used_cues, "correct": success, "count": count})
+        backoff_evaluation = {
+            "accuracy": round(backoff_correct / backoff_total, 4) if backoff_total else 0.0,
+            "baseline_accuracy": round(backoff_baseline_correct / backoff_total, 4)
+                                if backoff_total else 0.0,
+            "correct": backoff_correct, "baseline_correct": backoff_baseline_correct,
+            "total": backoff_total,
+            "coverage": round(backoff_covered / backoff_total, 4) if backoff_total else 0.0,
+            "representation": "cue_hierarchy_backoff"}
         base_rate = baseline_correct / total if total else 0.0
         predictive = []
         for cue, outcomes in links.items():
@@ -221,11 +282,14 @@ class AssociationLearner:
                       (class_correct - class_baseline_correct, "learned_structural_class",
                        structural_evaluation),
                       (band_correct - band_baseline_correct, "learned_structural_bands",
-                       band_evaluation)]
+                       band_evaluation),
+                      (backoff_correct - backoff_baseline_correct, "cue_hierarchy_backoff",
+                       backoff_evaluation)]
         _, selected_mode, selected_evaluation = max(candidates, key=lambda item: (item[0], item[1]))
         selected_predictions = ({"exact_action": predictions,
                                  "learned_structural_class": class_predictions,
-                                 "learned_structural_bands": band_predictions}[selected_mode])
+                                 "learned_structural_bands": band_predictions,
+                                 "cue_hierarchy_backoff": backoff_predictions}[selected_mode])
         # Track the selected representation's accuracy/lift/coverage against
         # training size: a single "correct == baseline_correct" snapshot can't
         # show whether more data is drifting toward or away from real signal.
@@ -248,6 +312,7 @@ class AssociationLearner:
                 "evaluation": evaluation, "predictions": predictions[:1000],
                 "structural_evaluation": structural_evaluation,
                 "band_evaluation": band_evaluation,
+                "backoff_evaluation": backoff_evaluation,
                 "selected_mode": selected_mode, "selected_evaluation": selected_evaluation,
                 "selected_predictions": selected_predictions[:1000],
                 "reinforced": sum(item["status"] == "reinforced" for item in predictive),
