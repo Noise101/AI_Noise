@@ -199,6 +199,29 @@ def build_sequences(audit: dict) -> dict[str, dict]:
     return sequences
 
 
+def classify_trend(points: list[dict], key: str, window: int = 10, min_delta: float = 0.0) -> str:
+    """A lightweight improving/flat/declining read on the tail of a learning curve.
+
+    Compares the mean of the older half of the window against the newer half,
+    rather than just the two endpoints, so a single noisy point can't flip the
+    verdict. Not a substitute for the fixed-benchmark significance gates --
+    this is a coarse trend for humans and update_autonomy_state to look at
+    alongside those, not a pass/fail criterion on its own.
+    """
+    tail = [point.get(key, 0) for point in points[-window:] if point.get(key) is not None]
+    if len(tail) < 4:
+        return "insufficient_data"
+    middle = len(tail) // 2
+    older_avg = sum(tail[:middle]) / middle
+    newer_avg = sum(tail[middle:]) / (len(tail) - middle)
+    delta = newer_avg - older_avg
+    if delta > min_delta:
+        return "improving"
+    if delta < -min_delta:
+        return "declining"
+    return "flat"
+
+
 def examples_from(sequences: dict[str, dict], sources: set[str]) -> list[tuple[list[dict], dict, str]]:
     examples = []
     for url in sorted(sources):
@@ -357,6 +380,8 @@ def train_and_evaluate(audit: dict, previous: dict | None = None) -> dict:
                 "next_learning_target": {"seed": "simple animal story",
                     "reason": "collect independent eligible narrative collections before evaluation"},
                 "revision_history": list(previous.get("revision_history", []))[-200:],
+                "learning_curve": list(previous.get("learning_curve", [])),
+                "learning_curve_trend": previous.get("learning_curve_trend", "insufficient_data"),
                 "invariants": ["no_non_narrative_benchmark_fallback",
                     "minimum_training_examples_preserved", "collection_disjoint_split"],
                 "limitations": ["benchmark deliberately postponed until its selection/final split "
@@ -470,6 +495,23 @@ def train_and_evaluate(audit: dict, previous: dict | None = None) -> dict:
                         **final_attempt["evaluation"]}
     best_candidate = max(evaluations, key=lambda item: (item["selection"]["lift"],
                          item["selection"]["coverage"]), default=None)
+    # Track the best candidate's accuracy/lift/coverage against training size even
+    # when it never clears the strict significance gates: a single pass/fail p-value
+    # hides whether more data is trending toward or away from a real signal.
+    best_selection = (best_candidate or {}).get("selection", {})
+    learning_curve = list(previous.get("learning_curve", []))
+    curve_point = {"training_examples": len(train),
+                   "model_id": (best_candidate or {}).get("model_id"),
+                   "accuracy": (round(best_selection["correct"] / best_selection["total"], 4)
+                               if best_selection.get("total") else 0.0),
+                   "lift": best_selection.get("lift", 0),
+                   "coverage": best_selection.get("coverage", 0.0),
+                   "one_sided_sign_p": best_selection.get("one_sided_sign_p", 1.0),
+                   "gate_passed": bool(selected)}
+    if not learning_curve or learning_curve[-1]["training_examples"] != curve_point["training_examples"]:
+        learning_curve.append(curve_point)
+    learning_curve = learning_curve[-200:]
+    learning_curve_trend = classify_trend(learning_curve, "lift", window=10, min_delta=1)
     selected_mode = selected["model_id"] if selected else "frequency_baseline"
     old_mode = previous.get("selected_mode")
     revisions = list(previous.get("revision_history", []))
@@ -545,6 +587,7 @@ def train_and_evaluate(audit: dict, previous: dict | None = None) -> dict:
                  "count": count} for pattern, count in patterns.most_common(100)],
             "target_history": target_history, "next_learning_target": target,
             "revision_history": revisions[-200:],
+            "learning_curve": learning_curve, "learning_curve_trend": learning_curve_trend,
             "invariants": ["benchmark_sources_are_locked", "benchmark_examples_are_frozen",
                            "benchmark_sources_never_train", "selection_and_final_are_disjoint",
                            "whole_collection_split", "familywise_error_is_bonferroni_corrected",

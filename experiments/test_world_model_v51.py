@@ -2,8 +2,9 @@ import random
 import unittest
 
 from world_model_v51 import (BENCHMARK_REGIME, FINAL_QUERY_BUDGET, build_sequences,
-                             choose_benchmark_sources, collection_key, narrative_sequence,
-                             narrative_source, parse_frame, passes_gain_gate, train_and_evaluate)
+                             choose_benchmark_sources, classify_trend, collection_key,
+                             narrative_sequence, narrative_source, parse_frame, passes_gain_gate,
+                             train_and_evaluate)
 
 
 # Positive control: a genuine (noisy) prior-action -> next-action Markov chain, so the
@@ -271,6 +272,31 @@ class WorldModelV51Test(unittest.TestCase):
         if result["final_attempt"] is None:
             again = train_and_evaluate(audit_for_sources(35), result)
             self.assertIsNone(again["final_attempt"])
+
+    def test_classify_trend_reads_the_tail_not_just_the_endpoints(self):
+        improving = [{"lift": value} for value in (0, 0, 1, 1, 3, 4, 5, 6, 7, 8)]
+        self.assertEqual(classify_trend(improving, "lift", window=10, min_delta=1), "improving")
+        declining = [{"lift": value} for value in (8, 7, 6, 5, 4, 3, 1, 1, 0, 0)]
+        self.assertEqual(classify_trend(declining, "lift", window=10, min_delta=1), "declining")
+        flat = [{"lift": 3} for _ in range(10)]
+        self.assertEqual(classify_trend(flat, "lift", window=10, min_delta=1), "flat")
+        self.assertEqual(classify_trend([{"lift": 1}], "lift"), "insufficient_data")
+        # A single noisy point at the very end must not flip a clearly flat trend.
+        noisy_flat = [{"lift": 3}] * 9 + [{"lift": 30}]
+        self.assertIn(classify_trend(noisy_flat, "lift", window=10, min_delta=1),
+                     ("flat", "improving"))
+
+    def test_learning_curve_accumulates_across_calls_and_reports_a_trend(self):
+        first = train_and_evaluate(audit_for_sources())
+        self.assertIn("learning_curve", first)
+        self.assertIn("learning_curve_trend", first)
+        self.assertGreaterEqual(len(first["learning_curve"]), 1)
+        self.assertEqual(first["learning_curve"][-1]["training_examples"],
+                         first["training"]["examples"])
+        second = train_and_evaluate(audit_for_sources(35), first)
+        self.assertGreaterEqual(len(second["learning_curve"]), len(first["learning_curve"]))
+        # Growing training data must not silently drop the earlier points.
+        self.assertEqual(second["learning_curve"][0], first["learning_curve"][0])
 
     def test_early_final_miss_is_rechecked_after_training_growth(self):
         audit = audit_for_sources(40)

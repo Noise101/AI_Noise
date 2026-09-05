@@ -42,11 +42,35 @@ def held_out(prior: str, outcome: str) -> bool:
     return hashlib.sha256(f"association:{prior}->{outcome}".encode()).digest()[0] % 5 == 0
 
 
+def classify_trend(points: list[dict], key: str, window: int = 10, min_delta: float = 0.0) -> str:
+    """A lightweight improving/flat/declining read on the tail of a learning curve.
+
+    Compares the mean of the older half of the window against the newer half, so
+    a single noisy point can't flip the verdict. See world_model_v51.classify_trend
+    for the same helper; kept as an independent copy here so this module stays
+    runnable on its own.
+    """
+    tail = [point.get(key, 0) for point in points[-window:] if point.get(key) is not None]
+    if len(tail) < 4:
+        return "insufficient_data"
+    middle = len(tail) // 2
+    older_avg = sum(tail[:middle]) / middle
+    newer_avg = sum(tail[middle:]) / (len(tail) - middle)
+    delta = newer_avg - older_avg
+    if delta > min_delta:
+        return "improving"
+    if delta < -min_delta:
+        return "declining"
+    return "flat"
+
+
 class AssociationLearner:
     def __init__(self, transitions: dict[str, dict[str, int]],
-                 event_counts: dict[str, int] | None = None):
+                 event_counts: dict[str, int] | None = None,
+                 previous: dict | None = None):
         self.transitions = transitions
         self.event_counts = event_counts or {}
+        self.previous = previous or {}
 
     def structural_edges(self) -> list[dict]:
         edges: Counter[tuple[str, str, str]] = Counter()
@@ -202,6 +226,21 @@ class AssociationLearner:
         selected_predictions = ({"exact_action": predictions,
                                  "learned_structural_class": class_predictions,
                                  "learned_structural_bands": band_predictions}[selected_mode])
+        # Track the selected representation's accuracy/lift/coverage against
+        # training size: a single "correct == baseline_correct" snapshot can't
+        # show whether more data is drifting toward or away from real signal.
+        training_size = sum(count for _, _, count in train)
+        learning_curve = list(self.previous.get("learning_curve", []))
+        curve_point = {"training_examples": training_size, "selected_mode": selected_mode,
+                       "accuracy": selected_evaluation.get("accuracy", 0.0),
+                       "baseline_accuracy": selected_evaluation.get("baseline_accuracy", 0.0),
+                       "lift": (selected_evaluation.get("correct", 0)
+                                - selected_evaluation.get("baseline_correct", 0)),
+                       "coverage": selected_evaluation.get("coverage", 0.0)}
+        if not learning_curve or learning_curve[-1]["training_examples"] != training_size:
+            learning_curve.append(curve_point)
+        learning_curve = learning_curve[-200:]
+        learning_curve_trend = classify_trend(learning_curve, "lift", window=10, min_delta=1)
         return {"version": 33,
                 "method": "associations learned on 80%; predictions corrected on unseen 20%",
                 "structural_associations": self.structural_edges(),
@@ -213,6 +252,7 @@ class AssociationLearner:
                 "selected_predictions": selected_predictions[:1000],
                 "reinforced": sum(item["status"] == "reinforced" for item in predictive),
                 "weakened": sum(item["status"] == "weakened" for item in predictive),
+                "learning_curve": learning_curve, "learning_curve_trend": learning_curve_trend,
                 "warning": "association guides recall and prediction; it is not causal evidence"}
 
 
@@ -224,8 +264,10 @@ def main() -> None:
                         ".local/association-memory.json")
     args = parser.parse_args()
     memory = json.loads(args.memory.read_text(encoding="utf-8"))
+    previous = (json.loads(args.output.read_text(encoding="utf-8"))
+               if args.output.exists() else {})
     report = AssociationLearner(memory.get("quality_event_transitions", {}),
-                                memory.get("quality_event_counts", {})).run()
+                                memory.get("quality_event_counts", {}), previous).run()
     args.output.write_text(json.dumps(report, ensure_ascii=False, separators=(",", ":")) + "\n",
                            encoding="utf-8")
     print(json.dumps(report["evaluation"], ensure_ascii=False))

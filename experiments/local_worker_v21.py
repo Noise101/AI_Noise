@@ -48,7 +48,7 @@ from abstraction_world_v46 import (assess_open_transfer, empty_abstraction_memor
                                    learn_abstractions)
 from verified_experience_v47 import select_experience_profile
 from experience_rule_learning_v50 import learn_experience_rules
-from world_model_v51 import train_and_evaluate as train_world_model
+from world_model_v51 import classify_trend, train_and_evaluate as train_world_model
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -89,6 +89,8 @@ PHASE_JA = {
 DIMENSION_JA = {"characters": "文字", "words": "単語", "phrases": "フレーズ",
                 "conversation": "会話", "prediction": "予測", "causality": "因果",
                 "concepts": "概念", "associations": "連想"}
+TREND_JA = {"improving": "改善傾向", "flat": "横ばい", "declining": "悪化傾向",
+            "insufficient_data": "データ不足"}
 
 
 def human_bytes(value: int | float | None) -> str:
@@ -127,7 +129,8 @@ def capability_summary_lines(status: dict) -> list[str]:
     association = status.get("association", {})
     exact = association.get("evaluation", {})
     structural = association.get("selected_evaluation", association.get("evaluation", {}))
-    causal = status.get("causal_evaluation", {}).get("evaluation", {})
+    causal_evaluation = status.get("causal_evaluation", {})
+    causal = causal_evaluation.get("evaluation", {})
     representation = status.get("representation", {}).get("selected_evaluation", {})
     revision = status.get("experience_revision", {})
     abstraction = status.get("abstraction_world", {})
@@ -138,6 +141,9 @@ def capability_summary_lines(status: dict) -> list[str]:
     structural_lift = structural.get("correct", 0) - structural.get("baseline_correct", 0)
     causal_lift = causal.get("correct", 0) - causal.get("baseline_correct", 0)
     world_lift = world_eval.get("lift", 0)
+    association_trend = TREND_JA.get(association.get("learning_curve_trend"), "データ不足")
+    causal_trend = TREND_JA.get(causal_evaluation.get("learning_curve_trend"), "データ不足")
+    world_trend = TREND_JA.get(world_model.get("learning_curve_trend"), "データ不足")
     level = ("独立作品集が揃うまで評価を保留し、訓練経験を蓄積している段階"
              if not benchmark.get("locked") else
              "固定した未知作品で経験遷移を予測できる段階" if world_lift > 0 else
@@ -153,9 +159,9 @@ def capability_summary_lines(status: dict) -> list[str]:
         (f"旧式・具体行動 : {exact.get('correct', 0)}/{exact.get('total', 0)}、"
          f"単純基準より {exact.get('correct', 0) - exact.get('baseline_correct', 0):+d}件"),
         (f"旧式・頻度分類 : {structural.get('correct', 0)}/{structural.get('total', 0)}、"
-         f"単純基準より {structural_lift:+d}件"),
+         f"単純基準より {structural_lift:+d}件（傾向: {association_trend}）"),
         (f"因果予測       : {causal.get('correct', 0)}/{causal.get('total', 0)}、"
-         f"単純基準より {causal_lift:+d}件（因果理解の成立とはまだ言えない）"),
+         f"単純基準より {causal_lift:+d}件（因果理解の成立とはまだ言えない、傾向: {causal_trend}）"),
         (f"抽象化・転用   : 実教材 {sum(bool(value) for value in gates.values())}/4項目、"
          f"抽象予測 {representation.get('correct', 0)}/{representation.get('total', 0)}、"
          f"再利用可能規則 {revision.get('reusable_rules', 0)}件"),
@@ -168,7 +174,7 @@ def capability_summary_lines(status: dict) -> list[str]:
          if not benchmark.get("locked") else
          (f"状態世界モデル : {world_eval.get('correct', 0)}/{world_eval.get('total', 0)}、"
           f"固定基準より {world_eval.get('lift', 0):+d}件"
-          f"（{world_model.get('selected_mode', '評価前')}）")),
+          f"（{world_model.get('selected_mode', '評価前')}、傾向: {world_trend}）")),
     ]
 
 
@@ -645,6 +651,17 @@ def update_autonomy_state(curriculum: dict, report: dict) -> dict:
     world_model = report.get("world_model", {})
     world = world_model.get("selected_evaluation", {})
     benchmark_locked = bool(world_model.get("benchmark", {}).get("locked", False))
+    # Observability only: a coarse improving/flat/declining read per subsystem,
+    # shown alongside the plateau verdict below. It does not feed improved() or
+    # the mode transitions -- those stay governed by the significance gates.
+    trends = {
+        "world_model_lift": classify_trend(world_model.get("learning_curve", []),
+                                           "lift", window=10, min_delta=1),
+        "association_lift": classify_trend(report.get("association", {}).get("learning_curve", []),
+                                           "lift", window=10, min_delta=1),
+        "causal_lift": classify_trend(report.get("causal_evaluation", {}).get("learning_curve", []),
+                                      "lift", window=10, min_delta=1),
+    }
     snapshot = {"curricula": global_memory.get("curricula", 0),
                 "structural_correct": revision.get("evaluation", {}).get("correct", 0),
                 "structural_total": revision.get("evaluation", {}).get("total", 0),
@@ -718,7 +735,8 @@ def update_autonomy_state(curriculum: dict, report: dict) -> dict:
              "observations_compared": len(window), "reason": reason,
              "mode_started_curricula": mode_started,
              "intervention_start_snapshot": intervention_start,
-             "human_intervention_required": mode == "capability_plateau"}
+             "human_intervention_required": mode == "capability_plateau",
+             "trends": trends}
     curriculum["autonomy_state"] = state
     return state
 
@@ -1080,7 +1098,8 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "causal_evaluation": report.get("causal_evaluation") or {
             key: causal_memory.get(key)
             for key in ("supported_hypotheses", "evaluation", "limitations", "selected_view",
-                        "view_evaluations", "matched_contrasts")},
+                        "view_evaluations", "matched_contrasts", "learning_curve",
+                        "learning_curve_trend")},
         "causal_lab": report.get("causal_lab") or read_json(runtime / "causal-lab.json"),
         "representation": report.get("representation") or {
             key: representation_memory.get(key) for key in
@@ -1092,6 +1111,9 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
             "reinforced": association_memory.get("reinforced", 0),
             "weakened": association_memory.get("weakened", 0),
             "warning": association_memory.get("warning"),
+            "learning_curve": association_memory.get("learning_curve", []),
+            "learning_curve_trend": association_memory.get("learning_curve_trend",
+                                                            "insufficient_data"),
         },
         "epistemic_scaffold": report.get("epistemic_scaffold") or
                               epistemic_scaffold.get("summary", {}),
@@ -1314,11 +1336,13 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             write_json(runtime / "representation-memory.json", representation_report)
             # Legacy transitions predate extraction audits and remain quarantined from causal claims.
             causal_report = evaluate_causal_views(
-                coherent_transitions, representation_report)
+                coherent_transitions, representation_report,
+                read_json(runtime / "causal-memory.json"))
             causal_report["experience_source"] = experience_source
             write_json(runtime / "causal-memory.json", causal_report)
             association_report = AssociationLearner(
-                learning_transitions, learning_event_counts).run()
+                learning_transitions, learning_event_counts,
+                read_json(runtime / "association-memory.json")).run()
             association_report["experience_source"] = experience_source
             write_json(runtime / "association-memory.json", association_report)
             experience_report = ExperienceRevisionEngine(
@@ -1332,11 +1356,11 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             experience_report = read_json(runtime / "experience-revision.json")
             if not causal_report or "selected_view" not in causal_report:
                 causal_report = evaluate_causal_views(
-                    coherent_transitions, representation_report)
+                    coherent_transitions, representation_report, causal_report)
                 write_json(runtime / "causal-memory.json", causal_report)
             if not association_report or "selected_evaluation" not in association_report:
                 association_report = AssociationLearner(
-                    learning_transitions, learning_event_counts).run()
+                    learning_transitions, learning_event_counts, association_report).run()
                 write_json(runtime / "association-memory.json", association_report)
             if not experience_report:
                 experience_report = ExperienceRevisionEngine(
@@ -1370,6 +1394,8 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             "selected_view": causal_report.get("selected_view", "concrete"),
             "view_evaluations": causal_report.get("view_evaluations", {}),
             "matched_contrasts": causal_report.get("matched_contrasts", []),
+            "learning_curve": causal_report.get("learning_curve", []),
+            "learning_curve_trend": causal_report.get("learning_curve_trend", "insufficient_data"),
         }
         report["representation"] = {
             "selected_scheme": representation_report.get("selected_scheme"),
@@ -1384,6 +1410,9 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             "reinforced": association_report.get("reinforced", 0),
             "weakened": association_report.get("weakened", 0),
             "warning": association_report.get("warning"),
+            "learning_curve": association_report.get("learning_curve", []),
+            "learning_curve_trend": association_report.get("learning_curve_trend",
+                                                            "insufficient_data"),
         }
         report["error_memory"] = error_ledger.get("summary", {})
         report["experience_revision"] = experience_report.get("summary", {})

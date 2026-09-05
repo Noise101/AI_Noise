@@ -1,6 +1,6 @@
 import unittest
 
-from causal_experiment_v28 import (CausalExperimentEngine, RevisableBelief,
+from causal_experiment_v28 import (CausalExperimentEngine, RevisableBelief, classify_trend,
                                   evaluate_causal_views, normalized_action)
 
 
@@ -44,6 +44,26 @@ class CausalExperimentTest(unittest.TestCase):
         self.assertEqual(report["evaluation"], concrete["evaluation"])
         self.assertEqual(report["supported_hypotheses"], concrete["supported_hypotheses"])
         self.assertIn("abstract", report["view_evaluations"])
+
+    def test_learning_curve_accumulates_across_calls_without_duplicating_a_point(self):
+        transitions = {}
+        for index in range(40):
+            transitions[f"animal{index}|fails|reach_food"] = {
+                f"animal{index}|leaves|food": 1}
+            transitions[f"bird{index}|sees|food"] = {
+                f"bird{index}|waits|nearby": 1}
+        representation = {"selected_scheme": "surface"}
+        first = evaluate_causal_views(transitions, representation)
+        self.assertIn("learning_curve", first)
+        self.assertEqual(len(first["learning_curve"]), 1)
+        self.assertEqual(first["learning_curve"][0]["supported_hypotheses"],
+                         first["supported_hypotheses"])
+        second = evaluate_causal_views(transitions, representation, first)
+        # Re-running on unchanged transitions must not duplicate the point.
+        self.assertEqual(second["learning_curve"], first["learning_curve"])
+
+        stuck_curve = [{"training_examples": index, "lift": 0} for index in range(10)]
+        self.assertEqual(classify_trend(stuck_curve, "lift", window=10, min_delta=1), "flat")
 
     def test_shared_context_generates_questions_not_causal_answers(self):
         transitions = {}

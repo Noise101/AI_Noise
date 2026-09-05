@@ -204,37 +204,78 @@ class CausalExperimentEngine:
                                 "a positive lift is a falsifiable cause candidate, not a causal proof"]}
 
 
-def evaluate_causal_views(transitions: dict[str, dict[str, int]], representation: dict) -> dict:
+def classify_trend(points: list[dict], key: str, window: int = 10, min_delta: float = 0.0) -> str:
+    """A lightweight improving/flat/declining read on the tail of a learning curve.
+
+    Compares the mean of the older half of the window against the newer half, so
+    a single noisy point can't flip the verdict. See world_model_v51.classify_trend
+    for the same helper; kept as an independent copy here so this module stays
+    runnable on its own.
+    """
+    tail = [point.get(key, 0) for point in points[-window:] if point.get(key) is not None]
+    if len(tail) < 4:
+        return "insufficient_data"
+    middle = len(tail) // 2
+    older_avg = sum(tail[:middle]) / middle
+    newer_avg = sum(tail[middle:]) / (len(tail) - middle)
+    delta = newer_avg - older_avg
+    if delta > min_delta:
+        return "improving"
+    if delta < -min_delta:
+        return "declining"
+    return "flat"
+
+
+def evaluate_causal_views(transitions: dict[str, dict[str, int]], representation: dict,
+                          previous: dict | None = None) -> dict:
     """Keep concrete evidence unless an abstract view materially improves unseen prediction."""
+    previous = previous or {}
     concrete = CausalExperimentEngine(transitions).run()
     scheme = representation.get("selected_scheme", "surface")
     if scheme == "surface":
         concrete["selected_view"] = "concrete"
         concrete["view_evaluations"] = {"concrete": concrete["evaluation"]}
-        return concrete
+        selected = concrete
+    else:
+        abstract_transitions = transform_transitions(transitions, representation)
+        abstract = CausalExperimentEngine(abstract_transitions).run()
 
-    abstract_transitions = transform_transitions(transitions, representation)
-    abstract = CausalExperimentEngine(abstract_transitions).run()
+        def improvement(report: dict) -> int:
+            evaluation = report.get("evaluation", {})
+            return evaluation.get("correct", 0) - evaluation.get("baseline_correct", 0)
 
-    def improvement(report: dict) -> int:
-        evaluation = report.get("evaluation", {})
-        return evaluation.get("correct", 0) - evaluation.get("baseline_correct", 0)
+        abstract_eval = abstract.get("evaluation", {})
+        required = max(5, math.ceil(abstract_eval.get("total", 0) * 0.01))
+        use_abstract = (improvement(abstract) >= required
+                        and improvement(abstract) > improvement(concrete))
+        selected = abstract if use_abstract else concrete
+        selected["selected_view"] = "abstract" if use_abstract else "concrete"
+        selected["view_evaluations"] = {
+            "concrete": concrete.get("evaluation", {}),
+            "abstract": abstract.get("evaluation", {}),
+        }
+        selected["view_hypotheses"] = {
+            "concrete": concrete.get("supported_hypotheses", 0),
+            "abstract": abstract.get("supported_hypotheses", 0),
+        }
+        selected["abstract_scheme"] = scheme
 
-    abstract_eval = abstract.get("evaluation", {})
-    required = max(5, math.ceil(abstract_eval.get("total", 0) * 0.01))
-    use_abstract = (improvement(abstract) >= required
-                    and improvement(abstract) > improvement(concrete))
-    selected = abstract if use_abstract else concrete
-    selected["selected_view"] = "abstract" if use_abstract else "concrete"
-    selected["view_evaluations"] = {
-        "concrete": concrete.get("evaluation", {}),
-        "abstract": abstract.get("evaluation", {}),
-    }
-    selected["view_hypotheses"] = {
-        "concrete": concrete.get("supported_hypotheses", 0),
-        "abstract": abstract.get("supported_hypotheses", 0),
-    }
-    selected["abstract_scheme"] = scheme
+    # Track accuracy/lift/supported-hypothesis-count against training size: a
+    # single "supported_hypotheses == 0" snapshot can't show whether more data is
+    # approaching or receding from the independent_support significance bar.
+    evaluation = selected.get("evaluation", {})
+    training_size = selected.get("train_observations", 0)
+    learning_curve = list(previous.get("learning_curve", []))
+    curve_point = {"training_examples": training_size,
+                   "accuracy": evaluation.get("accuracy", 0.0),
+                   "baseline_accuracy": evaluation.get("baseline_accuracy", 0.0),
+                   "lift": evaluation.get("correct", 0) - evaluation.get("baseline_correct", 0),
+                   "supported_hypotheses": selected.get("supported_hypotheses", 0)}
+    if not learning_curve or learning_curve[-1]["training_examples"] != training_size:
+        learning_curve.append(curve_point)
+    learning_curve = learning_curve[-200:]
+    selected["learning_curve"] = learning_curve
+    selected["learning_curve_trend"] = classify_trend(learning_curve, "lift", window=10, min_delta=1)
     return selected
 
 
@@ -250,7 +291,9 @@ def main() -> None:
     # for language history but cannot silently contaminate this evaluation.
     representation = evaluate_representations(memory.get("quality_event_transitions", {}))
     transitions = memory.get("quality_event_transitions", {})
-    report = evaluate_causal_views(transitions, representation)
+    previous = (json.loads(args.output.read_text(encoding="utf-8"))
+               if args.output.exists() else {})
+    report = evaluate_causal_views(transitions, representation, previous)
     report["representation"] = {"selected_scheme": representation["selected_scheme"],
                                 "selection_status": representation["selection_status"]}
     args.output.write_text(json.dumps(report, ensure_ascii=False, separators=(",", ":")) + "\n",

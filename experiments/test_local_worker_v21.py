@@ -100,6 +100,26 @@ class LocalWorkerTest(unittest.TestCase):
         state = update_autonomy_state(curriculum, report)
         self.assertEqual(state["mode"], "normal_curriculum")
 
+    def test_autonomy_state_exposes_a_per_subsystem_trend_without_gating_on_it(self):
+        declining_curve = [{"training_examples": index, "lift": value}
+                           for index, value in enumerate((8, 7, 6, 5, 2, 1, 0, -1, -2, -3))]
+        report = {"global_memory": {"curricula": 110},
+                  "association": {"selected_evaluation": {"correct": 1, "baseline_correct": 1},
+                                  "learning_curve": declining_curve},
+                  "causal_evaluation": {"evaluation": {"correct": 0, "baseline_correct": 0},
+                                        "learning_curve": []},
+                  "representation": {"selected_evaluation": {"correct": 0}},
+                  "world_model": {"selected_evaluation": {"lift": 0},
+                                  "benchmark": {"locked": True}, "learning_curve": declining_curve},
+                  "experience_revision": {"evaluation": {"correct": 0, "total": 0}}}
+        state = update_autonomy_state({}, report)
+        self.assertEqual(state["trends"]["association_lift"], "declining")
+        self.assertEqual(state["trends"]["world_model_lift"], "declining")
+        self.assertEqual(state["trends"]["causal_lift"], "insufficient_data")
+        # A declining trend must not by itself force a plateau: the significance
+        # gates (via improved()/window comparisons), not the trend, decide that.
+        self.assertNotEqual(state["mode"], "capability_plateau")
+
     def test_rule_count_growth_alone_cannot_clear_plateau(self):
         curriculum = {"autonomy_state": {"mode": "counterexample_hunt",
             "mode_started_curricula": 100,
@@ -297,6 +317,19 @@ class LocalWorkerTest(unittest.TestCase):
         self.assertIn("基準と同じ", rendered)
         self.assertIn("管理対象合計   : 1.0GB", rendered)
         self.assertIn("実用会話       : 未到達", rendered)
+
+    def test_human_status_shows_learning_curve_trends(self):
+        status = {"phase": "learning", "association": {"evaluation": {"correct": 1},
+                                                        "learning_curve_trend": "declining"},
+                  "causal_evaluation": {"evaluation": {"correct": 0},
+                                        "learning_curve_trend": "improving"},
+                  "world_model": {"selected_evaluation": {"lift": 0},
+                                  "benchmark": {"locked": True}, "selected_mode": "frequency_baseline",
+                                  "learning_curve_trend": "flat"}}
+        rendered = render_human_status(status, now_epoch=1788220805, process_alive=True)
+        self.assertIn("傾向: 悪化傾向", rendered)
+        self.assertIn("傾向: 改善傾向", rendered)
+        self.assertIn("傾向: 横ばい", rendered)
 
     def test_ability_report_shows_honest_claims_and_examples(self):
         status = {"global_memory": {"word_forms": 100, "grounded_word_forms": 40},
