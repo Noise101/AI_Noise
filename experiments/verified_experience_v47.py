@@ -27,7 +27,11 @@ def rebuild_verified_experience(audit_memory: dict,
     for (seed, source_url), records in sorted(grouped.items()):
         ordered = sorted(records, key=lambda item: item.get("source_position", 0))
         sentences = [item["sentence"] for item in ordered]
-        results = extractor.extract_sequence(sentences)
+        # A coordinate-clause sentence ("The fox saw the grapes and jumped.") is not
+        # one ambiguous compound event: split it into its simple clauses first so each
+        # can pass the per-clause developmental checks on its own merits, instead of
+        # quarantining the whole sentence as outside_simple_clause.
+        results = extractor.extract_multi_sequence(sentences)
         events = []
         for result in results:
             if result.accepted and result.event and result.quality >= 0.85:

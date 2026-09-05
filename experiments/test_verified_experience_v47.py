@@ -15,6 +15,21 @@ class VerifiedExperienceTest(unittest.TestCase):
         self.assertEqual(report["summary"]["transition_observations"], 1)
         self.assertGreater(report["summary"]["quarantined_sentences"], 0)
 
+    def test_coordinate_clause_sentence_is_split_instead_of_quarantined_whole(self):
+        # A single "X and Y" sentence too long to pass as one simple clause is not
+        # one ambiguous compound event; each clause should stand on its own.
+        sentence = ("The fox saw many ripe purple grapes hanging from the tall garden "
+                    "vine and the fox jumped as high as he could to reach them.")
+        records = {"0": {"seed": "fox grapes", "source_url": "source", "source_position": 0,
+                         "sentence": sentence, "curriculum_admitted": True}}
+        report = rebuild_verified_experience({"records": records},
+                                             policy="developmental_grounded_18")
+        self.assertEqual(report["summary"]["accepted_sentences"], 2)
+        self.assertEqual(report["summary"]["quarantined_sentences"], 0)
+        self.assertIn("fox|saw|many", report["event_counts"])
+        self.assertIn("fox|jumped|high", report["event_counts"])
+        self.assertIn("fox|saw|many", report["coherent_transitions"])
+
     def test_unadmitted_curriculum_never_enters_verified_experience(self):
         memory = {"records": {"x": {"seed": "bad", "source_url": "source",
                                       "source_position": 0, "sentence": "The fox ran home.",

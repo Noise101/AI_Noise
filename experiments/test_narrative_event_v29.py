@@ -32,6 +32,16 @@ class NarrativeEventExtractorTest(unittest.TestCase):
         self.assertEqual(results[1].event.subject, "fox")
         self.assertEqual(results[1].reason, "accepted_with_local_coreference")
 
+    def test_multi_sequence_resets_coreference_across_a_metadata_boundary(self):
+        # extract_sequence already refuses to carry a subject across a metadata or
+        # heading line; extract_multi_sequence must do the same, not just when a
+        # sentence is left unsplit.
+        results = self.extractor.extract_multi_sequence([
+            "A fox saw a stream.", "Translated by George Fyler Townsend in 1867.",
+            "He jumped over it."])
+        self.assertFalse(results[-1].accepted)
+        self.assertEqual(results[-1].reason, "unresolved_pronoun_subject")
+
     def test_rejection_is_serializable_for_audit(self):
         record = self.extractor.extract("The Complete Index:").record()
         self.assertFalse(record["accepted"])

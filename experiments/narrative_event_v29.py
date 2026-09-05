@@ -202,4 +202,6 @@ class NarrativeEventExtractor:
                     recent_object = next((token for token in reversed(tokens)
                                           if token not in {"him", "her", "it", "them"}),
                                          recent_object)
+                elif result.reason.startswith("metadata") or result.reason == "heading":
+                    recent_subject = recent_object = None
         return results
