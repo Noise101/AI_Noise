@@ -1321,6 +1321,11 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         coherent_transitions = verified_experience.get("coherent_transitions", learning_transitions)
         learning_event_counts = verified_experience.get("event_counts", {})
         contextual_transitions = verified_experience.get("contextual_transitions", {})
+        # transitions and coherent_transitions share one key space (coherence is
+        # a deterministic function of the prior/outcome strings), so one source
+        # map covers both; contextual_transitions uses its own two-hop key.
+        transition_sources = verified_experience.get("transition_sources", {})
+        contextual_transition_sources = verified_experience.get("contextual_transition_sources", {})
         new_global_experience = merge_report(memory, seed, report) if admitted else False
         write_json(memory_path, memory)
         scaffold_path = runtime / "epistemic-observations.json"
@@ -1364,7 +1369,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                 or existing_representation.get("experience_source") != experience_source):
             previous_representation = read_json(runtime / "representation-memory.json")
             representation_report = evaluate_representations(
-                learning_transitions)
+                learning_transitions, transition_sources)
             selected_evaluation = next((item for item in representation_report["evaluations"]
                 if item["scheme"] == representation_report["selected_scheme"]), {})
             representation_report["selected_evaluation"] = selected_evaluation
@@ -1381,16 +1386,17 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             # Legacy transitions predate extraction audits and remain quarantined from causal claims.
             causal_report = evaluate_causal_views(
                 coherent_transitions, representation_report,
-                read_json(runtime / "causal-memory.json"))
+                read_json(runtime / "causal-memory.json"), transition_sources)
             causal_report["experience_source"] = experience_source
             write_json(runtime / "causal-memory.json", causal_report)
             association_report = AssociationLearner(
                 learning_transitions, learning_event_counts,
-                read_json(runtime / "association-memory.json")).run()
+                read_json(runtime / "association-memory.json"), transition_sources).run()
             association_report["experience_source"] = experience_source
             write_json(runtime / "association-memory.json", association_report)
             experience_report = ExperienceRevisionEngine(
-                coherent_transitions, contextual_transitions).run()
+                coherent_transitions, contextual_transitions,
+                transition_sources, contextual_transition_sources).run()
             experience_report["experience_source"] = experience_source
             write_json(runtime / "experience-revision.json", experience_report)
         else:
@@ -1400,15 +1406,18 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             experience_report = read_json(runtime / "experience-revision.json")
             if not causal_report or "selected_view" not in causal_report:
                 causal_report = evaluate_causal_views(
-                    coherent_transitions, representation_report, causal_report)
+                    coherent_transitions, representation_report, causal_report,
+                    transition_sources)
                 write_json(runtime / "causal-memory.json", causal_report)
             if not association_report or "selected_evaluation" not in association_report:
                 association_report = AssociationLearner(
-                    learning_transitions, learning_event_counts, association_report).run()
+                    learning_transitions, learning_event_counts, association_report,
+                    transition_sources).run()
                 write_json(runtime / "association-memory.json", association_report)
             if not experience_report:
                 experience_report = ExperienceRevisionEngine(
-                    coherent_transitions, contextual_transitions).run()
+                    coherent_transitions, contextual_transitions,
+                    transition_sources, contextual_transition_sources).run()
                 write_json(runtime / "experience-revision.json", experience_report)
         learned_summary = learned_rule_memory.get("summary", {})
         rule_gate_input = ({"summary": {

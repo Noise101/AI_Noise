@@ -15,7 +15,19 @@ def parts(event: str) -> tuple[str, str, str]:
     return values[0], values[1], values[2]
 
 
-def held_out(prior: str, outcome: str) -> bool:
+def source_held_out(source: str) -> bool:
+    return hashlib.sha256(f"representation-source:{source}".encode()).digest()[0] % 5 == 0
+
+
+def held_out(prior: str, outcome: str, sources: list[str] | None = None) -> bool:
+    """Hold out by whole source when source attribution is available (mirrors
+    experience_rule_learning_v50's _source_holdout: a (prior, outcome) pair
+    that recurs across sources no longer risks leaking train into test).
+    Falls back to the legacy pair-hash split when it isn't -- e.g. the
+    standalone CLI's global-language-memory input, which predates source
+    attribution."""
+    if sources:
+        return source_held_out(min(sources))
     return hashlib.sha256(f"{prior}->{outcome}".encode()).digest()[0] % 5 == 0
 
 
@@ -172,11 +184,14 @@ def learn_relational_action_classes(train: list[tuple[str, str, int]]) -> dict[s
     return result
 
 
-def evaluate_representations(transitions: dict[str, dict[str, int]]) -> dict:
+def evaluate_representations(transitions: dict[str, dict[str, int]],
+                             transition_sources: dict[str, dict[str, list[str]]] | None = None) -> dict:
+    transition_sources = transition_sources or {}
     train, test = [], []
     for prior, outcomes in transitions.items():
         for outcome, count in outcomes.items():
-            (test if held_out(prior, outcome) else train).append((prior, outcome, count))
+            sources = transition_sources.get(prior, {}).get(outcome, [])
+            (test if held_out(prior, outcome, sources) else train).append((prior, outcome, count))
     train_actions = {parts(event)[1] for prior, outcome, _ in train for event in (prior, outcome)}
     families = learn_form_families(train_actions)
     action_classes, frequency_threshold = learn_frequency_classes(train)

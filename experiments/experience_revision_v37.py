@@ -18,7 +18,16 @@ def parts(event: str) -> tuple[str, str, str]:
     return values[0], values[1], values[2]
 
 
-def holdout(prior: str, outcome: str) -> bool:
+def source_holdout(source: str) -> bool:
+    return hashlib.sha256(f"revision-source:{source}".encode()).digest()[0] % 5 == 0
+
+
+def holdout(prior: str, outcome: str, sources: list[str] | None = None) -> bool:
+    """Hold out by whole source when source attribution is available (mirrors
+    experience_rule_learning_v50's _source_holdout). Falls back to the legacy
+    pair-hash split when it isn't."""
+    if sources:
+        return source_holdout(min(sources))
     return hashlib.sha256(f"revision:{prior}->{outcome}".encode()).digest()[0] % 5 == 0
 
 
@@ -46,17 +55,26 @@ def mismatch_kind(predicted: str | None, observed: str) -> str:
 
 class ExperienceRevisionEngine:
     def __init__(self, transitions: dict[str, dict[str, int]],
-                 contextual_transitions: dict[str, dict[str, int]] | None = None):
+                 contextual_transitions: dict[str, dict[str, int]] | None = None,
+                 transition_sources: dict[str, dict[str, list[str]]] | None = None,
+                 contextual_transition_sources: dict[str, dict[str, list[str]]] | None = None):
         self.transitions = transitions
         self.contextual_transitions = contextual_transitions or {}
+        self.transition_sources = transition_sources or {}
+        self.contextual_transition_sources = contextual_transition_sources or {}
 
     def contextual_evaluation(self) -> dict:
         """Test two-event context without replacing the simpler model unless it generalizes."""
         train, test = [], []
         for context, outcomes in self.contextual_transitions.items():
             for outcome, count in outcomes.items():
-                key = hashlib.sha256(f"contextual:{context}->{outcome}".encode()).digest()[0]
-                (test if key % 5 == 0 else train).append((context, outcome, count))
+                sources = self.contextual_transition_sources.get(context, {}).get(outcome, [])
+                if sources:
+                    held_out = source_holdout(min(sources))
+                else:
+                    key = hashlib.sha256(f"contextual:{context}->{outcome}".encode()).digest()[0]
+                    held_out = key % 5 == 0
+                (test if held_out else train).append((context, outcome, count))
         rules: dict[str, Counter[str]] = defaultdict(Counter)
         fallback = Counter()
         for context, outcome, count in train:
@@ -96,7 +114,8 @@ class ExperienceRevisionEngine:
         train, test = [], []
         for prior, outcomes in self.transitions.items():
             for outcome, count in outcomes.items():
-                (test if holdout(prior, outcome) else train).append((prior, outcome, count))
+                sources = self.transition_sources.get(prior, {}).get(outcome, [])
+                (test if holdout(prior, outcome, sources) else train).append((prior, outcome, count))
 
         rules: dict[str, Counter[str]] = defaultdict(Counter)
         subjects: dict[tuple[str, str], set[str]] = defaultdict(set)

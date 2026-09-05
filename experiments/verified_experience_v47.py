@@ -20,6 +20,14 @@ def rebuild_verified_experience(audit_memory: dict,
     transitions: dict[str, dict[str, int]] = {}
     coherent_transitions: dict[str, dict[str, int]] = {}
     contextual: dict[str, dict[str, int]] = {}
+    # Non-destructive addition: which source(s) contributed each edge, so a
+    # consumer can hold out by whole source instead of by (prior, outcome)
+    # pair identity. transitions/coherent_transitions share the same key space
+    # (coherence is a deterministic function of the prior/outcome strings, not
+    # of which sequence produced them), so one map covers both; contextual
+    # uses its own two-hop key and needs its own map.
+    transition_sources: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    contextual_transition_sources: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
     event_counts = Counter()
     rejected = Counter()
     sequences = []
@@ -51,10 +59,12 @@ def rebuild_verified_experience(audit_memory: dict,
 
     for sequence in sequences:
         events = sequence["events"]
+        source_url = sequence.get("source_url", "")
         for index in range(1, len(events)):
             prior, outcome = events[index - 1], events[index]
             bucket = transitions.setdefault(prior, {})
             bucket[outcome] = bucket.get(outcome, 0) + 1
+            transition_sources[prior][outcome].add(source_url)
             # A subject switch without an explicit discourse model is not evidence
             # that the first event predicts the second.
             if prior.split("|", 1)[0] != outcome.split("|", 1)[0]:
@@ -67,6 +77,7 @@ def rebuild_verified_experience(audit_memory: dict,
                 context = f"{events[index - 2]}>>{prior}"
                 contextual_bucket = contextual.setdefault(context, {})
                 contextual_bucket[outcome] = contextual_bucket.get(outcome, 0) + 1
+                contextual_transition_sources[context][outcome].add(source_url)
 
     return {
         "version": 47,
@@ -75,6 +86,11 @@ def rebuild_verified_experience(audit_memory: dict,
         "transitions": transitions,
         "coherent_transitions": coherent_transitions,
         "contextual_transitions": contextual,
+        "transition_sources": {prior: {outcome: sorted(sources) for outcome, sources in outcomes.items()}
+                               for prior, outcomes in transition_sources.items()},
+        "contextual_transition_sources": {
+            context: {outcome: sorted(sources) for outcome, sources in outcomes.items()}
+            for context, outcomes in contextual_transition_sources.items()},
         "sequences": sequences,
         "summary": {
             "sources": len(grouped), "accepted_sentences": accepted_sentences,

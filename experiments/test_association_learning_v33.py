@@ -1,7 +1,9 @@
+import hashlib
 import unittest
 from collections import Counter
 
-from association_learning_v33 import AssociationLearner, classify_trend, predict_with_backoff
+from association_learning_v33 import (AssociationLearner, classify_trend, held_out,
+                                      predict_with_backoff)
 
 
 class AssociationLearningTest(unittest.TestCase):
@@ -54,6 +56,26 @@ class AssociationLearningTest(unittest.TestCase):
                            for index, value in enumerate((8, 7, 6, 5, 2, 1, 0, -1, -2, -3))]
         self.assertEqual(classify_trend(declining_curve, "lift", window=10, min_delta=1),
                          "declining")
+
+    def test_held_out_keeps_a_whole_source_together_regardless_of_the_pair(self):
+        # The whole point of source-level holdout: two unrelated (prior, outcome)
+        # pairs from the same source must get the same train/test verdict.
+        self.assertEqual(held_out("fox|saw|grapes", "fox|found|grapes", ["http://a"]),
+                         held_out("wolf|ate|meat", "wolf|left|home", ["http://a"]))
+
+    def test_held_out_falls_back_to_the_pair_hash_without_source_attribution(self):
+        expected = hashlib.sha256(
+            b"association:fox|saw|grapes->fox|found|grapes").digest()[0] % 5 == 0
+        self.assertEqual(held_out("fox|saw|grapes", "fox|found|grapes"), expected)
+        self.assertEqual(held_out("fox|saw|grapes", "fox|found|grapes", []), expected)
+
+    def test_association_learner_splits_by_source_when_transition_sources_is_given(self):
+        transitions = {f"fox|waits|tree_{i}": {f"fox|eats|fruit_{i}": 1} for i in range(60)}
+        transition_sources = {prior: {outcome: [f"http://story-{index}"]}
+                              for index, (prior, outcomes) in enumerate(transitions.items())
+                              for outcome in outcomes}
+        report = AssociationLearner(transitions, None, None, transition_sources).run()
+        self.assertGreater(report["evaluation"]["total"], 0)
 
     def test_predict_with_backoff_falls_back_to_the_action_cue_when_all_cues_are_thin(self):
         links = {"subject:fox": Counter({"ate": 1}),

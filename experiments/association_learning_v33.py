@@ -38,7 +38,17 @@ def outcome_action(event: str) -> str:
     return event_parts(event)[1]
 
 
-def held_out(prior: str, outcome: str) -> bool:
+def source_held_out(source: str) -> bool:
+    return hashlib.sha256(f"association-source:{source}".encode()).digest()[0] % 5 == 0
+
+
+def held_out(prior: str, outcome: str, sources: list[str] | None = None) -> bool:
+    """Hold out by whole source when source attribution is available (mirrors
+    experience_rule_learning_v50's _source_holdout). Falls back to the legacy
+    pair-hash split when it isn't -- e.g. the standalone CLI's
+    global-language-memory input, which predates source attribution."""
+    if sources:
+        return source_held_out(min(sources))
     return hashlib.sha256(f"association:{prior}->{outcome}".encode()).digest()[0] % 5 == 0
 
 
@@ -104,10 +114,12 @@ def classify_trend(points: list[dict], key: str, window: int = 10, min_delta: fl
 class AssociationLearner:
     def __init__(self, transitions: dict[str, dict[str, int]],
                  event_counts: dict[str, int] | None = None,
-                 previous: dict | None = None):
+                 previous: dict | None = None,
+                 transition_sources: dict[str, dict[str, list[str]]] | None = None):
         self.transitions = transitions
         self.event_counts = event_counts or {}
         self.previous = previous or {}
+        self.transition_sources = transition_sources or {}
 
     def structural_edges(self) -> list[dict]:
         edges: Counter[tuple[str, str, str]] = Counter()
@@ -135,7 +147,8 @@ class AssociationLearner:
         train, test = [], []
         for prior, outcomes in self.transitions.items():
             for outcome, count in outcomes.items():
-                (test if held_out(prior, outcome) else train).append((prior, outcome, count))
+                sources = self.transition_sources.get(prior, {}).get(outcome, [])
+                (test if held_out(prior, outcome, sources) else train).append((prior, outcome, count))
         baseline = Counter()
         links: dict[str, Counter[str]] = defaultdict(Counter)
         contexts: dict[tuple[str, str], set[str]] = defaultdict(set)

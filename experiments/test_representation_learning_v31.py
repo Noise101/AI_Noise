@@ -1,7 +1,8 @@
+import hashlib
 import unittest
 
 from representation_learning_v31 import (abstract_event, evaluate_representations,
-                                         learn_form_families, learn_frequency_bands,
+                                         held_out, learn_form_families, learn_frequency_bands,
                                          learn_relational_action_classes,
                                          transform_transitions)
 
@@ -25,6 +26,26 @@ class RepresentationLearningTest(unittest.TestCase):
                       if item["scheme"] == report["selected_scheme"])
         surface = next(item for item in report["evaluations"] if item["scheme"] == "surface")
         self.assertGreater(chosen["accuracy"], surface["accuracy"])
+
+    def test_held_out_keeps_a_whole_source_together_regardless_of_the_pair(self):
+        self.assertEqual(held_out("fox|saw|grapes", "fox|found|grapes", ["http://a"]),
+                         held_out("wolf|ate|meat", "wolf|left|home", ["http://a"]))
+
+    def test_held_out_falls_back_to_the_pair_hash_without_source_attribution(self):
+        expected = hashlib.sha256(b"fox|saw|grapes->fox|found|grapes").digest()[0] % 5 == 0
+        self.assertEqual(held_out("fox|saw|grapes", "fox|found|grapes"), expected)
+
+    def test_evaluate_representations_splits_by_source_when_given(self):
+        transitions = {}
+        for index in range(120):
+            transitions[f"animal{index}|sees|food{index}"] = {
+                f"animal{index}|waits|food{index}": 1}
+        transition_sources = {prior: {outcome: [f"http://story-{index}"]}
+                              for index, (prior, outcomes) in enumerate(transitions.items())
+                              for outcome in outcomes}
+        report = evaluate_representations(transitions, transition_sources)
+        surface = next(item for item in report["evaluations"] if item["scheme"] == "surface")
+        self.assertGreater(surface["total"], 0)
 
     def test_selected_representation_can_feed_causal_evaluation(self):
         transitions = {"fox|sees|food": {"fox|waits|food": 2}}

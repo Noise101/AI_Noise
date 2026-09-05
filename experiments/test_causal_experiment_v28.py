@@ -1,3 +1,4 @@
+import hashlib
 import unittest
 
 from causal_experiment_v28 import (CausalExperimentEngine, RevisableBelief, classify_trend,
@@ -15,6 +16,27 @@ class CausalExperimentTest(unittest.TestCase):
         belief.update(False, 10)
         self.assertEqual(belief.status, "rejected")
         self.assertEqual(belief.revisions[-1]["before"], "supported")
+
+    def test_held_out_keeps_a_whole_source_together_regardless_of_the_pair(self):
+        self.assertEqual(
+            CausalExperimentEngine._held_out("fox|saw|grapes", "fox|found|grapes", ["http://a"]),
+            CausalExperimentEngine._held_out("wolf|ate|meat", "wolf|left|home", ["http://a"]))
+
+    def test_held_out_falls_back_to_the_pair_hash_without_source_attribution(self):
+        expected = hashlib.sha256(
+            b"fox|saw|grapes->fox|found|grapes").digest()[0] % 5 == 0
+        self.assertEqual(
+            CausalExperimentEngine._held_out("fox|saw|grapes", "fox|found|grapes"), expected)
+
+    def test_engine_splits_by_source_when_transition_sources_is_given(self):
+        transitions = {}
+        for index in range(60):
+            transitions[f"animal{index}|fails|reach_food"] = {f"animal{index}|leaves|food": 1}
+        transition_sources = {prior: {outcome: [f"http://story-{index}"]}
+                              for index, (prior, outcomes) in enumerate(transitions.items())
+                              for outcome in outcomes}
+        report = CausalExperimentEngine(transitions, transition_sources).run()
+        self.assertGreater(report["test_observations"], 0)
 
     def test_holdout_predictions_are_recorded_with_observed_result(self):
         transitions = {}

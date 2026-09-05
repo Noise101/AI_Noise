@@ -83,11 +83,21 @@ class RevisableBelief:
 
 
 class CausalExperimentEngine:
-    def __init__(self, transitions: dict[str, dict[str, int]]):
+    def __init__(self, transitions: dict[str, dict[str, int]],
+                 transition_sources: dict[str, dict[str, list[str]]] | None = None):
         self.transitions = transitions
+        self.transition_sources = transition_sources or {}
 
     @staticmethod
-    def _held_out(prior: str, outcome: str) -> bool:
+    def _held_out(prior: str, outcome: str, sources: list[str] | None = None) -> bool:
+        """Hold out by whole source when source attribution is available
+        (mirrors experience_rule_learning_v50's _source_holdout). Falls back to
+        the legacy pair-hash split when it isn't -- this also covers the
+        abstract (transform_transitions) view in evaluate_causal_views, whose
+        re-keyed prior/outcome strings don't match the concrete
+        transition_sources map."""
+        if sources:
+            return hashlib.sha256(f"causal-source:{min(sources)}".encode()).digest()[0] % 5 == 0
         digest = hashlib.sha256(f"{prior}->{outcome}".encode()).digest()
         return digest[0] % 5 == 0
 
@@ -96,7 +106,8 @@ class CausalExperimentEngine:
         for prior, outcomes in self.transitions.items():
             for outcome, count in outcomes.items():
                 item = (prior, outcome, count)
-                (test if self._held_out(prior, outcome) else train).append(item)
+                sources = self.transition_sources.get(prior, {}).get(outcome, [])
+                (test if self._held_out(prior, outcome, sources) else train).append(item)
         baseline = Counter()
         feature_totals = Counter()
         feature_outcomes: dict[str, Counter[str]] = defaultdict(Counter)
@@ -227,10 +238,11 @@ def classify_trend(points: list[dict], key: str, window: int = 10, min_delta: fl
 
 
 def evaluate_causal_views(transitions: dict[str, dict[str, int]], representation: dict,
-                          previous: dict | None = None) -> dict:
+                          previous: dict | None = None,
+                          transition_sources: dict[str, dict[str, list[str]]] | None = None) -> dict:
     """Keep concrete evidence unless an abstract view materially improves unseen prediction."""
     previous = previous or {}
-    concrete = CausalExperimentEngine(transitions).run()
+    concrete = CausalExperimentEngine(transitions, transition_sources).run()
     scheme = representation.get("selected_scheme", "surface")
     if scheme == "surface":
         concrete["selected_view"] = "concrete"
@@ -238,6 +250,9 @@ def evaluate_causal_views(transitions: dict[str, dict[str, int]], representation
         selected = concrete
     else:
         abstract_transitions = transform_transitions(transitions, representation)
+        # No transition_sources here: transform_transitions re-keys prior/outcome
+        # into abstract classes that transition_sources (keyed by the concrete
+        # strings) can't look up, so this view keeps the legacy pair-hash split.
         abstract = CausalExperimentEngine(abstract_transitions).run()
 
         def improvement(report: dict) -> int:
