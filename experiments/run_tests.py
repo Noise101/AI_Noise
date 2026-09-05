@@ -14,6 +14,7 @@ QUICK_MODULES = [
     "test_autonomous_controller_v20",
     "test_local_worker_v21",
     "test_autonomy_simulation",
+    "test_curriculum_scoring",
     "test_kanjipedia_reference_v22",
     "test_curiosity_drive_v23",
     "test_mastery_drive_v24",
