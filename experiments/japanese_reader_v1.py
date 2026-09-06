@@ -28,6 +28,7 @@ import japanese_event_v1 as jevent
 import reading_curriculum_v1 as curriculum
 import reading_comprehension_v1 as comprehension
 import japanese_retell_v1 as retell
+import japanese_sequence_v1 as sequence
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RUNTIME = ROOT / ".local"
@@ -35,7 +36,9 @@ CURRICULUM_FILE = "reading-curriculum.json"
 EVENTS_FILE = "reading-events.json"
 COMPREHENSION_FILE = "reading-comprehension.json"
 RETELL_FILE = "reading-retelling.json"
+SEQUENCE_FILE = "reading-sequence.json"
 STATUS_FILE = "reading-status.json"
+SEQUENCE_TRAIN_SECONDS = 5.0
 STOP_FILE = "READING_STOP"
 SHELF_LOW_WATER = 3           # in-rotation books below this -> fetch more
 FETCH_BUDGET = 12
@@ -113,6 +116,7 @@ def run_once(runtime: Path) -> dict:
     cur = _read(runtime / CURRICULUM_FILE) or curriculum.empty_curriculum()
     prev_comp = _read(runtime / COMPREHENSION_FILE)
     prev_retell = _read(runtime / RETELL_FILE)
+    prev_seq = _read(runtime / SEQUENCE_FILE)
     cycle = cur.get("cycle", 0) + 1
     cur["cycle"] = cycle
     events_store = _read_events()
@@ -152,10 +156,19 @@ def run_once(runtime: Path) -> dict:
     comp_report = comprehension.evaluate_comprehension(all_stories, prev_comp)
     retell_report = retell.evaluate_retelling(all_stories, prev_retell)
 
+    # character RNN over the sentences read so far (continuous capability signal)
+    seq_texts: dict[str, str] = {}
+    for bid, ev in events_store.items():
+        if bid in cur["shelf"] and ev:
+            url = cur["shelf"][bid]["url"]
+            seq_texts[url] = seq_texts.get(url, "") + "".join(e.get("sentence", "") for e in ev)
+    seq_report = sequence.train_and_evaluate(seq_texts, prev_seq, SEQUENCE_TRAIN_SECONDS)
+
     _write(runtime / CURRICULUM_FILE, cur)
     _write_events(events_store)
     _write(runtime / COMPREHENSION_FILE, comp_report)
     _write(runtime / RETELL_FILE, retell_report)
+    _write(runtime / SEQUENCE_FILE, seq_report)
     status = {
         "heartbeat": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "cycle": cycle, "books_fetched": fetched,
@@ -168,6 +181,11 @@ def run_once(runtime: Path) -> dict:
         "retelling": {k: retell_report.get(k) for k in
                       ("status", "fidelity", "fidelity_baseline", "gain_z",
                        "beats_baseline", "retelling_trend", "test_stories")},
+        "sequence": {k: seq_report.get(k) for k in
+                     ("status", "held_out_bits_per_char", "baseline_bits_per_char",
+                      "improvement_bits", "improvement_z", "beats_char_baseline",
+                      "perplexity_trend", "steps_trained")},
+        "sequence_sample": (seq_report.get("samples") or [""])[0],
     }
     _write(runtime / STATUS_FILE, status)
     return status
@@ -194,6 +212,7 @@ def render_status(runtime: Path) -> str:
     c = s.get("curriculum", {})
     comp = s.get("comprehension", {})
     ret = s.get("retelling", {})
+    seq = s.get("sequence", {})
     reading = s.get("reading", {})
     lines = ["Noise 日本語読書", "=" * 34,
              f"最終更新   : {s.get('heartbeat', '不明')}",
@@ -212,7 +231,12 @@ def render_status(runtime: Path) -> str:
              f"傾向={comp.get('comprehension_trend')}",
              f"再話(固定) : 忠実度={ret.get('fidelity')}/基準{ret.get('fidelity_baseline')} "
              f"z={ret.get('gain_z')} 基準超え={ret.get('beats_baseline')} "
-             f"傾向={ret.get('retelling_trend')}"]
+             f"傾向={ret.get('retelling_trend')}",
+             f"文字RNN   : {seq.get('held_out_bits_per_char')}bpc/基準{seq.get('baseline_bits_per_char')} "
+             f"z={seq.get('improvement_z')} 基準超え={seq.get('beats_char_baseline')} "
+             f"傾向={seq.get('perplexity_trend')} 学習{seq.get('steps_trained')}歩"]
+    if s.get("sequence_sample"):
+        lines.append(f"  生成: {s['sequence_sample'][:60]}")
     retold = reading.get("retelling")
     if retold:
         rs = reading.get("retelling_score", {})
