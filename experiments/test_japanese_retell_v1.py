@@ -69,6 +69,22 @@ class RetellTest(unittest.TestCase):
                    "obj": "", "confidence": 0.9, "roles": {}}]
         self.assertLess(jr.retelling_coherence(broken), 0.3)
 
+    def test_body_part_doing_an_action_verb_lowers_coherence(self):
+        # "おなかが言いました" -- a body part cannot be the agent of 言う
+        events = [{"subject": "おなか", "verb": v, "obj": "", "confidence": 0.9,
+                   "roles": {}, "sentence": ""}
+                  for v in ("すいてたまる", "しんだまねをする", "言う")]
+        self.assertLess(jr.retelling_coherence(events), 0.6)
+
+    def test_a_protagonist_absent_from_every_source_sentence_lowers_coherence(self):
+        # "いっぴき" (a counter) threaded as the subject, never in the actual text
+        events = [{"subject": "いっぴき", "verb": v, "obj": "", "confidence": 0.9,
+                   "roles": {}, "sentence": s}
+                  for v, s in (("はしる", "ねこがはしりました。"),
+                               ("たべる", "ねずみをたべました。"),
+                               ("なく", "おおごえでなきました。"))]
+        self.assertLess(jr.retelling_coherence(events), 0.6)
+
     def test_in_order_retelling_beats_shuffled_on_held_out_stories(self):
         stories = folktale_stories()
         report = jr.evaluate_retelling(stories, {})

@@ -122,6 +122,18 @@ _ADVERB_NOT_VERB = {"まもなく", "しばらく", "いったい", "やがて",
                     "たいへん", "どうして", "なぜ", "たぶん", "きゅうに"}
 _NOMINAL_IN_VERB = ("あげく", "はず", "ため", "こと", "とき", "ところ", "人", "ひと")
 _COPULA_TAIL = ("です", "ます", "である", "だった", "でした", "だろう", "でしょう")
+# a body part, or an abstract event / emotion noun, as the agent of an action
+# verb ("おなかが言いました", "あらそいが逃げ出しました") is a parse error -- these
+# are subjects only of sensation / state / inception predicates.
+_NON_AGENT_SUBJECTS = {"おなか", "はら", "のど", "むね", "せなか", "こし", "あたま",
+                       "かた", "ひざ", "て", "あし", "ゆび", "め", "みみ", "はな",
+                       "くち", "は", "かお", "かげ", "こえ", "なみだ", "きもち",
+                       "あらそい", "けんか", "さわぎ", "よろこび", "かなしみ",
+                       "いかり", "おどろき", "こえ"}
+_NON_AGENTIVE_OK_VERBS = {"すく", "へる", "かわく", "いたい", "いたむ", "つく", "する",
+                          "さめる", "まわる", "たつ", "でる", "とまる", "なる",
+                          "ある", "いる", "おこる", "はじまる", "おわる", "つづく",
+                          "あらわれる", "きえる", "みだれる"}
 
 
 def _implausible_verb(verb: str) -> bool:
@@ -158,13 +170,16 @@ def retelling_coherence(events: list[dict]) -> float:
     """Is the template retelling readable Japanese, independent of the
     generate -> re-parse round trip?  1.0 = nothing wrong; degrades toward 0
     for a deictic placeholder carrying every clause, verbs that are really
-    mis-segmented particles or adverbs, and fragment subjects."""
+    mis-segmented particles or adverbs, fragment subjects, a body part or
+    abstract noun as the agent of an action verb, and a "protagonist" that
+    never appears in the source text."""
     scored = [e for e in events if e.get("verb")]
     if len(scored) < 2:
         return 1.0
     n = len(scored)
     subjects = [e.get("subject") or "" for e in scored]
     verbs = [e.get("verb") or "" for e in scored]
+    sentences = [e.get("sentence") or "" for e in scored]
 
     named = [s for s in subjects if s]
     modal, modal_ct = Counter(named).most_common(1)[0] if named else ("", 0)
@@ -174,10 +189,23 @@ def retelling_coherence(events: list[dict]) -> float:
     broken = sum(_implausible_verb(v) for v in verbs) / n
     frag = sum(_fragment_subject(s) for s in subjects) / n
     verb_variety = len(set(verbs)) / n
+    # selectional restriction: a body part / abstract noun doing an action it
+    # cannot do ("おなかが言う", "あらそいが逃げ出す")
+    body_verb = sum(s in _NON_AGENT_SUBJECTS and v not in _NON_AGENTIVE_OK_VERBS
+                    for s, v in zip(subjects, verbs)) / n
+    # the "protagonist" the retelling names appears in NONE of the source
+    # sentences -- it came from a counter word or adverb the parser mis-took for
+    # a subject, not a real entity (a real protagonist survives at least once
+    # even under heavy zero-anaphora)
+    modal_in_source = any(modal and modal in src for src in sentences)
+    stray_protagonist = (bool(modal) and modal_share >= 0.5
+                         and any(sentences) and not modal_in_source)
 
     penalty = (0.55 if deictic else 0.0)
     penalty += 0.60 * broken
     penalty += 0.30 * frag
+    penalty += 0.50 * body_verb
+    penalty += 0.45 if stray_protagonist else 0.0
     penalty += 0.25 * max(0.0, 0.55 - verb_variety)      # near-total verb repetition
     # one subject mechanically opening most clauses is only a defect when the
     # clauses themselves are degraded -- otherwise it is ordinary zero-anaphora

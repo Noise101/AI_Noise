@@ -40,6 +40,28 @@ class JapaneseEventTest(unittest.TestCase):
         events = extract_story("きつねはぶどうを見つけました。たべたくなりました。")
         self.assertEqual([e.subject for e in events], ["きつね", "きつね"])
 
+    def test_sensation_ga_noun_is_not_taken_as_the_agent(self):
+        # 「ねこは…。おなかがすいた。言いました。」-- おなか must not become the
+        # subject and get threaded forward as the one who speaks
+        events = extract_story("ねこはねずみをまちました。おなかがすいてたまりません。"
+                               "おおきなこえでいいました。")
+        self.assertEqual([e.subject for e in events], ["ねこ", "ねこ", "ねこ"])
+        self.assertEqual(events[1].roles.get("が"), "おなか")
+
+    def test_a_bare_topic_clause_sets_the_subject_for_following_clauses(self):
+        events = extract_story("おじいさんは、やまへ行きました。しばをかりました。")
+        self.assertEqual([e.subject for e in events], ["おじいさん", "おじいさん"])
+
+    def test_counter_and_adjectival_prefixes_are_stripped_from_the_subject(self):
+        self.assertEqual(extract_clause("いっぴきのねずみがはしりました。").subject, "ねずみ")
+        self.assertEqual(extract_clause("ふたりのこどもがあそびました。").subject, "こども")
+
+    def test_quantifier_mo_is_not_read_as_a_topic_entity(self):
+        # 「いっぴきも…ない」: いっぴき must not become the threaded subject
+        events = extract_story("きつねがはしりました。いっぴきもいませんでした。"
+                               "とてもかなしみました。")
+        self.assertNotIn("いっぴき", [e.subject for e in events])
+
     def test_single_kanji_noun_is_a_valid_argument(self):
         event = extract_clause("おじいさんは山から帰りました。")
         self.assertEqual(event.roles.get("から"), "山")

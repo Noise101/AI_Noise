@@ -46,6 +46,13 @@ SENTENCE_END = "。！？、」』）\n 　"
 CONNECTIVES = {"そして", "それから", "すると", "しかし", "けれども", "でも",
                "ところが", "やがて", "また", "その", "この", "あの", "ある",
                "むかし", "むかしむかし", "とても", "やがて", "ある日", "いつも"}
+# body parts / faculties: in a 「Xは Yが <state>」 sensation clause (おなかがすく,
+# のどがかわく, あたまがいたい) the が-noun Y is part of the predicate, not the
+# agent -- the experiencer is the dropped topic.  Taking Y as the subject and
+# threading it forward is how "おなか" ends up "saying" things three clauses later.
+PREDICATE_GA_NOUNS = frozenset({
+    "おなか", "はら", "のど", "むね", "せなか", "こし", "あたま",
+    "きもち", "きぶん", "からだ"})
 # common nouns that embed a particle character -- protect them from the scanner
 PROTECTED_NOUN_HEADS = ("もも", "おに", "かに", "とり", "にわ", "には虫", "きのこ",
                         "はな", "はた", "はし", "はこ", "もり", "こども", "ともだち",
@@ -53,10 +60,23 @@ PROTECTED_NOUN_HEADS = ("もも", "おに", "かに", "とり", "にわ", "に�
 # leading adjectival / determiner / adverbial prefixes to strip off a noun
 NOUN_PREFIX = re.compile(r"^(大きな|小さな|きれいな|りっぱな|元気な|かわいい|やさしい|"
                          r"わるい|いい|ある|その|この|あの|ひとつの|一つの|"
+                         r"ひとりの|ふたりの|いっぴきの|いちわの|いっぽんの|としとった|"
                          r"まだ|もう|ずっと|やがて|すぐ|とても|いつも|きっと|"
                          r"でも|そして|それから|すると|しかし|ところが|また)")
 # 「... という ...」: the noun before という names the entity that follows
 TO_IU = re.compile(r"という")
+# a clause that is only a topic NP ("ねこは、") carries no verb but does set the
+# subject for the clauses that follow it.  は only: 「いっぴきも」「だれも」 are
+# quantifier+も, not an entity.
+BARE_TOPIC = re.compile(f"^({JP}{{2,}})は$")
+NON_TOPIC_NOUNS = {"それ", "これ", "あれ", "どれ", "だれ", "なに", "みんな", "みな",
+                   "ここ", "そこ", "あそこ", "いま", "あと", "つぎ"}
+# a bare counter / quantifier ("いっぴき", "ひとつ", "ふたり") -- with も it means
+# "(not) even one", never names an entity
+COUNTER_WORD = re.compile(
+    r"^(ひとつ|ふたつ|みっつ|よっつ|いくつ|ひとり|ふたり|さんにん|"
+    r"(いっ|に|さん|よん|ろっ|なな|はっ)?[ぴひび]き|"
+    r"いちわ|にわ|さんわ|いっぽん|にほん|いっこ|にこ)$")
 
 # common verbs: any inflected surface -> dictionary form.  Kept small and
 # high-frequency; the ます/ました/た rules below handle the long tail.
@@ -152,6 +172,7 @@ class JapaneseEvent:
     confidence: float
     sentence: str
     roles: dict = field(default_factory=dict)
+    subject_explicit: bool = field(default=True, compare=False)
 
     @property
     def key(self) -> str:
@@ -163,7 +184,11 @@ _KANJI_KATA = re.compile(f"[{KATAKANA}{KANJI}]")
 
 def _clean_noun(raw: str) -> str:
     noun = re.sub(f"[^{HIRAGANA}{KATAKANA}{KANJI}]", "", raw)
-    noun = NOUN_PREFIX.sub("", noun)
+    for _ in range(3):                       # 「いっぴきのとしとったねずみ」 stacks two
+        stripped = NOUN_PREFIX.sub("", noun)
+        if stripped == noun or not stripped:
+            break
+        noun = stripped
     return noun
 
 
@@ -213,13 +238,16 @@ def _split_particles(clause: str, known_words: "set[str] | None" = None) -> list
                 matched = particle
                 break
             if matched is None and not seen_topic and not out:
-                run = len(_clean_noun(current))
+                cleaned = _clean_noun(current)
+                run = len(cleaned)
                 # topic は only at the first NP after a >=2-char run; topic も
-                # needs >=3 (も is far more often word-internal: もも, くも, ...)
-                for particle, need in (("は", 2), ("も", 3)):
-                    if clause.startswith(particle, i) and run >= need:
-                        matched, seen_topic = particle, True
-                        break
+                # needs >=3 (も is far more often word-internal: もも, くも, ...).
+                # 「いっぴきも」「だれも」: quantifier/deixis + も is "even", not a topic
+                if cleaned not in NON_TOPIC_NOUNS and not COUNTER_WORD.match(cleaned):
+                    for particle, need in (("は", 2), ("も", 3)):
+                        if clause.startswith(particle, i) and run >= need:
+                            matched, seen_topic = particle, True
+                            break
             if matched:
                 noun = _clean_noun(current)
                 if noun and noun not in CONNECTIVES:
@@ -254,20 +282,30 @@ def extract_clause(sentence: str, recent_subject: str | None = None,
 
     subject = obj = ""
     roles: dict[str, str] = {}
+    suppressed_ga = False
     for noun, particle in pairs:
-        if particle in SUBJECT_MARKERS and not subject:
+        if (particle == "が" and not subject and noun in PREDICATE_GA_NOUNS):
+            # 「おなかがすいた」: the が-noun is the predicate's theme, not the
+            # agent -- keep it as a role and let the dropped topic be the subject
+            roles.setdefault("が", noun)
+            suppressed_ga = True
+        elif particle in SUBJECT_MARKERS and not subject:
             subject = noun
         elif particle in OBJECT_MARKERS and not obj:
             obj = noun
         else:
             roles.setdefault(particle, noun)
+    subject_explicit = bool(subject)
     if not subject:
         subject = recent_subject or ""
-    if not subject:
+    if not subject and not suppressed_ga:
         return None
     confidence = round(min(verb_conf, 0.9 if obj or roles else 0.7), 3)
+    if not subject_explicit:
+        confidence = round(min(confidence, 0.6), 3)     # inherited / unknown subject
     return JapaneseEvent(subject=subject, verb=verb, obj=obj, confidence=confidence,
-                         sentence=sentence.strip(), roles=roles)
+                         sentence=sentence.strip(), roles=roles,
+                         subject_explicit=subject_explicit)
 
 
 def learn_word_vocabulary(text: str, minimum_count: int = 2, top: int = 400) -> set[str]:
@@ -306,9 +344,20 @@ def extract_story(text: str, known_words: "set[str] | None" = None) -> list[Japa
         if not sentence:
             continue
         for clause in re.split(r"、(?=\S)", sentence):
+            bare = BARE_TOPIC.match(clause.strip())
+            if bare:
+                topic = _clean_noun(bare.group(1))
+                if (_noun_ok(bare.group(1)) and topic not in CONNECTIVES
+                        and topic not in NON_TOPIC_NOUNS):
+                    recent_subject = topic
+                continue
             event = extract_clause(clause if clause.endswith(tuple("。！？")) else clause + "。",
                                    recent_subject, vocab)
             if event and event.confidence >= 0.4:
                 events.append(event)
-                recent_subject = event.subject
+                # only an explicitly case-marked subject re-anchors the zero-
+                # anaphora thread; an inherited or suppressed one must not
+                # overwrite it with itself or with a predicate noun
+                if event.subject_explicit and event.subject:
+                    recent_subject = event.subject
     return events
