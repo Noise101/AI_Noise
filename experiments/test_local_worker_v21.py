@@ -381,11 +381,15 @@ class LocalWorkerTest(unittest.TestCase):
         rendered = render_human_status(status, now_epoch=1788220805, process_alive=True)
         self.assertIn("正常に稼働", rendered)
         self.assertIn("次の処理を準備中", rendered)
-        self.assertIn("妥当性判定", rendered)
-        self.assertIn("基準より下", rendered)
+        self.assertIn("妥当性判定     : 2/20、単純基準より -2件", rendered)
+        self.assertIn("動詞クローズ   : 4/20、単純基準より +0件", rendered)
         self.assertIn("因果予測       : 評価不能", rendered)
-        self.assertIn("動詞クローズ", rendered)
         self.assertIn("管理対象合計   : 1.0GB", rendered)
+        # the micro-world diagnostic block is gone (invariant 18: zero real credit)
+        self.assertNotIn("限定実験世界", rendered)
+        self.assertNotIn("第一段階", rendered)
+        # so is the section that just duplicated 現在できること
+        self.assertNotIn("現在の能力評価", rendered)
         self.assertIn("実用会話       : 未到達", rendered)
 
     def test_human_status_shows_learning_curve_trend(self):

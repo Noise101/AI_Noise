@@ -164,20 +164,6 @@ def causal_shim(event_structure: dict) -> dict:
             "learning_curve": [], "learning_curve_trend": "insufficient_data"}
 
 
-def _competency_ja(social_world: dict, name: str) -> str:
-    result = social_world.get("competencies", {}).get(name, {})
-    correct, total = result.get("correct", 0), result.get("total", 0)
-    return f"{correct}/{total}（{percent(correct, total)}）"
-
-
-def _competency_comparison_ja(world: dict, name: str) -> str:
-    result = world.get("competencies", {}).get(name, {})
-    correct, total = result.get("correct", 0), result.get("total", 0)
-    baseline = result.get("baseline_correct", 0)
-    judgement = "基準超え" if correct > baseline else ("同等" if correct == baseline else "基準未満")
-    return f"{correct}/{total}、単純基準 {baseline}/{total}（{judgement}）"
-
-
 def capability_summary_lines(status: dict) -> list[str]:
     """Translate telemetry into conservative, user-facing capability claims."""
     global_memory = status.get("global_memory", {})
@@ -525,32 +511,13 @@ def render_human_status(status: dict, now_epoch: float | None = None,
     health = "正常に稼働" if healthy else "確認が必要"
     global_memory = status.get("global_memory", {})
     mastery = status.get("mastery", {})
-    event_structure = status.get("event_structure", {})
-    plausibility_eval = next((item.get("selection", {})
-                              for item in event_structure.get("evaluations", [])
-                              if item.get("task") == "event_plausibility"), {})
-    cloze_eval = next((item.get("selection", {})
-                       for item in event_structure.get("evaluations", [])
-                       if item.get("task") == "verb_cloze"), {})
-    es_selected = event_structure.get("selected") or {}
-    representation = status.get("representation", {}).get("selected_evaluation", {})
-    errors = status.get("error_memory", {})
-    visual = status.get("visual_memory", {})
-    revision = status.get("experience_revision", {})
-    revision_eval = revision.get("evaluation", {})
+    es_selected = status.get("event_structure", {}).get("selected") or {}
     parser_revision = status.get("parser_revision", {})
     parser_eval = parser_revision.get("selected_evaluation", {}) or {}
     parser_audit = status.get("parser_audit", {})
     verified = status.get("verified_experience", {})
     self_policy = status.get("self_learning_policy", {})
     autonomy = status.get("autonomy", {})
-    micro_world = status.get("micro_world", {})
-    tool_world = status.get("tool_world", {})
-    social_world = status.get("social_world", {})
-    cooperative_world = status.get("cooperative_world", {})
-    abstraction_world = status.get("abstraction_world", {})
-    scaffold = status.get("epistemic_scaffold", {})
-    dialogue_verification = status.get("dialogue_verification", {})
     learned_rules = status.get("learned_experience_rules", {})
     learned_eval = learned_rules.get("evaluation", {})
     storage = status.get("storage", {})
@@ -569,110 +536,18 @@ def render_human_status(status: dict, now_epoch: float | None = None,
              *capability_summary_lines(status),
              "", "言語と経験", "-" * 34,
              f"採用教材       : {global_memory.get('curricula', 0):,}",
-             f"単語           : {global_memory.get('word_forms', 0):,}（根拠あり {global_memory.get('grounded_word_forms', 0):,}）",
-             f"フレーズ       : {global_memory.get('phrases', 0):,}（根拠あり {global_memory.get('grounded_phrases', 0):,}）",
-             f"品質確認イベント: {global_memory.get('quality_events', 0):,}",
-             f"検証済みイベント: {verified.get('events', 0):,}（遷移 {verified.get('transition_observations', 0):,}、同一主体 {verified.get('coherent_transition_observations', 0):,}、2場面文脈 {verified.get('contextual_observations', 0):,}）",
+             f"検証済みイベント: {verified.get('events', 0):,}（同一主体遷移 {verified.get('coherent_transition_observations', 0):,}、共参照解決 {verified.get('coreference_resolutions', 0):,}）",
+             f"命題           : {verified.get('propositions', 0):,}（属性を持つ実体 {verified.get('entities_with_properties', 0):,}、まだ予測信号なし）",
              f"再解析で隔離   : {verified.get('quarantined_sentences', 0):,}文",
              f"自己選択した読解: {self_policy.get('selected_policy', '評価中')}（{self_policy.get('selection_status', '評価中')}）",
-             f"人間科学観測   : {scaffold.get('observation_frames', 0):,}件（解釈 {scaffold.get('interpretations_committed', 0)}、仮説 {scaffold.get('hypotheses_committed', 0)}）",
-             f"対話からWeb検証: {dialogue_verification.get('expressions_investigated', 0):,}表現（独立確認 {dialogue_verification.get('independently_observed', 0):,}、過剰仮説を棄却 {dialogue_verification.get('rejected_overspecific', 0):,}）",
-             f"ローカルAIを正解採用: {dialogue_verification.get('local_llm_claims_accepted_as_fact', 0)}件",
-             f"構造化した経験 : {learned_rules.get('structured_experiences', 0):,}件（対話Web構造 {learned_rules.get('dialogue_structures', 0):,}、比較群 {learned_rules.get('comparison_groups', 0):,}）",
-             f"新しい経験規則 : 候補 {learned_rules.get('candidate_rules', 0):,}、再利用可能 {learned_rules.get('reusable_rules', 0):,}、弱化 {learned_rules.get('weakened_rules', 0):,}",
-             (f"作品別の未見評価: {learned_eval.get('correct', 0)}/{learned_eval.get('total', 0)}、"
-              f"単純基準 {learned_eval.get('baseline_correct', 0)}/{learned_eval.get('total', 0)}、"
-              f"適用範囲 {100 * learned_eval.get('coverage', 0):.1f}%"),
-             "", "限定実験世界（機構診断用・実能力ではない）", "-" * 34,
-             f"第一段階       : {micro_world.get('status', '準備中')}",
-             f"自分で行った実験: {micro_world.get('interventions', 0):,}回",
-             f"予測失敗       : {micro_world.get('prediction_errors', 0):,}回",
-             f"規則修正       : {micro_world.get('corrective_revisions', 0):,}回",
-             f"残った仮説     : {micro_world.get('surviving_hypotheses', 0):,}個",
-             f"未見世界評価   : {micro_world.get('holdout', {}).get('correct', 0)}/{micro_world.get('holdout', {}).get('total', 0)}（{percent(micro_world.get('holdout', {}).get('correct', 0), micro_world.get('holdout', {}).get('total', 0))}）",
-             f"第二段階       : {tool_world.get('status', '第一段階の合格待ち')}",
-             f"道具世界試行   : {tool_world.get('episodes', 0):,}回",
-             f"成功した計画   : {tool_world.get('successful_training_plans', 0):,}件",
-             f"行動失敗の記憶 : {tool_world.get('remembered_action_failures', 0):,}件",
-             f"未見道具課題   : {tool_world.get('unseen_tasks', {}).get('successes', 0)}/{tool_world.get('unseen_tasks', {}).get('total', 0)}（{percent(tool_world.get('unseen_tasks', {}).get('successes', 0), tool_world.get('unseen_tasks', {}).get('total', 0))}）",
-             f"第三段階       : {social_world.get('status', '第二段階の合格待ち')}",
-             f"他者理解の実験 : {social_world.get('social_experiments', 0):,}回",
-             f"他者予測の失敗 : {social_world.get('prediction_errors', 0):,}回",
-             f"能力合格       : {social_world.get('competencies_passed', 0)}/{social_world.get('competencies_total', 5)}",
-             f"継続記憶する他者: {social_world.get('persistent_agents', 0)}人",
-             f"誤信念         : {_competency_ja(social_world, 'belief')}",
-             f"好み・目的     : {_competency_ja(social_world, 'identity_profiles')}",
-             f"協力・約束     : {_competency_ja(social_world, 'cooperation_and_promises')}",
-             f"複数人への伝達 : {_competency_ja(social_world, 'multi_agent_communication')}",
-             f"相手別の説明   : {_competency_ja(social_world, 'adaptive_explanation')}",
-             f"第四段階       : {cooperative_world.get('status', '第三段階の完了待ち')}",
-             f"共同作業の実験 : {cooperative_world.get('cooperative_experiments', 0):,}回",
-             f"共同予測の失敗 : {cooperative_world.get('prediction_errors', 0):,}回",
-             f"能力合格       : {cooperative_world.get('competencies_passed', 0)}/{cooperative_world.get('competencies_total', 10)}",
-             f"共同目標       : {_competency_ja(cooperative_world, 'joint_goal')}",
-             f"役割分担       : {_competency_ja(cooperative_world, 'role_assignment')}",
-             f"共同計画       : {_competency_ja(cooperative_world, 'joint_planning')}",
-             f"交渉           : {_competency_ja(cooperative_world, 'negotiation')}",
-             f"信頼と回復     : {_competency_ja(cooperative_world, 'trust')}",
-             f"失敗原因       : {_competency_ja(cooperative_world, 'failure_attribution')}",
-             f"集団情報伝達   : {_competency_ja(cooperative_world, 'group_information')}",
-             f"規範発見       : {_competency_ja(cooperative_world, 'norm_discovery')}",
-             f"公平性         : {_competency_ja(cooperative_world, 'fairness')}",
-             f"検証する対話   : {_competency_ja(cooperative_world, 'verified_dialogue')}",
-             f"第五段階       : {abstraction_world.get('status', '第四段階の完了待ち')}",
-             f"抽象化の実験   : {abstraction_world.get('abstraction_experiments', 0):,}回",
-             f"抽象予測の失敗 : {abstraction_world.get('prediction_errors', 0):,}回",
-             f"能力合格       : {abstraction_world.get('competencies_passed', 0)}/{abstraction_world.get('competencies_total', 11)}",
-             f"実教材への転用 : {sum(bool(x) for x in abstraction_world.get('open_transfer_gates', {}).values())}/4",
-             f"再利用抽象規則 : {abstraction_world.get('reusable_abstract_rules', 0)}件",
-             f"特徴比較       : {_competency_ja(abstraction_world, 'feature_comparison')}",
-             f"概念形成       : {_competency_ja(abstraction_world, 'concept_formation')}",
-             f"概念階層       : {_competency_ja(abstraction_world, 'concept_hierarchy')}",
-             f"関係抽象化     : {_competency_ja(abstraction_world, 'relation_abstraction')}",
-             f"出来事抽象化   : {_competency_ja(abstraction_world, 'event_abstraction')}",
-             f"因果転用       : {_competency_comparison_ja(abstraction_world, 'causal_transfer')}",
-             f"類推           : {_competency_ja(abstraction_world, 'analogy')}",
-             f"構造連想       : {_competency_comparison_ja(abstraction_world, 'structural_association')}",
-             f"自己修正       : {_competency_comparison_ja(abstraction_world, 'self_revision')}",
-             f"表現選択       : {_competency_ja(abstraction_world, 'representation_selection')}",
-             f"統合世界モデル : {_competency_ja(abstraction_world, 'integrated_world_model')}",
-             "", "現在の能力評価", "-" * 34]
-    def judge(evaluation: dict) -> str:
-        c, b = evaluation.get("correct", 0), evaluation.get("baseline_correct", 0)
-        return "基準を上回った" if c > b else ("基準と同じ" if c == b else "基準より下")
-
-    pc, pt = plausibility_eval.get("correct", 0), plausibility_eval.get("total", 0)
-    pb = plausibility_eval.get("baseline_correct", 0)
-    zc, zt = cloze_eval.get("correct", 0), cloze_eval.get("total", 0)
-    zb = cloze_eval.get("baseline_correct", 0)
+             f"解析監査       : {parser_audit.get('audited_sentences', 0):,}文（隔離した不採用 {parser_audit.get('quarantined_rejections', 0):,}）",
+             f"解析方式       : {parser_revision.get('selected_policy') or 'baseline'}（{parser_revision.get('selection_status') or '評価前'}、解析範囲 {100 * parser_eval.get('parse_coverage', 0):.1f}%）",
+             f"経験規則       : 候補 {learned_rules.get('candidate_rules', 0):,}、再利用可能 {learned_rules.get('reusable_rules', 0):,}、弱化 {learned_rules.get('weakened_rules', 0):,}"
+             + (f"（未見 {learned_eval.get('correct', 0)}/{learned_eval.get('total', 0)}、単純基準 {learned_eval.get('baseline_correct', 0)}）"
+                if learned_eval.get('total') else ""),
+             f"最優先の弱点   : {DIMENSION_JA.get(mastery.get('weakest_dimension'), mastery.get('weakest_dimension') or '未判定')}",
+             "", "ストレージ", "-" * 34]
     lines.extend([
-        f"妥当性判定     : {pc}/{pt}（{percent(pc, pt)}）、単純基準 {pb}/{pt} → {judge(plausibility_eval)}",
-        f"動詞クローズ   : {zc}/{zt}（{percent(zc, zt)}）、単純基準 {zb}/{zt} → {judge(cloze_eval)}",
-        f"選択モデル     : {event_structure.get('selected_model_id', '評価前')}"
-        f"（{event_structure.get('selection_status', '評価前')}）",
-        f"確認セット     : lift {(es_selected.get('final') or es_selected).get('lift', 0):+d}件"
-        if es_selected else "確認セット     : 基準超えモデルなし（未確認）",
-        "因果予測       : 評価不能（対比・介入の証拠がこの資料にない。v1で予測対象から除外）",
-        f"抽象表現       : 正解 {representation.get('correct', 0)}/{representation.get('total', 0)}、適用範囲 {100 * representation.get('coverage', 0):.1f}%",
-        f"構造規則       : {revision.get('rules_formed', 0):,}件（再利用可能 {revision.get('reusable_rules', 0):,}、弱化 {revision.get('weakened_rules', 0):,}）",
-        f"構造予測       : {revision_eval.get('correct', 0)}/{revision_eval.get('total', 0)}（{percent(revision_eval.get('correct', 0), revision_eval.get('total', 0))}）、適用範囲 {100 * revision_eval.get('coverage', 0):.1f}%",
-        f"失敗原因分析   : {revision.get('prediction_errors', 0):,}件",
-        f"解析方式       : {parser_revision.get('selected_policy') or 'baseline'}（{parser_revision.get('selection_status') or '評価前'}）",
-        f"解析方式の評価 : 正解 {parser_eval.get('correct', 0)}/{parser_eval.get('total', 0)}、解析範囲 {100 * parser_eval.get('parse_coverage', 0):.1f}%",
-        f"解析監査       : {parser_audit.get('audited_sentences', 0):,}文（隔離した不採用 {parser_audit.get('quarantined_rejections', 0):,}）",
-        f"最優先の弱点   : {DIMENSION_JA.get(mastery.get('weakest_dimension'), mastery.get('weakest_dimension') or '未判定')}",
-        "", "間違いの記憶", "-" * 34,
-        f"認識した誤り   : {errors.get('recognized_errors', 0):,}件",
-        f"再発した誤り   : {errors.get('repeated_errors', 0):,}件",
-        f"訂正に反映済み : {errors.get('corrective_changes', 0):,}件",
-        f"現在有効な訂正 : {errors.get('currently_corrected', errors.get('corrective_changes', 0)):,}件",
-        f"反例として保持 : {errors.get('unresolved_errors', 0):,}件",
-        "", "画像経験", "-" * 34,
-        f"画像表現を観測 : {visual.get('depictions_seen', 0):,}枚",
-        f"視覚待ち教材   : {visual.get('pending_visual_curricula', 0):,}",
-        f"実物を観測     : {visual.get('physical_objects_seen', 0):,}件",
-        f"接地済み概念   : {visual.get('grounded_visual_concepts', 0):,}件",
-        "", "ストレージ", "-" * 34,
         f"永続データ     : {human_bytes(storage.get('runtime_bytes'))}",
         f"再取得可能キャッシュ: {human_bytes(storage.get('reconstructible_cache_bytes'))}",
         f"管理対象合計   : {human_bytes(storage.get('managed_bytes', storage.get('after_bytes')))}",
