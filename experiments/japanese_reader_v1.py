@@ -27,12 +27,14 @@ import japanese_corpus_v1 as corpus
 import japanese_event_v1 as jevent
 import reading_curriculum_v1 as curriculum
 import reading_comprehension_v1 as comprehension
+import japanese_retell_v1 as retell
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RUNTIME = ROOT / ".local"
 CURRICULUM_FILE = "reading-curriculum.json"
 EVENTS_FILE = "reading-events.json"
 COMPREHENSION_FILE = "reading-comprehension.json"
+RETELL_FILE = "reading-retelling.json"
 STATUS_FILE = "reading-status.json"
 STOP_FILE = "READING_STOP"
 SHELF_LOW_WATER = 3           # in-rotation books below this -> fetch more
@@ -110,6 +112,7 @@ def run_once(runtime: Path) -> dict:
     _events_path = runtime / EVENTS_FILE
     cur = _read(runtime / CURRICULUM_FILE) or curriculum.empty_curriculum()
     prev_comp = _read(runtime / COMPREHENSION_FILE)
+    prev_retell = _read(runtime / RETELL_FILE)
     cycle = cur.get("cycle", 0) + 1
     cur["cycle"] = cycle
     events_store = _read_events()
@@ -136,17 +139,23 @@ def run_once(runtime: Path) -> dict:
         reading = curriculum.record_reading(cur, book_id, events, cycle, model=model)
         reading["title"] = book["title"]
         reading["level"] = book["estimated_level"]
+        # what Noise understood, in its own (template) words
+        retold = retell.retell(events, max_sentences=10)
+        reading["retelling"] = retold
+        reading["retelling_score"] = retell.score_retelling(events, retold)
 
     advance = curriculum.maybe_advance_level(cur, cycle)
 
-    # frozen-benchmark capability measurement over all stories with events
+    # frozen-benchmark capability measurements over all stories with events
     all_stories = [{"url": cur["shelf"][bid]["url"], "events": ev}
                    for bid, ev in events_store.items() if bid in cur["shelf"] and len(ev) >= 3]
     comp_report = comprehension.evaluate_comprehension(all_stories, prev_comp)
+    retell_report = retell.evaluate_retelling(all_stories, prev_retell)
 
     _write(runtime / CURRICULUM_FILE, cur)
     _write_events(events_store)
     _write(runtime / COMPREHENSION_FILE, comp_report)
+    _write(runtime / RETELL_FILE, retell_report)
     status = {
         "heartbeat": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "cycle": cycle, "books_fetched": fetched,
@@ -156,6 +165,9 @@ def run_once(runtime: Path) -> dict:
                           ("status", "comprehension_score", "consequence",
                            "consequence_baseline", "consequence_z", "beats_baseline",
                            "comprehension_trend", "test_stories")},
+        "retelling": {k: retell_report.get(k) for k in
+                      ("status", "fidelity", "fidelity_baseline", "gain_z",
+                       "beats_baseline", "retelling_trend", "test_stories")},
     }
     _write(runtime / STATUS_FILE, status)
     return status
@@ -181,6 +193,8 @@ def render_status(runtime: Path) -> str:
     s = _read(runtime / STATUS_FILE)
     c = s.get("curriculum", {})
     comp = s.get("comprehension", {})
+    ret = s.get("retelling", {})
+    reading = s.get("reading", {})
     lines = ["Noise 日本語読書", "=" * 34,
              f"最終更新   : {s.get('heartbeat', '不明')}",
              f"サイクル   : {s.get('cycle', 0)}",
@@ -195,7 +209,15 @@ def render_status(runtime: Path) -> str:
              f"理解(固定) : score={comp.get('comprehension_score')} "
              f"帰結={comp.get('consequence')}/基準{comp.get('consequence_baseline')} "
              f"z={comp.get('consequence_z')} 基準超え={comp.get('beats_baseline')} "
-             f"傾向={comp.get('comprehension_trend')}"]
+             f"傾向={comp.get('comprehension_trend')}",
+             f"再話(固定) : 忠実度={ret.get('fidelity')}/基準{ret.get('fidelity_baseline')} "
+             f"z={ret.get('gain_z')} 基準超え={ret.get('beats_baseline')} "
+             f"傾向={ret.get('retelling_trend')}"]
+    retold = reading.get("retelling")
+    if retold:
+        rs = reading.get("retelling_score", {})
+        lines.append(f"Noiseの再話 : （再現{rs.get('recall')}／順序{rs.get('order_correlation')}）")
+        lines.append(f"  {retold[:120]}")
     if s.get("level_advance", {}).get("advanced"):
         lines.append(f"★ レベル上昇 → {s['level_advance']['level']}")
     if s.get("error"):
