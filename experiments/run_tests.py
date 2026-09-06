@@ -27,6 +27,7 @@ QUICK_MODULES = [
     "test_reading_comprehension_v1",
     "test_japanese_retell_v1",
     "test_japanese_sequence_v1",
+    "test_caregiver_v1",
     "test_japanese_reader_v1",
     "test_proposition_v1",
     "test_active_curriculum_v1",

@@ -29,6 +29,7 @@ import reading_curriculum_v1 as curriculum
 import reading_comprehension_v1 as comprehension
 import japanese_retell_v1 as retell
 import japanese_sequence_v1 as sequence
+import caregiver_v1 as caregiver
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RUNTIME = ROOT / ".local"
@@ -37,6 +38,7 @@ EVENTS_FILE = "reading-events.json"
 COMPREHENSION_FILE = "reading-comprehension.json"
 RETELL_FILE = "reading-retelling.json"
 SEQUENCE_FILE = "reading-sequence.json"
+CAREGIVER_FILE = "caregiver.json"
 STATUS_FILE = "reading-status.json"
 SEQUENCE_TRAIN_SECONDS = 5.0
 STOP_FILE = "READING_STOP"
@@ -178,6 +180,22 @@ def run_once(runtime: Path) -> dict:
             reading["free_retelling"] = free
             reading["free_retelling_score"] = retell.score_retelling(events, free)
 
+    # low-effort caregiver check: a small batch of multiple-choice / yes-no
+    # questions about recently-read books, every CAREGIVER_INTERVAL cycles
+    care_state = _read(runtime / CAREGIVER_FILE) or caregiver.empty_state()
+    caregiver.expire_if_stale(care_state, cycle)
+    if caregiver.due(care_state, cycle):
+        recent = [{"title": b["title"], "url": b["url"],
+                   "events": events_store.get(bid, []),
+                   "_last": b.get("last_read_cycle") or 0}
+                  for bid, b in cur["shelf"].items()
+                  if b.get("times_read", 0) > 0 and len(events_store.get(bid, [])) >= 3]
+        recent.sort(key=lambda r: -r["_last"])
+        questions = caregiver.generate_questions(recent, cycle, model)
+        if questions:
+            caregiver.open_batch(care_state, questions, cycle)
+    _write(runtime / CAREGIVER_FILE, care_state)
+
     _write(runtime / CURRICULUM_FILE, cur)
     _write_events(events_store)
     _write(runtime / COMPREHENSION_FILE, comp_report)
@@ -200,9 +218,23 @@ def run_once(runtime: Path) -> dict:
                       "improvement_bits", "improvement_z", "beats_char_baseline",
                       "perplexity_trend", "steps_trained")},
         "sequence_sample": (seq_report.get("samples") or [""])[0],
+        "caregiver": caregiver.summary(care_state),
+        "caregiver_questions": [q["prompt"] for q in care_state.get("pending", [])],
     }
     _write(runtime / STATUS_FILE, status)
     return status
+
+
+def answer_questions(runtime: Path, raw: str) -> dict:
+    path = runtime / CAREGIVER_FILE
+    state = _read(path) or caregiver.empty_state()
+    if not state.get("pending"):
+        return {"status": "no_pending_questions"}
+    result = caregiver.apply_answers(state, raw)
+    _write(path, state)
+    result["status"] = "recorded"
+    result.update(caregiver.summary(state))
+    return result
 
 
 def supervise(runtime: Path, interval: float) -> None:
@@ -263,6 +295,15 @@ def render_status(runtime: Path) -> str:
         lines.append(f"  {free[:120]}")
     if s.get("level_advance", {}).get("advanced"):
         lines.append(f"★ レベル上昇 → {s['level_advance']['level']}")
+    care = s.get("caregiver", {})
+    if care.get("human_checked"):
+        lines.append(f"保護者確認 : {care['human_checked']}問回答済み"
+                     f"（物語一致 {care.get('human_story_agreement')}／モデル一致 {care.get('human_model_agreement')}）")
+    pending = s.get("caregiver_questions") or []
+    if pending:
+        lines.append(f"── 質問 {len(pending)}件（答えるには: japanese_reader_v1.py answer \"…\"）──")
+        for i, q in enumerate(pending, 1):
+            lines.append(f"  {i}. {q}")
     if s.get("error"):
         lines.append(f"エラー: {s['error']}")
     return "\n".join(lines)
@@ -270,7 +311,9 @@ def render_status(runtime: Path) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("run", "supervise", "status", "stop"))
+    parser.add_argument("command", choices=("run", "supervise", "status", "stop", "answer"))
+    parser.add_argument("reply", nargs="?", default="",
+                        help="for 'answer': positional answers, e.g. \"2 はい 1\"")
     parser.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
     parser.add_argument("--interval", type=float, default=5.0)
     args = parser.parse_args()
@@ -281,6 +324,8 @@ def main() -> None:
         supervise(args.runtime, args.interval)
     elif args.command == "status":
         print(render_status(args.runtime))
+    elif args.command == "answer":
+        print(json.dumps(answer_questions(args.runtime, args.reply), ensure_ascii=False, indent=1))
     elif args.command == "stop":
         (args.runtime / STOP_FILE).touch()
         print("reading stop requested")

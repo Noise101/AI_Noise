@@ -285,6 +285,15 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
                      f"（基準 {seq.get('baseline_bits_per_char')}、基準超え {seq.get('beats_char_baseline')}）")
     if reading_status.get("level_advance", {}).get("advanced"):
         lines.append(f"★ レベル上昇 → {reading_status['level_advance']['level']}")
+    care = reading_status.get("caregiver", {}) or {}
+    if care.get("human_checked"):
+        lines.append(f"保護者確認     : {care['human_checked']}問（物語一致 "
+                     f"{care.get('human_story_agreement')}／モデル一致 {care.get('human_model_agreement')}）")
+    pending = reading_status.get("caregiver_questions") or []
+    if pending:
+        lines.append(f"── 未回答の質問 {len(pending)}件（answer: "
+                     f"python3 japanese_reader_v1.py answer \"…\"）──")
+        lines.extend(f"  {i}. {q}" for i, q in enumerate(pending, 1))
     return lines
 
 
@@ -1340,7 +1349,8 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
             ("status", "overall_comprehension_rate", "comprehension_trend", "best_strategy")},
         "japanese_reading": report.get("japanese_reading") or {
             key: read_json(runtime / "reading-status.json").get(key) for key in
-            ("cycle", "reading", "curriculum", "comprehension", "retelling", "sequence")},
+            ("cycle", "reading", "curriculum", "comprehension", "retelling", "sequence",
+             "caregiver", "caregiver_questions")},
         "storage": read_json(runtime / "storage-status.json"),
         "global_memory": report.get("global_memory") or read_json(
             runtime / "global-language-memory.json").get("totals", {}),
@@ -1697,7 +1707,8 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             reading_status = japanese_reader.run_once(runtime)
             report["japanese_reading"] = {k: reading_status.get(k) for k in
                                           ("cycle", "books_fetched", "reading", "level_advance",
-                                           "curriculum", "comprehension", "retelling", "sequence")}
+                                           "curriculum", "comprehension", "retelling", "sequence",
+                                           "caregiver", "caregiver_questions")}
         except Exception as reading_error:  # isolate the parallel loop
             report["japanese_reading"] = {"error": f"{type(reading_error).__name__}: {reading_error}"}
         if report.get("autonomy", {}).get("mode") == "capability_plateau":
