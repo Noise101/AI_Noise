@@ -11,7 +11,7 @@ from local_worker_v21 import (_seed_from_title, append_events, developmental_sou
                               discover_curriculum,
                               discover_from_developmental_shelves, enforce_storage_budget, is_transient_error,
                               compact_learning_history, merge_curiosity, read_json,
-                              render_ability_report, render_human_status, status_record,
+                              render_ability_report, render_detail_status, render_human_status, status_record,
                               parser_counterexample_candidate, structural_counterexample_candidate,
                               repeated_grounding_candidate, curriculum_strategy_allowed,
                               learned_curriculum_score, conversation_practice_summary,
@@ -51,133 +51,124 @@ class LocalWorkerTest(unittest.TestCase):
         self.assertGreater(learned_curriculum_score(curriculum, {"reason": "good", "score": 2}),
                            learned_curriculum_score(curriculum, {"reason": "bad", "score": 2}))
 
+    @staticmethod
+    def _es_report(curricula, *, lift=0, locked=True, selected=True, curve=None):
+        """A minimal report shaped like work() builds it for update_autonomy_state."""
+        selected_block = ({"task": "event_plausibility", "model_id": "smoothed_argument",
+                           "lift": lift, "final": {"lift": lift}} if selected and lift else None)
+        return {"global_memory": {"curricula": curricula},
+                "association": {"selected_evaluation": {"correct": 1, "baseline_correct": 1},
+                                "learning_curve": curve or []},
+                "representation": {"selected_evaluation": {"correct": 0}},
+                "event_structure": {"benchmark": {"locked": locked, "eligible_collection_count": 26},
+                                    "selected": selected_block,
+                                    "learning_curve": curve or []},
+                "experience_revision": {"evaluation": {"correct": 1, "total": 100 + curricula},
+                                        "reusable_rules": 0, "failure_patterns": [{"pattern": "x"}]}}
+
     def test_autonomy_switches_to_counterexamples_when_more_tests_add_no_correct_prediction(self):
         curriculum = {}
         state = None
         for index in range(12):
-            report = {"global_memory": {"curricula": 100 + index * 2},
-                      "world_model": {"selected_evaluation": {"lift": 0},
-                                      "benchmark": {"locked": True}},
-                      "experience_revision": {"evaluation": {
-                          "correct": 1, "total": 100 + index * 4, "coverage": 0.1},
-                          "reusable_rules": 0, "failure_patterns": [{"pattern": "x"}]}}
-            state = update_autonomy_state(curriculum, report)
+            state = update_autonomy_state(
+                curriculum, self._es_report(100 + index * 2, lift=0))
         self.assertEqual(state["mode"], "counterexample_hunt")
         self.assertFalse(state["human_intervention_required"])
 
     def test_autonomy_stops_collection_when_bounded_intervention_has_no_gain(self):
         curriculum = {}
         for index in range(12):
-            report = {"global_memory": {"curricula": 100 + index * 2},
-                      "association": {"selected_evaluation": {"correct": 2, "baseline_correct": 4}},
-                      "causal_evaluation": {"evaluation": {"correct": 1, "baseline_correct": 1}},
-                      "representation": {"selected_evaluation": {"correct": 0}},
-                      "world_model": {"selected_evaluation": {"lift": 0},
-                                      "benchmark": {"locked": True}},
-                      "experience_revision": {"evaluation": {"correct": 1, "total": 100 + index * 4},
-                                              "reusable_rules": 0}}
-            state = update_autonomy_state(curriculum, report)
+            state = update_autonomy_state(
+                curriculum, self._es_report(100 + index * 2, lift=0))
         self.assertEqual(state["mode"], "counterexample_hunt")
         start = state["mode_started_curricula"]
         for index in range(1, 22):
-            report["global_memory"]["curricula"] = start + index * 2
-            state = update_autonomy_state(curriculum, report)
+            state = update_autonomy_state(
+                curriculum, self._es_report(start + index * 2, lift=0))
         self.assertEqual(state["mode"], "capability_plateau")
         self.assertTrue(state["human_intervention_required"])
 
     def test_autonomy_returns_to_normal_only_after_measured_gain(self):
         curriculum = {"autonomy_state": {"mode": "counterexample_hunt",
             "mode_started_curricula": 100,
-            "intervention_start_snapshot": {"association_lift": -2, "causal_lift": 0,
-                "representation_correct": 0, "reusable_rules": 0,
-                "world_model_lift": 0, "world_reusable_rules": 0}}}
-        report = {"global_memory": {"curricula": 110},
-                  "association": {"selected_evaluation": {"correct": 5, "baseline_correct": 4}},
-                  "causal_evaluation": {"evaluation": {"correct": 1, "baseline_correct": 1}},
-                  "representation": {"selected_evaluation": {"correct": 0}},
-                  "world_model": {"selected_evaluation": {"lift": 3},
-                                  "benchmark": {"locked": True},
-                                  "reusable_rules": [{"context": "x"}]},
-                  "experience_revision": {"evaluation": {"correct": 1, "total": 120},
-                                          "reusable_rules": 0}}
-        state = update_autonomy_state(curriculum, report)
+            "intervention_start_snapshot": {"event_structure_lift": 0}}}
+        state = update_autonomy_state(curriculum, self._es_report(110, lift=3))
         self.assertEqual(state["mode"], "normal_curriculum")
 
     def test_autonomy_state_exposes_a_per_subsystem_trend_without_gating_on_it(self):
-        declining_curve = [{"training_examples": index, "lift": value}
-                           for index, value in enumerate((8, 7, 6, 5, 2, 1, 0, -1, -2, -3))]
-        report = {"global_memory": {"curricula": 110},
-                  "association": {"selected_evaluation": {"correct": 1, "baseline_correct": 1},
-                                  "learning_curve": declining_curve},
-                  "causal_evaluation": {"evaluation": {"correct": 0, "baseline_correct": 0},
-                                        "learning_curve": []},
-                  "representation": {"selected_evaluation": {"correct": 0}},
-                  "world_model": {"selected_evaluation": {"lift": 0},
-                                  "benchmark": {"locked": True}, "learning_curve": declining_curve},
-                  "experience_revision": {"evaluation": {"correct": 0, "total": 0}}}
-        state = update_autonomy_state({}, report)
+        declining = [{"training_events": index, "lift": value}
+                     for index, value in enumerate((8, 7, 6, 5, 2, 1, 0, -1, -2, -3))]
+        state = update_autonomy_state({}, self._es_report(110, lift=0, curve=declining))
         self.assertEqual(state["trends"]["association_lift"], "declining")
-        self.assertEqual(state["trends"]["world_model_lift"], "declining")
-        self.assertEqual(state["trends"]["causal_lift"], "insufficient_data")
-        # A declining trend must not by itself force a plateau: the significance
-        # gates (via improved()/window comparisons), not the trend, decide that.
+        self.assertEqual(state["trends"]["event_structure_lift"], "declining")
+        # A declining trend must not by itself force a plateau.
         self.assertNotEqual(state["mode"], "capability_plateau")
 
-    def test_rule_count_growth_alone_cannot_clear_plateau(self):
+    def test_selection_lift_without_a_selected_model_cannot_clear_plateau(self):
+        # best_rejected_candidate has a positive selection lift but nothing
+        # cleared the FINAL gate, so event_structure_lift stays 0.
         curriculum = {"autonomy_state": {"mode": "counterexample_hunt",
             "mode_started_curricula": 100,
-            "intervention_start_snapshot": {"world_model_lift": 2,
-                                               "world_reusable_rules": 5}}}
-        report = {"global_memory": {"curricula": 110},
-                  "world_model": {"selected_evaluation": {"lift": 2},
-                                  "benchmark": {"locked": True},
-                                  "reusable_rules": [{}] * 9},
-                  "experience_revision": {"evaluation": {"correct": 0, "total": 0}}}
+            "intervention_start_snapshot": {"event_structure_lift": 0}}}
+        report = self._es_report(110, lift=0, selected=False)
+        report["event_structure"]["best_rejected_candidate"] = {"selection": {"lift": 9}}
         state = update_autonomy_state(curriculum, report)
         self.assertEqual(state["mode"], "counterexample_hunt")
 
-    def test_plateau_is_not_declared_while_world_model_benchmark_is_unmeasurable(self):
-        # Before the v51 benchmark unlocks, world_model_lift is structurally 0, so
-        # no run of curricula may be read as a capability plateau.
+    def test_plateau_is_not_declared_while_benchmark_is_unmeasurable(self):
         curriculum = {}
         state = None
         for index in range(45):
-            report = {"global_memory": {"curricula": 100 + index * 2},
-                      "world_model": {"selected_evaluation": {"lift": 0},
-                                      "benchmark": {"locked": False,
-                                                    "eligible_collection_count": 26}},
-                      "experience_revision": {"evaluation": {"correct": 1, "total": 400},
-                                              "reusable_rules": 0, "failure_patterns": []}}
-            state = update_autonomy_state(curriculum, report)
+            state = update_autonomy_state(
+                curriculum, self._es_report(100 + index * 2, lift=0, locked=False))
         self.assertEqual(state["mode"], "normal_curriculum")
         self.assertFalse(state["human_intervention_required"])
 
+    def test_plateau_detector_does_not_compare_across_the_redesign(self):
+        # Pre-redesign snapshots (no schema:2) in the window must not be read as
+        # a measurable plateau, even though they carry benchmark_locked.
+        curriculum = {"capability_history": [
+            {"curricula": 1400 + i, "benchmark_locked": True, "world_model_lift": 0}
+            for i in range(15)]}
+        for index in range(12):
+            state = update_autonomy_state(
+                curriculum, self._es_report(1500 + index * 2, lift=0))
+        # only the new schema-2 snapshots count; not yet 10 spanning >= 20 curricula
+        self.assertIn(state["mode"], {"normal_curriculum", "counterexample_hunt"})
+
+    def test_pre_redesign_intervention_state_is_reset_not_escalated(self):
+        # A counterexample_hunt recorded against the retired world_model_lift
+        # signal (no event_structure_lift key) must be dropped, not carried
+        # forward into a spurious capability_plateau after 40 curricula.
+        curriculum = {"autonomy_state": {"mode": "counterexample_hunt",
+            "mode_started_curricula": 1693,
+            "intervention_start_snapshot": {"curricula": 1693, "world_model_lift": 0,
+                                            "benchmark_locked": True}}}
+        state = update_autonomy_state(curriculum, self._es_report(1760, lift=0))
+        self.assertEqual(state["mode"], "normal_curriculum")
+        self.assertIsNone(state["intervention_start_snapshot"])
+
     def test_persisted_plateau_is_released_when_benchmark_still_not_ready(self):
-        # A plateau written by the pre-fix logic must not trap the worker forever.
         curriculum = {"autonomy_state": {"mode": "capability_plateau",
             "mode_started_curricula": 1418,
-            "intervention_start_snapshot": {"world_model_lift": 0, "curricula": 1418},
+            "intervention_start_snapshot": {"event_structure_lift": 0, "curricula": 1418},
             "human_intervention_required": True}}
-        report = {"global_memory": {"curricula": 1460},
-                  "world_model": {"selected_evaluation": {"lift": 0},
-                                  "benchmark": {"locked": False}},
-                  "experience_revision": {"evaluation": {"correct": 0, "total": 0}}}
-        state = update_autonomy_state(curriculum, report)
+        state = update_autonomy_state(
+            curriculum, self._es_report(1460, lift=0, locked=False))
         self.assertEqual(state["mode"], "normal_curriculum")
         self.assertFalse(state["human_intervention_required"])
         self.assertIsNone(state["intervention_start_snapshot"])
 
     def test_collection_progress_detects_a_stall_and_recovers_on_growth(self):
         curriculum = {}
-        world_model = {"benchmark": {"locked": False, "eligible_collection_count": 5}}
+        event_structure = {"benchmark": {"locked": False, "eligible_collection_count": 5}}
         stalled = False
         for _ in range(COLLECTION_STALL_ROUNDS - 1):
-            stalled = update_collection_progress(curriculum, world_model)
+            stalled = update_collection_progress(curriculum, event_structure)
         self.assertFalse(stalled)
-        self.assertTrue(update_collection_progress(curriculum, world_model))
-        # A newly admitted independent collection resets the stall counter.
-        world_model = {"benchmark": {"locked": False, "eligible_collection_count": 6}}
-        self.assertFalse(update_collection_progress(curriculum, world_model))
+        self.assertTrue(update_collection_progress(curriculum, event_structure))
+        event_structure = {"benchmark": {"locked": False, "eligible_collection_count": 6}}
+        self.assertFalse(update_collection_progress(curriculum, event_structure))
         self.assertEqual(curriculum["collection_progress"]["unchanged_rounds"], 0)
 
     def test_collection_progress_is_irrelevant_once_benchmark_is_locked(self):
@@ -298,14 +289,14 @@ class LocalWorkerTest(unittest.TestCase):
     def test_append_events_writes_one_jsonl_line_per_event_with_module_and_curricula(self):
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)
-            append_events(runtime, "world_model_v51", 1500,
+            append_events(runtime, "event_structure_v1", 1500,
                           [{"event_type": "benchmark_locked", "before": {"locked": False},
                             "after": {"locked": True}, "reason": "example"}])
-            append_events(runtime, "world_model_v51", 1500, [])  # a no-op must not touch the file
+            append_events(runtime, "event_structure_v1", 1500, [])  # a no-op must not touch the file
             lines = (runtime / "events.jsonl").read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(lines), 1)
             record = json.loads(lines[0])
-            self.assertEqual(record["module"], "world_model_v51")
+            self.assertEqual(record["module"], "event_structure_v1")
             self.assertEqual(record["curricula"], 1500)
             self.assertEqual(record["event_type"], "benchmark_locked")
             self.assertIn("ts", record)
@@ -313,7 +304,7 @@ class LocalWorkerTest(unittest.TestCase):
     def test_append_events_with_no_events_does_not_create_the_file(self):
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)
-            append_events(runtime, "world_model_v51", 0, [])
+            append_events(runtime, "event_structure_v1", 0, [])
             self.assertFalse((runtime / "events.jsonl").exists())
 
     def test_rotate_events_log_archives_the_oldest_lines_past_the_threshold(self):
@@ -338,34 +329,34 @@ class LocalWorkerTest(unittest.TestCase):
             self.assertFalse(rotate_events_log(runtime)["rotated"])
 
     def test_decision_replay_reconstructs_the_decision_sequence_from_the_log_alone(self):
-        """Verifies decision replay (not full state replay, see world_model_v51's
-        module docstring): reading events.jsonl alone -- never touching the
-        world-model snapshot -- must recover when and why the benchmark locked
-        and the selected mode switched."""
-        from world_model_v51 import train_and_evaluate
-        from test_world_model_v51 import noisy_markov_chain_audit
-        audit = noisy_markov_chain_audit()
+        """Decision replay (not full state replay, see event_structure_v1's
+        docstring): reading events.jsonl alone -- never touching the
+        event-structure snapshot -- must recover when the benchmark locked and
+        the selected model switched."""
+        from event_structure_v1 import train_and_evaluate
+        from test_event_structure_v1 import verified, learnable_sequences
+        data = verified(learnable_sequences(60))
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)
-            first = train_and_evaluate(audit)
-            append_events(runtime, "world_model_v51", 100, first.pop("emitted_events", []))
+            first = train_and_evaluate(data)
+            append_events(runtime, "event_structure_v1", 100, first.pop("emitted_events", []))
             forced_previous = dict(first)
-            forced_previous["selected_mode"] = "some_other_model_id"
-            second = train_and_evaluate(audit, forced_previous)
-            append_events(runtime, "world_model_v51", 140, second.pop("emitted_events", []))
+            forced_previous["selected_model_id"] = "some_other_model_id"
+            second = train_and_evaluate(data, forced_previous)
+            append_events(runtime, "event_structure_v1", 140, second.pop("emitted_events", []))
 
             events = [json.loads(line) for line in
                      (runtime / "events.jsonl").read_text(encoding="utf-8").splitlines()]
         lock_events = [event for event in events if event["event_type"] == "benchmark_locked"]
-        mode_events = [event for event in events if event["event_type"] == "selected_mode_changed"]
+        mode_events = [event for event in events if event["event_type"] == "selected_model_changed"]
         self.assertEqual(len(lock_events), 1)
         self.assertEqual(lock_events[0]["curricula"], 100)
         self.assertFalse(lock_events[0]["before"]["locked"])
         self.assertTrue(lock_events[0]["after"]["locked"])
         self.assertEqual(len(mode_events), 1)
         self.assertEqual(mode_events[0]["curricula"], 140)
-        self.assertEqual(mode_events[0]["before"]["selected_mode"], "some_other_model_id")
-        self.assertEqual(mode_events[0]["after"]["selected_mode"], second["selected_mode"])
+        self.assertEqual(mode_events[0]["before"]["selected_model_id"], "some_other_model_id")
+        self.assertEqual(mode_events[0]["after"]["selected_model_id"], second["selected_model_id"])
 
     def test_human_status_explains_health_and_baselines_in_japanese(self):
         status = {"phase": "between_rounds", "seed": "fox grapes",
@@ -374,10 +365,14 @@ class LocalWorkerTest(unittest.TestCase):
                   "global_memory": {"curricula": 12, "word_forms": 100,
                                     "grounded_word_forms": 40, "quality_events": 30},
                   "mastery": {"weakest_dimension": "associations"},
-                  "association": {"evaluation": {"correct": 2, "baseline_correct": 4,
-                                                    "total": 20}, "reinforced": 1, "weakened": 3},
-                  "causal_evaluation": {"supported_hypotheses": 0,
-                      "evaluation": {"correct": 4, "baseline_correct": 4, "total": 20}},
+                  "event_structure": {"selected_model_id": "frequency_baseline",
+                      "selection_status": "no_model_beats_corrected_selection_baseline",
+                      "benchmark": {"locked": True}, "selected": None,
+                      "evaluations": [
+                          {"task": "event_plausibility", "selection": {
+                              "correct": 2, "baseline_correct": 4, "total": 20}},
+                          {"task": "verb_cloze", "selection": {
+                              "correct": 4, "baseline_correct": 4, "total": 20}}]},
                   "representation": {"selected_evaluation": {"correct": 0, "total": 20,
                                                                  "coverage": 0.1}},
                   "error_memory": {"recognized_errors": 5, "unresolved_errors": 3},
@@ -386,47 +381,46 @@ class LocalWorkerTest(unittest.TestCase):
         rendered = render_human_status(status, now_epoch=1788220805, process_alive=True)
         self.assertIn("正常に稼働", rendered)
         self.assertIn("次の処理を準備中", rendered)
-        self.assertIn("連想予測", rendered)
+        self.assertIn("妥当性判定", rendered)
         self.assertIn("基準より下", rendered)
-        self.assertIn("因果予測", rendered)
-        self.assertIn("基準と同じ", rendered)
+        self.assertIn("因果予測       : 評価不能", rendered)
+        self.assertIn("動詞クローズ", rendered)
         self.assertIn("管理対象合計   : 1.0GB", rendered)
         self.assertIn("実用会話       : 未到達", rendered)
 
-    def test_human_status_shows_learning_curve_trends(self):
-        status = {"phase": "learning", "association": {"evaluation": {"correct": 1},
-                                                        "learning_curve_trend": "declining"},
-                  "causal_evaluation": {"evaluation": {"correct": 0},
-                                        "learning_curve_trend": "improving"},
-                  "world_model": {"selected_evaluation": {"lift": 0},
-                                  "benchmark": {"locked": True}, "selected_mode": "frequency_baseline",
-                                  "learning_curve_trend": "flat"}}
+    def test_human_status_shows_learning_curve_trend(self):
+        status = {"phase": "learning",
+                  "event_structure": {"selected_model_id": "frequency_baseline",
+                      "benchmark": {"locked": True}, "selected": None, "evaluations": [],
+                      "learning_curve_trend": "improving"}}
         rendered = render_human_status(status, now_epoch=1788220805, process_alive=True)
-        self.assertIn("傾向: 悪化傾向", rendered)
-        self.assertIn("傾向: 改善傾向", rendered)
-        self.assertIn("傾向: 横ばい", rendered)
+        self.assertIn("改善傾向", rendered)
 
     def test_ability_report_shows_honest_claims_and_examples(self):
         status = {"global_memory": {"word_forms": 100, "grounded_word_forms": 40},
                   "verified_experience": {"accepted_sentences": 30},
-                  "association": {"selected_evaluation": {
-                      "correct": 6, "baseline_correct": 4, "total": 10}},
-                  "causal_evaluation": {"evaluation": {
-                      "correct": 1, "baseline_correct": 1, "total": 5}},
                   "representation": {"selected_evaluation": {"correct": 0, "total": 5}},
                   "experience_revision": {"reusable_rules": 0},
+                  "event_structure": {"benchmark": {"locked": True}, "selected": None,
+                                      "selection_status": "no_model_beats_corrected_selection_baseline",
+                                      "evaluations": []},
                   "abstraction_world": {"open_transfer_gates": {"a": True, "b": False}}}
-        association = {"selected_mode": "learned_structural_bands",
-                       "selected_evaluation": {"correct": 6, "baseline_correct": 4, "total": 10},
-                       "selected_predictions": [{"prior": "fox|saw|grapes",
-                           "prediction": "mid", "observed": "mid", "correct": True,
-                           "baseline_correct": False}]}
-        rendered = render_ability_report(status, association, {"evaluation": {
-            "correct": 1, "baseline_correct": 1, "total": 5}})
+        event_structure = {
+            "selected_model_id": "event_plausibility:smoothed_argument",
+            "evaluations": [
+                {"task": "event_plausibility", "model_id": "smoothed_argument",
+                 "selection": {"correct": 6, "baseline_correct": 4, "total": 10, "lift": 2}},
+                {"task": "verb_cloze", "model_id": "smoothed_argument",
+                 "selection": {"correct": 3, "baseline_correct": 3, "total": 10, "lift": 0}}],
+            "final_attempt": {"task": "event_plausibility", "model_id": "smoothed_argument",
+                              "evaluation": {"correct": 7, "baseline_correct": 5, "total": 10, "lift": 2}},
+            "counterexamples": [{"subject": "fox", "object": "grapes",
+                                 "predicted": "said", "observed": "ate", "correct": False}]}
+        rendered = render_ability_report(status, event_structure)
         self.assertIn("実用会話       : 未到達", rendered)
-        self.assertIn("単純基準より +2件", rendered)
-        self.assertIn("fox が saw", rendered)
-        self.assertIn("Noise=中頻度の行動 / 正解=中頻度の行動", rendered)
+        self.assertIn("妥当性判定", rendered)
+        self.assertIn("lift +2", rendered)
+        self.assertIn("Noise=said / 実際=ate", rendered)
 
     def test_human_status_warns_when_process_is_dead_and_heartbeat_stale(self):
         status = {"phase": "learning", "heartbeat": "2026-09-01T00:00:00Z", "pid": 123}
@@ -435,17 +429,89 @@ class LocalWorkerTest(unittest.TestCase):
         self.assertIn("ワーカープロセスが停止", rendered)
         self.assertIn("最終更新が2分以上前", rendered)
 
-    def test_status_exposes_falsifiable_causal_evaluation(self):
+    def test_detail_status_consolidates_admissions_modules_and_strategy_diff(self):
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)
-            write_json(runtime / "causal-memory.json", {
-                "supported_hypotheses": 0,
-                "evaluation": {"accuracy": 0.1, "baseline_accuracy": 0.1},
-                "limitations": ["event parser is still shallow"],
-            })
+            write_json(runtime / "status.json", {"phase": "learning", "rounds": 42,
+                                                 "seed": "the fox"})
+            write_json(runtime / "curriculum-state.json", {
+                "autonomy_state": {"mode": "normal_curriculum"},
+                "admission_log": [
+                    {"seed": "wolf tale", "at_curricula": 900, "admitted": True, "score": 0.71,
+                     "metrics": {"narrative_ratio": 0.9, "short_sentence_ratio": 0.8,
+                                 "vocabulary_fit": 1.0, "known_word_ratio": 0.95,
+                                 "subject_recurrence": 0.3, "dialogue_ratio": 0.1},
+                     "admission_reason": "developmental_passage",
+                     "source_urls": ["https://example/wolf"]},
+                    {"seed": "dense treatise", "at_curricula": 901, "admitted": False,
+                     "score": 0.4, "metrics": {}, "reasons": ["combined developmental score below 0.68"],
+                     "admission_reason": "outside_current_level", "source_urls": []},
+                ],
+                "strategy_performance": {
+                    "unvisited page in an observed story collection": {
+                        "attempts": 100, "admitted": 20, "rejected": 80,
+                        "seed_outcomes": {"a": True}}}})
+            write_json(runtime / "experience-revision.json", {"summary": {
+                "selected_context": "one_event", "reusable_rules": 0,
+                "evaluation": {"correct": 1, "baseline_correct": 1, "total": 30}}})
+            write_json(runtime / "event-structure.json", {
+                "benchmark": {"locked": True, "status": "ready", "collection_count": 90,
+                              "source_count": 134, "selection_events": 267, "final_events": 266,
+                              "selection_regime": "collection_disjoint_within_event_v1",
+                              "fingerprint": "abcd"},
+                "training": {"events": 1870, "verb_vocabulary": 79},
+                "selected_model_id": "event_plausibility:smoothed_argument",
+                "selection_status": "accepted_final_gain",
+                "learning_curve_trend": "improving", "corrupters": ["verb_swap"],
+                "final_queries_used": 1, "final_query_budget": 5,
+                "selected": {"task": "event_plausibility", "final": {"lift": 24}},
+                "final_attempt": {"task": "event_plausibility", "model_id": "smoothed_argument",
+                                  "evaluation": {"correct": 160, "baseline_correct": 136,
+                                                 "total": 266, "lift": 24, "one_sided_sign_p": 4e-06}},
+                "evaluations": [
+                    {"task": "verb_cloze", "model_id": "smoothed_argument",
+                     "selection": {"correct": 26, "baseline_correct": 31, "total": 267,
+                                   "lift": -5, "coverage": 0.6, "one_sided_sign_p": 0.9}},
+                    {"task": "event_plausibility", "model_id": "smoothed_argument",
+                     "selection": {"correct": 131, "baseline_correct": 118, "total": 267,
+                                   "lift": 13, "coverage": 0.6, "one_sided_sign_p": 0.0004}}]})
+
+            first = render_detail_status(runtime)
+            self.assertIn("wolf tale", first)
+            self.assertIn("vocabulary_fit=1.0", first)
+            self.assertIn("combined developmental score below 0.68", first)
+            self.assertIn("event_plausibility:smoothed_argument", first)
+            self.assertIn("FINAL event_plausibility", first)
+            self.assertIn("[PASS]", first)
+            self.assertIn("locked=True", first)
+            self.assertIn("初回実行", first)
+            self.assertTrue((runtime / "status-detail-snapshot.json").exists())
+
+            # Advance one strategy attempt; the second run must show the delta.
+            state = read_json(runtime / "curriculum-state.json")
+            bucket = state["strategy_performance"]["unvisited page in an observed story collection"]
+            bucket["attempts"] += 3
+            bucket["admitted"] += 1
+            bucket["rejected"] += 2
+            write_json(runtime / "curriculum-state.json", state)
+
+            second = render_detail_status(runtime)
+            self.assertIn("前回実行", second)
+            self.assertIn("Δ試行+3 採用+1 不採用+2", second)
+
+    def test_status_record_reports_honest_causal_and_event_structure_shims(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            write_json(runtime / "event-structure.json", {
+                "benchmark": {"locked": True}, "selection_status": "accepted_final_gain",
+                "selected_model_id": "event_plausibility:smoothed_argument",
+                "learning_curve": [], "learning_curve_trend": "improving",
+                "evaluations": [{"task": "event_plausibility",
+                                 "selection": {"correct": 8, "baseline_correct": 5, "total": 20}}]})
             status = status_record("seed", runtime, "learning", 1)
             self.assertEqual(status["causal_evaluation"]["supported_hypotheses"], 0)
-            self.assertEqual(status["causal_evaluation"]["evaluation"]["accuracy"], 0.1)
+            self.assertIn("retired", status["causal_evaluation"]["limitations"][0])
+            self.assertEqual(status["association"]["selected_evaluation"]["correct"], 8)
 
     @patch("local_worker_v21.discover_from_developmental_shelves", return_value=[])
     @patch("local_worker_v21.rediscover_from_history", return_value=[])

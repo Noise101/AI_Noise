@@ -49,9 +49,23 @@ AI_Noise belief update
 
 If the helper is absent, slow, malformed, repetitive, or low quality, the pipeline continues with autonomous enumeration and search. A larger local model is not a remedy for a missing learning mechanism.
 
+## Predict within the event, not the next event
+
+The parsed corpus (isolated `subject|verb|object` clauses from real 19th-century
+prose, coreference not resolved) contains no measurable signal for *next-event*
+prediction: a verb bigram scores below the frequency baseline, and every context
+key is seen with exactly one outcome. `event_structure_v1` therefore predicts
+structure *inside* one event — `verb_cloze` (rank the observed verb among all
+known verbs given its arguments) and `event_plausibility` (score a real event
+above a corrupted one) — which do beat the baseline on a source-disjoint
+holdout. `world_model_v51`, `association_learning_v33`, `causal_experiment_v28`
+and `representation_learning_v31` (all next-event predictors) were retired.
+Causal succession prediction is honestly unevaluated until the corpus carries
+contrastive or interventional evidence (invariant 6).
+
 ## Decision replay, not state replay
 
-`.local/events.jsonl` is an append-only, cross-module log (`{ts, curricula, module, event_type, before, after, reason}` per line) of discrete state-changing decisions: a benchmark locking, a selected representation switching, a reusable rule appearing or disappearing. It exists to answer "when and why did the system decide this" without trusting a human's memory of a status snapshot, and it coexists with (does not replace) each module's own bounded `revision_history`-style fields, which the algorithms themselves still read.
+`.local/events.jsonl` is an append-only, cross-module log (`{ts, curricula, module, event_type, before, after, reason}` per line) of discrete state-changing decisions: a benchmark locking, a selected model switching. It exists to answer "when and why did the system decide this" without trusting a human's memory of a status snapshot, and it coexists with (does not replace) each module's own bounded `revision_history`-style fields, which the algorithms themselves still read.
 
 This is **decision replay, not full state replay**. Reading `events.jsonl` alone can reconstruct the *sequence of decisions* a module made and why. It cannot reconstruct the *evaluation numbers* behind those decisions (a `correct`/`total`/`lift` at some past point) — every module here recomputes those from scratch from the raw audit each call; nothing is derived solely from accumulated events. Reproducing a past number still requires re-running the owning module against the historical audit data, exactly as before this log existed. Do not describe this mechanism, or extend it, as if it captured a replayable world state — it captures a history of decisions about that state.
 
@@ -68,6 +82,6 @@ Before merging a version, answer:
 - Is the reported improvement measured on frozen examples that never selected the model?
 - Does the paired comparison beat the exact baseline on both selection and final source sets?
 
-These gates are exercised by `test_architecture_contract.py`, `test_world_model_v51.py`, and `test_local_worker_v21.py`. Passing them prevents several known false claims, but it does not prove intelligence or semantic understanding.
+These gates are exercised by `test_architecture_contract.py`, `test_event_structure_v1.py`, and `test_local_worker_v21.py`. Passing them prevents several known false claims, but it does not prove intelligence or semantic understanding.
 
 If these questions cannot be answered, the version is not an advance toward the project objective.

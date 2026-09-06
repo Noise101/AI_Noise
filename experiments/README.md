@@ -34,12 +34,10 @@ python3 -m unittest discover -v
 - `local_conversation_v25.py`: 自作した問いによるOllamaとの短い会話練習（証拠スコア0）
 - `compact_runtime_v26.py`: seed固有知識を保った冗長台帳の除去とストレージ回収
 - `global_memory_v27.py`: 全題材の語彙・会話・出来事・概念を一つの正本へ統合
-- `causal_experiment_v28.py`: 独立文脈と未見holdoutで因果候補を事前予測・反証
 - `narrative_event_v29.py`: 書誌・曖昧文を棄却理由付きで隔離する透明な出来事抽出
 - `causal_lab_v30.py`: 操作可能な未知小世界で能動介入能力だけを検査（世界知識には加算しない）
-- `representation_learning_v31.py`: 表現候補をtrain内で形成し未見予測が改善した場合だけ採用・改訂
 - `developmental_curriculum_v32.py`: 現在能力への適合度で資料の記憶採用・延期・派生停止を決定
-- `association_learning_v33.py`: 場面・役割・時間順の連想を形成し、未見予測の正誤で強化・弱化
 - `epistemic_scaffold_v34.py`: 人間科学の将来学習用に観測と未記入の解釈欄を分離保存
 - `error_memory_v35.py`: 誤予測・反証・訂正内容を重複なく保存する横断的な誤り記憶
 - `visual_memory_v36.py`: 出典付き縮小画像を視覚特徴として観測し、言語との未検証連想を保存
+- `event_structure_v1.py`: world_model_v51／association_learning_v33／causal_experiment_v28／representation_learning_v31 を置換。次イベント予測に有意信号がないため、イベント内部構造（動詞クローズ・妥当性判定）を出典分離の固定ベンチマークで評価

@@ -15,6 +15,7 @@ import time
 import traceback
 import urllib.parse
 import shutil
+from collections import Counter
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -26,11 +27,10 @@ from local_conversation_v25 import practice_once
 from compact_runtime_v26 import compact_historical_seed_reports, compact_runtime
 from curriculum_scoring import curriculum_strategy_allowed, learned_curriculum_score
 from global_memory_v27 import empty_memory, mastery_report, merge_report
-from causal_experiment_v28 import evaluate_causal_views
+from event_structure_v1 import (SELECTION_ALPHA, classify_trend, passes_gain_gate,
+                                train_and_evaluate as train_event_structure)
 from causal_lab_v30 import run_lab
-from representation_learning_v31 import evaluate_representations
 from developmental_curriculum_v32 import assess_source_quality
-from association_learning_v33 import AssociationLearner
 from epistemic_scaffold_v34 import observe_report, rebuild_scaffold, summarize as summarize_scaffold
 from error_memory_v35 import empty_error_memory, update_error_memory
 from visual_memory_v36 import (acquire_one as acquire_visual, empty_visual_memory,
@@ -50,7 +50,6 @@ from abstraction_world_v46 import (assess_open_transfer, empty_abstraction_memor
                                    learn_abstractions)
 from verified_experience_v47 import select_experience_profile
 from experience_rule_learning_v50 import learn_experience_rules
-from world_model_v51 import classify_trend, train_and_evaluate as train_world_model
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -110,6 +109,55 @@ def percent(correct: int | float, total: int | float) -> str:
     return "評価前" if not total else f"{100 * correct / total:.1f}%"
 
 
+# --- event_structure_v1 back-compat shims -----------------------------------
+# The event_structure_v1 redesign replaced world_model_v51 / association_learning
+# / causal_experiment / representation_learning (all next-event predictors, a
+# target with no measurable signal in this corpus) with one within-event model.
+# abstraction_world_v46, error_memory_v35 and mastery_drive_v24 still expect the
+# retired modules' {evaluation, selected_evaluation, ...} shapes, so the worker
+# feeds them these reduced views onto the one event_structure report.
+
+def _es_task_eval(event_structure: dict, task: str) -> dict:
+    for item in event_structure.get("evaluations", []):
+        if item.get("task") == task:
+            return dict(item.get("selection", {}))
+    return {"correct": 0, "baseline_correct": 0, "total": 0, "coverage": 0.0, "lift": 0}
+
+
+def representation_shim(event_structure: dict) -> dict:
+    """verb_cloze stands in for 'which event encoding predicts held-out best'."""
+    evaluation = _es_task_eval(event_structure, "verb_cloze")
+    beats = (event_structure.get("selected") or {}).get("task") == "verb_cloze"
+    scheme = "argument_conditional" if beats else "surface"
+    return {"selected_scheme": scheme,
+            "selection_status": event_structure.get("selection_status"),
+            "selected_evaluation": {"scheme": scheme, **evaluation},
+            "evaluations": [{"scheme": scheme, **evaluation}], "revisions": []}
+
+
+def association_shim(event_structure: dict) -> dict:
+    """event_plausibility stands in for 'do learned cues beat the baseline'."""
+    evaluation = _es_task_eval(event_structure, "event_plausibility")
+    return {"evaluation": evaluation, "selected_evaluation": evaluation,
+            "selected_mode": "event_plausibility", "predictive_associations": [],
+            "predictions": [], "selected_predictions": [], "reinforced": 0, "weakened": 0,
+            "learning_curve": event_structure.get("learning_curve", []),
+            "learning_curve_trend": event_structure.get("learning_curve_trend",
+                                                        "insufficient_data"),
+            "warning": "event-structure plausibility scoring; not causal evidence"}
+
+
+def causal_shim(event_structure: dict) -> dict:
+    """This corpus has no intervention data and no repeated prior->outcome pairs;
+    causal succession prediction was retired in the redesign."""
+    return {"supported_hypotheses": 0, "selected_view": "none", "view_evaluations": {},
+            "evaluation": {"correct": 0, "baseline_correct": 0, "total": 0, "coverage": 0.0},
+            "preregistered_predictions": [], "matched_contrasts": [],
+            "limitations": ["no contrastive or interventional evidence in the corpus; "
+                            "causal succession prediction retired in event_structure_v1"],
+            "learning_curve": [], "learning_curve_trend": "insufficient_data"}
+
+
 def _competency_ja(social_world: dict, name: str) -> str:
     result = social_world.get("competencies", {}).get(name, {})
     correct, total = result.get("correct", 0), result.get("total", 0)
@@ -128,28 +176,31 @@ def capability_summary_lines(status: dict) -> list[str]:
     """Translate telemetry into conservative, user-facing capability claims."""
     global_memory = status.get("global_memory", {})
     verified = status.get("verified_experience", {})
-    association = status.get("association", {})
-    exact = association.get("evaluation", {})
-    structural = association.get("selected_evaluation", association.get("evaluation", {}))
-    causal_evaluation = status.get("causal_evaluation", {})
-    causal = causal_evaluation.get("evaluation", {})
-    representation = status.get("representation", {}).get("selected_evaluation", {})
     revision = status.get("experience_revision", {})
-    abstraction = status.get("abstraction_world", {})
-    gates = abstraction.get("open_transfer_gates", {})
-    world_model = status.get("world_model", {})
-    world_eval = world_model.get("selected_evaluation", {})
-    benchmark = world_model.get("benchmark", {})
-    structural_lift = structural.get("correct", 0) - structural.get("baseline_correct", 0)
-    causal_lift = causal.get("correct", 0) - causal.get("baseline_correct", 0)
-    world_lift = world_eval.get("lift", 0)
-    association_trend = TREND_JA.get(association.get("learning_curve_trend"), "データ不足")
-    causal_trend = TREND_JA.get(causal_evaluation.get("learning_curve_trend"), "データ不足")
-    world_trend = TREND_JA.get(world_model.get("learning_curve_trend"), "データ不足")
-    level = ("独立作品集が揃うまで評価を保留し、訓練経験を蓄積している段階"
-             if not benchmark.get("locked") else
-             "固定した未知作品で経験遷移を予測できる段階" if world_lift > 0 else
-             "状態世界モデルを固定未知作品で検証している段階")
+    gates = status.get("abstraction_world", {}).get("open_transfer_gates", {})
+    representation = status.get("representation", {}).get("selected_evaluation", {})
+    event_structure = status.get("event_structure", {})
+    benchmark = event_structure.get("benchmark", {})
+    selected = event_structure.get("selected") or {}
+    trend = TREND_JA.get(event_structure.get("learning_curve_trend"), "データ不足")
+
+    def es_line(label: str, task: str) -> str:
+        evaluation = next((item.get("selection", {}) for item in event_structure.get("evaluations", [])
+                           if item.get("task") == task), {})
+        total = evaluation.get("total", 0)
+        if not total:
+            return f"{label} : 評価前"
+        lift = evaluation.get("correct", 0) - evaluation.get("baseline_correct", 0)
+        confirmed = "（固定確認セットで確定）" if selected.get("task") == task else ""
+        return (f"{label} : {evaluation.get('correct', 0)}/{total}、"
+                f"単純基準より {lift:+d}件{confirmed}")
+
+    if not benchmark.get("locked"):
+        level = "固定ベンチマークが揃うまで評価を保留し、訓練経験を蓄積している段階"
+    elif selected:
+        level = "固定した未知作品でイベント内部構造を予測できる段階"
+    else:
+        level = "イベント内部構造モデルを固定未知作品で検証している段階（まだ基準超えを確認できていない）"
     return [
         f"現在の段階     : {level}",
         "実用会話       : 未到達（自由な質問応答ができるとはまだ確認されていない）",
@@ -158,25 +209,22 @@ def capability_summary_lines(status: dict) -> list[str]:
          "（説明能力とは別）"),
         (f"出来事の読取り : {verified.get('accepted_sentences', verified.get('events', 0)):,}文を"
          f"検証済み出来事として保持（完全な文章理解ではない）"),
-        (f"旧式・具体行動 : {exact.get('correct', 0)}/{exact.get('total', 0)}、"
-         f"単純基準より {exact.get('correct', 0) - exact.get('baseline_correct', 0):+d}件"),
-        (f"旧式・頻度分類 : {structural.get('correct', 0)}/{structural.get('total', 0)}、"
-         f"単純基準より {structural_lift:+d}件（傾向: {association_trend}）"),
-        (f"因果予測       : {causal.get('correct', 0)}/{causal.get('total', 0)}、"
-         f"単純基準より {causal_lift:+d}件（因果理解の成立とはまだ言えない、傾向: {causal_trend}）"),
+        es_line("動詞クローズ  ", "verb_cloze"),
+        es_line("妥当性判定    ", "event_plausibility"),
+        f"予測傾向       : {trend}（{event_structure.get('selection_status', '評価前')}）",
+        "因果予測       : 評価不能（この資料には対比・介入の証拠がなく、v1で予測対象から除外）",
         (f"抽象化・転用   : 実教材 {sum(bool(value) for value in gates.values())}/4項目、"
          f"抽象予測 {representation.get('correct', 0)}/{representation.get('total', 0)}、"
          f"再利用可能規則 {revision.get('reusable_rules', 0)}件"),
-        ((f"状態世界モデル : 評価保留（適格な独立作品集 "
-          f"{benchmark.get('eligible_collection_count', 0)}件、選抜/確認 各"
-          f"{benchmark.get('candidate_selection_examples', 0)}/"
-          f"{benchmark.get('minimum_selection_examples', 0)}件、訓練 "
-          f"{benchmark.get('candidate_train_examples', 0)}/"
-          f"{benchmark.get('minimum_train_examples', 0)}件）")
+        ((f"内部構造モデル : 評価保留（適格な独立作品集 "
+          f"{benchmark.get('eligible_collection_count', 0)}件、選抜/確認 "
+          f"{benchmark.get('candidate_selection_events', 0)}/{benchmark.get('candidate_final_events', 0)}件、"
+          f"訓練 {benchmark.get('candidate_train_events', 0)}/{benchmark.get('minimum_train_events', 0)}件）")
          if not benchmark.get("locked") else
-         (f"状態世界モデル : {world_eval.get('correct', 0)}/{world_eval.get('total', 0)}、"
-          f"固定基準より {world_eval.get('lift', 0):+d}件"
-          f"（{world_model.get('selected_mode', '評価前')}、傾向: {world_trend}）")),
+         (f"内部構造モデル : 選択モデル {event_structure.get('selected_model_id', '評価前')}、"
+          f"確認セット lift {(selected.get('final') or selected).get('lift', 0):+d}件"
+          if selected else
+          f"内部構造モデル : 基準超えモデルなし（傾向: {trend}）")),
     ]
 
 
@@ -192,40 +240,158 @@ def _prediction_ja(value: str | None) -> str:
             "common": "よく現れる行動"}.get(value, value or "なし")
 
 
-def render_ability_report(status: dict, association_memory: dict,
-                          causal_memory: dict) -> str:
+def render_detail_status(runtime: Path) -> str:
+    """One consolidated audit view for progress reviews: recent admission
+    decisions with score breakdowns, the event_structure_v1 benchmark state and
+    per-task evaluations, and the change in collection progress / strategy
+    performance since this command last ran."""
+    curriculum = read_json(runtime / "curriculum-state.json")
+    event_structure = read_json(runtime / "event-structure.json")
+    revision = read_json(runtime / "experience-revision.json")
+    status = read_json(runtime / "status.json")
+
+    def ev(e):
+        if not e or not e.get("total"):
+            return "(評価データなし)"
+        return (f"correct={e.get('correct')}/{e.get('total')} "
+                f"baseline_correct={e.get('baseline_correct')} "
+                f"lift={(e.get('correct') or 0) - (e.get('baseline_correct') or 0):+d}")
+
+    lines = ["Noise 詳細監査ビュー",
+             "=" * 46,
+             f"生成時刻 : {time.strftime('%Y-%m-%d %H:%M:%SZ', time.gmtime())}",
+             f"phase    : {status.get('phase', '不明')}  rounds: {status.get('rounds', 0)}  "
+             f"seed: {status.get('seed', '不明')}",
+             f"autonomy : {curriculum.get('autonomy_state', {}).get('mode', '不明')}"]
+
+    admission_log = curriculum.get("admission_log", [])
+    admitted_recent = [e for e in admission_log if e.get("admitted")][-20:]
+    rejected_recent = [e for e in admission_log if not e.get("admitted")]
+    lines += ["", f"直近の採用教材 (最大20件 / 記録{len(admission_log)}件中 採用{sum(e.get('admitted') for e in admission_log)}件)",
+              "-" * 46]
+    if not admission_log:
+        lines.append("  (この機能のデプロイ後に蓄積されます)")
+    for e in reversed(admitted_recent):
+        m = e.get("metrics", {})
+        lines.append(f"[curricula {e.get('at_curricula', '?')}] {e.get('seed', '?')}")
+        lines.append(f"    score={e.get('score')}  理由: {e.get('admission_reason', '')}")
+        lines.append(f"    narrative_ratio={m.get('narrative_ratio')}  short_sentence_ratio={m.get('short_sentence_ratio')}  "
+                     f"subject_recurrence={m.get('subject_recurrence')}  dialogue_ratio={m.get('dialogue_ratio')}")
+        lines.append(f"    vocabulary_fit={m.get('vocabulary_fit')}  (known_word_ratio={m.get('known_word_ratio')})")
+        for url in e.get("source_urls", [])[:2]:
+            lines.append(f"    <- {url}")
+    if rejected_recent:
+        rr = Counter(reason for e in rejected_recent[-60:] for reason in (e.get("reasons") or ["(理由未記録)"]))
+        lines += ["", f"直近の不採用 (直近60件の理由内訳)", "-" * 46]
+        for reason, n in rr.most_common():
+            lines.append(f"  {n:3d}  {reason}")
+
+    lines += ["", "イベント内部構造 (event_structure_v1)", "-" * 46]
+    bm = event_structure.get("benchmark", {})
+    lines.append(f"benchmark        : locked={bm.get('locked')}  status={bm.get('status')}  "
+                 f"regime={bm.get('selection_regime')}")
+    if bm.get("locked"):
+        lines.append(f"                   collections={bm.get('collection_count')} "
+                     f"sources={bm.get('source_count')} "
+                     f"selection={bm.get('selection_events')} final={bm.get('final_events')} "
+                     f"train={event_structure.get('training', {}).get('events')} "
+                     f"verbs={event_structure.get('training', {}).get('verb_vocabulary')} "
+                     f"fingerprint={bm.get('fingerprint')}")
+    else:
+        lines.append(f"                   eligible_collections={bm.get('eligible_collection_count')} "
+                     f"selection={bm.get('candidate_selection_events')}/{bm.get('minimum_selection_events')} "
+                     f"final={bm.get('candidate_final_events')}/{bm.get('minimum_final_events')} "
+                     f"train={bm.get('candidate_train_events')}/{bm.get('minimum_train_events')}")
+    lines.append(f"selected_model   : {event_structure.get('selected_model_id')}  "
+                 f"({event_structure.get('selection_status')})")
+    lines.append(f"trend            : {event_structure.get('learning_curve_trend', '-')}  "
+                 f"corrupters={event_structure.get('corrupters')}  "
+                 f"final_queries={event_structure.get('final_queries_used')}/{event_structure.get('final_query_budget')}")
+    for item in event_structure.get("evaluations", []):
+        s = item.get("selection", {})
+        gate = "PASS" if passes_gain_gate(s, SELECTION_ALPHA) else "—"
+        lines.append(f"  {item.get('task')}:{item.get('model_id')}  "
+                     f"correct={s.get('correct')}/{s.get('total')} base={s.get('baseline_correct')} "
+                     f"lift={s.get('lift'):+d} cov={s.get('coverage')} p={s.get('one_sided_sign_p')} [{gate}]")
+    final = event_structure.get("final_attempt")
+    if final:
+        f = final.get("evaluation", {})
+        lines.append(f"  FINAL {final.get('task')}:{final.get('model_id')}  "
+                     f"correct={f.get('correct')}/{f.get('total')} base={f.get('baseline_correct')} "
+                     f"lift={f.get('lift'):+d} p={f.get('one_sided_sign_p')}")
+    brc = event_structure.get("best_rejected_candidate")
+    if brc:
+        s = brc.get("selection", {})
+        lines.append(f"  best_rejected {brc.get('task')}:{brc.get('model_id')}  "
+                     f"lift={s.get('lift'):+d} p={s.get('one_sided_sign_p')} (未確認)")
+
+    lines += ["", "構造規則 (experience_revision_v37)", "-" * 46]
+    rev_summary = revision.get("summary", {})
+    lines.append(f"selected_context={rev_summary.get('selected_context')}  "
+                 f"reusable_rules={rev_summary.get('reusable_rules')}")
+    lines.append(f"  {ev(rev_summary.get('evaluation', {}))}")
+
+    lines += ["", "収集戦略 (前回の status-detail-ja 実行時点との差分)", "-" * 46]
+    lines.append(f"collection_progress: {json.dumps(curriculum.get('collection_progress'), ensure_ascii=False)}")
+    snapshot_path = runtime / "status-detail-snapshot.json"
+    prev = read_json(snapshot_path)
+    prev_sp = prev.get("strategy_performance", {})
+    cur_sp = curriculum.get("strategy_performance", {})
+    first_run = not prev.get("at")
+    lines.append("(初回実行: 差分の基準がないため現在値のみ表示)" if first_run
+                 else f"(前回実行: {prev['at']})")
+    for reason in sorted(cur_sp, key=lambda r: -cur_sp[r].get("attempts", 0)):
+        c, p = cur_sp[reason], prev_sp.get(reason, {})
+        da = c.get("attempts", 0) - p.get("attempts", 0)
+        dm = c.get("admitted", 0) - p.get("admitted", 0)
+        dr = c.get("rejected", 0) - p.get("rejected", 0)
+        attempts = c.get("attempts", 0)
+        rate = c.get("admitted", 0) / attempts if attempts else 0.0
+        recent_rate = (dm / da) if da > 0 else None
+        if first_run:
+            delta = ""
+        elif da or dm or dr:
+            delta = (f"  Δ試行{da:+d} 採用{dm:+d} 不採用{dr:+d}"
+                     + (f" (この間の採用率{recent_rate:.1%})" if recent_rate is not None else ""))
+        else:
+            delta = "  (前回から変化なし)"
+        lines.append(f"  {reason!r}")
+        lines.append(f"    attempts={attempts} admitted={c.get('admitted', 0)} 累積採用率{rate:.1%}{delta}")
+
+    write_json(snapshot_path, {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "collection_progress": curriculum.get("collection_progress"),
+        "strategy_performance": {k: {kk: vv for kk, vv in v.items() if kk != "seed_outcomes"}
+                                 for k, v in cur_sp.items()}})
+    return "\n".join(lines)
+
+
+def render_ability_report(status: dict, event_structure: dict) -> str:
     """Show what Noise can demonstrate on held-out evidence, with examples."""
     lines = ["Noise 能力確認", "=" * 34, "", "結論", "-" * 34,
              *capability_summary_lines(status), "", "未見データでの実演", "-" * 34]
-    selected = association_memory.get("selected_evaluation", {})
-    mode = association_memory.get("selected_mode", "評価前")
-    lines.append(
-        f"粗い行動分類方式: {mode} — {selected.get('correct', 0)}/{selected.get('total', 0)}、"
-        f"単純基準 {selected.get('baseline_correct', 0)}/{selected.get('total', 0)}")
-    examples = association_memory.get("selected_predictions", [])
-    useful = sorted(examples, key=lambda item: (
-        not (item.get("correct") and not item.get("baseline_correct")),
-        not item.get("correct"), str(item.get("prior"))))[:3]
-    if useful:
-        for index, item in enumerate(useful, 1):
-            result = "正解" if item.get("correct") else "不正解"
-            baseline = "単純基準は不正解" if not item.get("baseline_correct") else "単純基準も正解"
-            lines.extend([f"例{index}: {_event_ja(item.get('prior'))} の次を予測",
-                          f"      Noise={_prediction_ja(item.get('prediction'))} / 正解={_prediction_ja(item.get('observed'))}"
-                          f" → {result}（{baseline}）"])
-    else:
-        lines.append("具体例         : 次回評価更新後に表示可能")
-    causal = causal_memory.get("evaluation", {})
+    for item in event_structure.get("evaluations", []):
+        s = item.get("selection", {})
+        label = {"verb_cloze": "動詞クローズ", "event_plausibility": "妥当性判定"}.get(
+            item.get("task"), item.get("task"))
+        lines.append(
+            f"{label}: {item.get('model_id')} — 選抜 {s.get('correct', 0)}/{s.get('total', 0)}、"
+            f"単純基準 {s.get('baseline_correct', 0)}/{s.get('total', 0)}、lift {s.get('lift', 0):+d}")
+    final = event_structure.get("final_attempt")
+    if final:
+        f = final.get("evaluation", {})
+        lines.append(f"確認セット      : {final.get('task')} — {f.get('correct', 0)}/{f.get('total', 0)}、"
+                     f"単純基準 {f.get('baseline_correct', 0)}/{f.get('total', 0)}、lift {f.get('lift', 0):+d}")
+    for item in event_structure.get("counterexamples", [])[:3]:
+        lines.extend([
+            f"例: {item.get('subject', '?')} … {item.get('object', '')} という項に対する動詞",
+            f"    Noise={item.get('predicted') or 'なし'} / 実際={item.get('observed') or 'なし'}"
+            f" → {'正解' if item.get('correct') else '不正解'}"])
     lines.extend(["", "因果候補の実演", "-" * 34,
-                  (f"未見評価       : {causal.get('correct', 0)}/{causal.get('total', 0)}、"
-                   f"単純基準 {causal.get('baseline_correct', 0)}/{causal.get('total', 0)}")])
-    causal_examples = causal_memory.get("preregistered_predictions", [])[:3]
-    for index, item in enumerate(causal_examples, 1):
-        lines.extend([f"例{index}: {_event_ja(item.get('prior'))} の後",
-                      f"      Noise={item.get('prediction') or 'なし'} / 実際={item.get('observed_after_registration') or 'なし'}"
-                      f" → {'正解' if item.get('correct') else '不正解'}"])
+                  "・この資料には対比・介入の証拠がなく、因果予測は event_structure_v1 で対象外。"])
     lines.extend(["", "注意", "-" * 34,
                   "・ここでの正解は、学習に使っていない実教材の一部に対する予測です。",
+                  "・次イベント予測はこの資料で有意な信号がなく、v1はイベント内部構造のみを対象にしています。",
                   "・単語数や処理回数だけを能力とは判定しません。",
                   "・限定実験世界の合格は、この実教材能力には加算していません。"])
     return "\n".join(lines)
@@ -259,11 +425,14 @@ def render_human_status(status: dict, now_epoch: float | None = None,
     health = "正常に稼働" if healthy else "確認が必要"
     global_memory = status.get("global_memory", {})
     mastery = status.get("mastery", {})
-    association = status.get("association", {})
-    association_eval = association.get("evaluation", {})
-    structural_association_eval = association.get("selected_evaluation", association_eval)
-    causal = status.get("causal_evaluation", {})
-    causal_eval = causal.get("evaluation", {})
+    event_structure = status.get("event_structure", {})
+    plausibility_eval = next((item.get("selection", {})
+                              for item in event_structure.get("evaluations", [])
+                              if item.get("task") == "event_plausibility"), {})
+    cloze_eval = next((item.get("selection", {})
+                       for item in event_structure.get("evaluations", [])
+                       if item.get("task") == "verb_cloze"), {})
+    es_selected = event_structure.get("selected") or {}
     representation = status.get("representation", {}).get("selected_evaluation", {})
     errors = status.get("error_memory", {})
     visual = status.get("visual_memory", {})
@@ -368,19 +537,22 @@ def render_human_status(status: dict, now_epoch: float | None = None,
              f"表現選択       : {_competency_ja(abstraction_world, 'representation_selection')}",
              f"統合世界モデル : {_competency_ja(abstraction_world, 'integrated_world_model')}",
              "", "現在の能力評価", "-" * 34]
-    ac, at = association_eval.get("correct", 0), association_eval.get("total", 0)
-    ab = association_eval.get("baseline_correct", 0)
-    association_judgement = "基準を上回った" if ac > ab else ("基準と同じ" if ac == ab else "基準より下")
-    cc, ct = causal_eval.get("correct", 0), causal_eval.get("total", 0)
-    cb = causal_eval.get("baseline_correct", 0)
-    causal_judgement = "基準を上回った" if cc > cb else ("基準と同じ" if cc == cb else "基準より下")
+    def judge(evaluation: dict) -> str:
+        c, b = evaluation.get("correct", 0), evaluation.get("baseline_correct", 0)
+        return "基準を上回った" if c > b else ("基準と同じ" if c == b else "基準より下")
+
+    pc, pt = plausibility_eval.get("correct", 0), plausibility_eval.get("total", 0)
+    pb = plausibility_eval.get("baseline_correct", 0)
+    zc, zt = cloze_eval.get("correct", 0), cloze_eval.get("total", 0)
+    zb = cloze_eval.get("baseline_correct", 0)
     lines.extend([
-        f"連想予測       : {ac}/{at}（{percent(ac, at)}）、単純基準 {ab}/{at} → {association_judgement}",
-        f"連想の修正     : 強化 {association.get('reinforced', 0)}、弱化 {association.get('weakened', 0)}",
-        f"構造連想（実教材）: {structural_association_eval.get('correct', 0)}/{structural_association_eval.get('total', 0)}、単純基準 {structural_association_eval.get('baseline_correct', 0)}/{structural_association_eval.get('total', 0)}",
-        f"因果予測       : {cc}/{ct}（{percent(cc, ct)}）、単純基準 {cb}/{ct} → {causal_judgement}",
-        f"因果評価層     : {causal.get('selected_view', 'concrete')}（比較候補 {len(causal.get('matched_contrasts', []))}件）",
-        f"因果候補       : {causal.get('supported_hypotheses', 0)}件（まだ証明ではない）",
+        f"妥当性判定     : {pc}/{pt}（{percent(pc, pt)}）、単純基準 {pb}/{pt} → {judge(plausibility_eval)}",
+        f"動詞クローズ   : {zc}/{zt}（{percent(zc, zt)}）、単純基準 {zb}/{zt} → {judge(cloze_eval)}",
+        f"選択モデル     : {event_structure.get('selected_model_id', '評価前')}"
+        f"（{event_structure.get('selection_status', '評価前')}）",
+        f"確認セット     : lift {(es_selected.get('final') or es_selected).get('lift', 0):+d}件"
+        if es_selected else "確認セット     : 基準超えモデルなし（未確認）",
+        "因果予測       : 評価不能（対比・介入の証拠がこの資料にない。v1で予測対象から除外）",
         f"抽象表現       : 正解 {representation.get('correct', 0)}/{representation.get('total', 0)}、適用範囲 {100 * representation.get('coverage', 0):.1f}%",
         f"構造規則       : {revision.get('rules_formed', 0):,}件（再利用可能 {revision.get('reusable_rules', 0):,}、弱化 {revision.get('weakened_rules', 0):,}）",
         f"構造予測       : {revision_eval.get('correct', 0)}/{revision_eval.get('total', 0)}（{percent(revision_eval.get('correct', 0), revision_eval.get('total', 0))}）、適用範囲 {100 * revision_eval.get('coverage', 0):.1f}%",
@@ -420,10 +592,9 @@ def render_human_status(status: dict, now_epoch: float | None = None,
         notes.append("最終更新が2分以上前です。停止または処理詰まりを確認してください。")
     if status.get("error"):
         notes.append(f"エラー: {status['error']}")
-    if ac <= ab:
-        notes.append("連想はまだ単純基準を上回っていません。経験を追加しながら修正中です。")
-    if cc <= cb:
-        notes.append("因果予測はまだ単純基準を上回っていません。")
+    if not es_selected:
+        notes.append("イベント内部構造モデルはまだ固定確認セットで単純基準を上回っていません。"
+                     "経験を追加しながら検証中です。")
     lines.extend(["", "要点", "-" * 34, *[f"・{note}" for note in notes]])
     return "\n".join(lines)
 
@@ -450,11 +621,11 @@ def append_events(runtime: Path, module: str, curricula: int, events: list[dict]
     """Append a module's emitted_events to the shared decision-replay log.
 
     events.jsonl is a *decision* log, not a state log: it lets a reader
-    reconstruct WHEN and WHY a benchmark lock, a selected-mode switch, or a
-    reusable-rule appearance/disappearance happened -- the sequence of
-    decisions -- not the underlying evaluation numbers. Reconstructing those
-    numbers still requires re-running the owning module against the historical
-    audit data; see the module-level docstring in world_model_v51.py.
+    reconstruct WHEN and WHY a benchmark lock or a selected-model switch
+    happened -- the sequence of decisions -- not the underlying evaluation
+    numbers. Reconstructing those numbers still requires re-running the owning
+    module against the historical audit data; see the module-level docstring
+    in event_structure_v1.py.
     """
     if not events:
         return
@@ -702,34 +873,35 @@ def update_autonomy_state(curriculum: dict, report: dict) -> dict:
     revision = report.get("experience_revision", {})
     global_memory = report.get("global_memory", {})
     association = report.get("association", {}).get("selected_evaluation", {})
-    causal = report.get("causal_evaluation", {}).get("evaluation", {})
     representation = report.get("representation", {}).get("selected_evaluation", {})
-    world_model = report.get("world_model", {})
-    world = world_model.get("selected_evaluation", {})
-    benchmark_locked = bool(world_model.get("benchmark", {}).get("locked", False))
-    # Observability only: a coarse improving/flat/declining read per subsystem,
-    # shown alongside the plateau verdict below. It does not feed improved() or
-    # the mode transitions -- those stay governed by the significance gates.
+    event_structure = report.get("event_structure", {})
+    selected = event_structure.get("selected") or {}
+    benchmark_locked = bool(event_structure.get("benchmark", {}).get("locked", False))
+    # improved() trusts one number: the FINAL-split lift of whichever
+    # event_structure task cleared the corrected gate (0 when none did).  The
+    # selection-split lift and every legacy holdout stay diagnostics.
+    capability_lift = (selected.get("final") or selected).get("lift", 0) if selected else 0
+    # Observability only: a coarse improving/flat/declining read, shown
+    # alongside the plateau verdict.  It never feeds improved().
     trends = {
-        "world_model_lift": classify_trend(world_model.get("learning_curve", []),
-                                           "lift", window=10, min_delta=1),
+        "event_structure_lift": classify_trend(event_structure.get("learning_curve", []),
+                                               "lift", window=10, min_delta=1),
         "association_lift": classify_trend(report.get("association", {}).get("learning_curve", []),
                                            "lift", window=10, min_delta=1),
-        "causal_lift": classify_trend(report.get("causal_evaluation", {}).get("learning_curve", []),
-                                      "lift", window=10, min_delta=1),
     }
     snapshot = {"curricula": global_memory.get("curricula", 0),
+                "schema": 2,
                 "structural_correct": revision.get("evaluation", {}).get("correct", 0),
                 "structural_total": revision.get("evaluation", {}).get("total", 0),
                 "structural_coverage": revision.get("evaluation", {}).get("coverage", 0.0),
                 "reusable_rules": revision.get("reusable_rules", 0),
                 "failure_patterns": len(revision.get("failure_patterns", [])),
                 "association_lift": association.get("correct", 0) - association.get("baseline_correct", 0),
-                "causal_lift": causal.get("correct", 0) - causal.get("baseline_correct", 0),
                 "representation_correct": representation.get("correct", 0),
-                "world_model_lift": world.get("lift", 0),
-                "world_reusable_rules": len(world_model.get("reusable_rules", [])),
-                "benchmark_locked": benchmark_locked}
+                "event_structure_lift": capability_lift,
+                "event_structure_task": selected.get("task"),
+                "benchmark_locked": benchmark_locked,
+                "event_structure_locked": benchmark_locked}
     history = curriculum.setdefault("capability_history", [])
     if not history or history[-1].get("curricula") != snapshot["curricula"]:
         history.append(snapshot)
@@ -738,19 +910,23 @@ def update_autonomy_state(curriculum: dict, report: dict) -> dict:
     window = history[-30:]
 
     def improved(left: dict, right: dict) -> bool:
-        # Only the locked, source-disjoint v51 benchmark can clear a plateau.
-        # Legacy moving holdouts remain diagnostics and cannot manufacture progress.
-        return right.get("world_model_lift", 0) > left.get("world_model_lift", 0)
+        # Only a gain on the locked, collection-disjoint event_structure FINAL
+        # split can clear a plateau.  Selection-split and legacy holdouts are
+        # diagnostics and cannot manufacture progress.
+        return right.get("event_structure_lift", 0) > left.get("event_structure_lift", 0)
 
-    # improved() trusts world_model_lift alone, but train_and_evaluate pins that
-    # value to 0 until the collection-disjoint v51 benchmark unlocks.  Declaring a
-    # plateau during that structurally-frozen window created a non-recoverable
-    # deadlock: the plateau halts acquisition (work() returns before
-    # discover_curriculum), so the benchmark never reaches its collection quota,
-    # so world_model_lift can never move.  Defer plateau detection until both ends
-    # of the comparison window are measured against a locked benchmark.
-    measurable_window = (len(window) >= 10 and window[0].get("benchmark_locked")
-                         and window[-1].get("benchmark_locked"))
+    # improved() trusts event_structure_lift alone, and train_and_evaluate keeps
+    # that at 0 until the collection-disjoint benchmark unlocks AND a task clears
+    # the corrected final-split gate.  Declaring a plateau during the pre-lock
+    # window once created a non-recoverable deadlock (the plateau halts
+    # acquisition, so the benchmark never fills, so the lift can never move), so
+    # both ends of the window must be schema-2 snapshots measured against a
+    # locked benchmark -- schema 2 also stops the detector comparing across the
+    # event_structure_v1 redesign.
+    measurable_window = (len(window) >= 10
+                         and window[0].get("schema") == 2 and window[-1].get("schema") == 2
+                         and window[0].get("event_structure_locked")
+                         and window[-1].get("event_structure_locked"))
     plateau = (measurable_window
                and window[-1]["curricula"] - window[0]["curricula"] >= 20
                and not improved(window[0], window[-1]))
@@ -758,11 +934,18 @@ def update_autonomy_state(curriculum: dict, report: dict) -> dict:
     previous_mode = previous.get("mode")
     mode_started = previous.get("mode_started_curricula", snapshot["curricula"])
     intervention_start = previous.get("intervention_start_snapshot")
+    if intervention_start is not None and "event_structure_lift" not in intervention_start:
+        # One-time migration across the event_structure_v1 redesign: an
+        # intervention (counterexample_hunt / capability_plateau) recorded
+        # against the retired world_model_lift signal cannot be compared to the
+        # new final-split lift, so drop it and restart measurement cleanly.
+        previous_mode, intervention_start = None, None
+        mode_started = snapshot["curricula"]
     if not benchmark_locked:
         # The plateau signal is unmeasurable; never enter or stay in a plateau,
         # and drop any intervention state a pre-fix run may have persisted.
         mode, reason = ("normal_curriculum",
-                        "world-model benchmark not yet unlocked; capability plateau undetectable")
+                        "event-structure benchmark not yet unlocked; capability plateau undetectable")
         mode_started, intervention_start = snapshot["curricula"], None
     elif previous_mode == "capability_plateau" and intervention_start:
         if improved(intervention_start, snapshot):
@@ -826,18 +1009,18 @@ def developmental_source_quality(report: dict) -> dict:
 COLLECTION_STALL_ROUNDS = 25
 
 
-def update_collection_progress(curriculum: dict, world_model: dict) -> bool:
-    """Detect when independent eligible narrative collections have stopped growing.
+def update_collection_progress(curriculum: dict, event_structure: dict) -> bool:
+    """Detect when independent eligible collections have stopped growing.
 
     "unvisited page in an observed story collection" keeps finding new pages
-    inside collections the world model already counts (it is by far the
+    inside collections the benchmark already counts (it is by far the
     highest-volume discovery route), so the frontier rarely empties and the
     shelf fallback -- the route that finds genuinely new collections -- almost
     never runs.  Once growth stalls for COLLECTION_STALL_ROUNDS discovery
     cycles, the caller should force a shelf search alongside the normal
     candidates instead of waiting for the frontier to run dry on its own.
     """
-    benchmark = world_model.get("benchmark", {})
+    benchmark = event_structure.get("benchmark", {})
     if benchmark.get("locked"):
         curriculum.pop("collection_progress", None)
         return False
@@ -1094,9 +1277,6 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
     report = report or {}
     state = report.get("state", read_json(runtime / "controller-state.json"))
     mastery = report.get("mastery") or read_json(runtime / "mastery.json")
-    causal_memory = read_json(runtime / "causal-memory.json")
-    representation_memory = read_json(runtime / "representation-memory.json")
-    association_memory = read_json(runtime / "association-memory.json")
     epistemic_scaffold = read_json(runtime / "epistemic-observations.json")
     error_memory = read_json(runtime / "error-memory.json")
     visual_memory = read_json(runtime / "visual-memory.json")
@@ -1112,7 +1292,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
     self_learning_policy = read_json(runtime / "self-learning-policy.json")
     dialogue_verification = read_json(runtime / "dialogue-web-verification.json")
     learned_rules = read_json(runtime / "experience-rule-memory.json")
-    world_model = read_json(runtime / "world-model-v51.json")
+    event_structure = report.get("event_structure") or read_json(runtime / "event-structure.json")
     return {
         "phase": phase,
         "seed": seed,
@@ -1133,30 +1313,14 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "dialogue_verification": dialogue_verification.get("summary", {}),
         "learned_experience_rules": report.get("learned_experience_rules") or
                                     learned_rules.get("summary", {}),
-        "world_model": report.get("world_model") or world_model,
+        "event_structure": event_structure,
         "storage": read_json(runtime / "storage-status.json"),
         "global_memory": report.get("global_memory") or read_json(
             runtime / "global-language-memory.json").get("totals", {}),
-        "causal_evaluation": report.get("causal_evaluation") or {
-            key: causal_memory.get(key)
-            for key in ("supported_hypotheses", "evaluation", "limitations", "selected_view",
-                        "view_evaluations", "matched_contrasts", "learning_curve",
-                        "learning_curve_trend")},
+        "causal_evaluation": report.get("causal_evaluation") or causal_shim(event_structure),
         "causal_lab": report.get("causal_lab") or read_json(runtime / "causal-lab.json"),
-        "representation": report.get("representation") or {
-            key: representation_memory.get(key) for key in
-            ("selected_scheme", "selection_status", "selected_evaluation", "revisions")},
-        "association": report.get("association") or {
-            "evaluation": association_memory.get("evaluation", {}),
-            "selected_evaluation": association_memory.get("selected_evaluation", {}),
-            "selected_mode": association_memory.get("selected_mode"),
-            "reinforced": association_memory.get("reinforced", 0),
-            "weakened": association_memory.get("weakened", 0),
-            "warning": association_memory.get("warning"),
-            "learning_curve": association_memory.get("learning_curve", []),
-            "learning_curve_trend": association_memory.get("learning_curve_trend",
-                                                            "insufficient_data"),
-        },
+        "representation": report.get("representation") or representation_shim(event_structure),
+        "association": report.get("association") or association_shim(event_structure),
         "epistemic_scaffold": report.get("epistemic_scaffold") or
                               epistemic_scaffold.get("summary", {}),
         "error_memory": report.get("error_memory") or error_memory.get("summary", {}),
@@ -1296,6 +1460,16 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             "reason": ("audited developmental passage" if report["developmental_quality"].get(
                 "admit_to_global_memory") else ("grounded Japanese boundary path" if japanese_grounded
                 else "outside current developmental level; raw report retained"))}
+        # Rolling per-seed admission log (decision-time scores), for status-detail-ja.
+        dq = report["developmental_quality"]
+        admission_log = curriculum.setdefault("admission_log", [])
+        admission_log.append({
+            "seed": seed, "at_curricula": memory.get("totals", {}).get("curricula", 0),
+            "admitted": bool(admitted), "score": dq.get("score"),
+            "metrics": dq.get("metrics", {}), "reasons": dq.get("reasons", []),
+            "admission_reason": report["global_memory_admission"]["reason"],
+            "source_urls": dq.get("source_urls", [])[:3]})
+        curriculum["admission_log"] = admission_log[-300:]
         mark_curriculum_admission(parser_audit_memory, seed, admitted)
         write_json(audit_path, parser_audit_memory)
         report["parser_audit"] = parser_audit_memory.get("summary", {})
@@ -1311,19 +1485,18 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             read_json(runtime / "dialogue-web-verification.json"))
         write_json(rule_path, learned_rule_memory)
         report["learned_experience_rules"] = learned_rule_memory.get("summary", {})
-        world_path = runtime / "world-model-v51.json"
-        world_model = train_world_model(parser_audit_memory, read_json(world_path))
-        append_events(runtime, "world_model_v51", memory.get("totals", {}).get("curricula", 0),
-                     world_model.pop("emitted_events", []))
-        write_json(world_path, world_model)
-        report["world_model"] = world_model
-        learning_transitions = verified_experience.get("transitions", {})
-        coherent_transitions = verified_experience.get("coherent_transitions", learning_transitions)
-        learning_event_counts = verified_experience.get("event_counts", {})
+        event_structure_path = runtime / "event-structure.json"
+        event_structure = train_event_structure(
+            verified_experience, read_json(event_structure_path))
+        append_events(runtime, "event_structure_v1", memory.get("totals", {}).get("curricula", 0),
+                     event_structure.pop("emitted_events", []))
+        write_json(event_structure_path, event_structure)
+        report["event_structure"] = event_structure
+        coherent_transitions = verified_experience.get(
+            "coherent_transitions", verified_experience.get("transitions", {}))
         contextual_transitions = verified_experience.get("contextual_transitions", {})
-        # transitions and coherent_transitions share one key space (coherence is
-        # a deterministic function of the prior/outcome strings), so one source
-        # map covers both; contextual_transitions uses its own two-hop key.
+        # coherent_transitions and contextual_transitions still feed
+        # experience_revision_v37; contextual uses its own two-hop key.
         transition_sources = verified_experience.get("transition_sources", {})
         contextual_transition_sources = verified_experience.get("contextual_transition_sources", {})
         new_global_experience = merge_report(memory, seed, report) if admitted else False
@@ -1363,62 +1536,22 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         write_json(visual_path, visual)
         report["visual_memory"] = visual.get("summary", {})
         report["visual_observation"] = visual_result
-        existing_representation = read_json(runtime / "representation-memory.json")
         experience_source = "verified_v49:" + self_learning_policy["selected_policy"]
-        if (new_global_experience or not (runtime / "causal-memory.json").exists()
-                or existing_representation.get("experience_source") != experience_source):
-            previous_representation = read_json(runtime / "representation-memory.json")
-            representation_report = evaluate_representations(
-                learning_transitions, transition_sources)
-            selected_evaluation = next((item for item in representation_report["evaluations"]
-                if item["scheme"] == representation_report["selected_scheme"]), {})
-            representation_report["selected_evaluation"] = selected_evaluation
-            revisions = previous_representation.get("revisions", [])
-            before_scheme = previous_representation.get("selected_scheme")
-            if before_scheme and before_scheme != representation_report["selected_scheme"]:
-                revisions.append({"before": before_scheme,
-                    "after": representation_report["selected_scheme"],
-                    "reason": "new holdout evidence changed predictive ranking",
-                    "at_curricula": memory.get("totals", {}).get("curricula", 0)})
-            representation_report["revisions"] = revisions[-100:]
-            representation_report["experience_source"] = experience_source
-            write_json(runtime / "representation-memory.json", representation_report)
-            # Legacy transitions predate extraction audits and remain quarantined from causal claims.
-            causal_report = evaluate_causal_views(
-                coherent_transitions, representation_report,
-                read_json(runtime / "causal-memory.json"), transition_sources)
-            causal_report["experience_source"] = experience_source
-            write_json(runtime / "causal-memory.json", causal_report)
-            association_report = AssociationLearner(
-                learning_transitions, learning_event_counts,
-                read_json(runtime / "association-memory.json"), transition_sources).run()
-            association_report["experience_source"] = experience_source
-            write_json(runtime / "association-memory.json", association_report)
+        existing_experience = read_json(runtime / "experience-revision.json")
+        if (new_global_experience or not existing_experience
+                or existing_experience.get("experience_source") != experience_source):
             experience_report = ExperienceRevisionEngine(
                 coherent_transitions, contextual_transitions,
                 transition_sources, contextual_transition_sources).run()
             experience_report["experience_source"] = experience_source
             write_json(runtime / "experience-revision.json", experience_report)
         else:
-            causal_report = read_json(runtime / "causal-memory.json")
-            representation_report = read_json(runtime / "representation-memory.json")
-            association_report = read_json(runtime / "association-memory.json")
-            experience_report = read_json(runtime / "experience-revision.json")
-            if not causal_report or "selected_view" not in causal_report:
-                causal_report = evaluate_causal_views(
-                    coherent_transitions, representation_report, causal_report,
-                    transition_sources)
-                write_json(runtime / "causal-memory.json", causal_report)
-            if not association_report or "selected_evaluation" not in association_report:
-                association_report = AssociationLearner(
-                    learning_transitions, learning_event_counts, association_report,
-                    transition_sources).run()
-                write_json(runtime / "association-memory.json", association_report)
-            if not experience_report:
-                experience_report = ExperienceRevisionEngine(
-                    coherent_transitions, contextual_transitions,
-                    transition_sources, contextual_transition_sources).run()
-                write_json(runtime / "experience-revision.json", experience_report)
+            experience_report = existing_experience
+        # Reduced views onto the one within-event model, for the downstream
+        # consumers that still read the retired modules' shapes.
+        representation_report = representation_shim(event_structure)
+        association_report = association_shim(event_structure)
+        causal_report = causal_shim(event_structure)
         learned_summary = learned_rule_memory.get("summary", {})
         rule_gate_input = ({"summary": {
             "reusable_rules": learned_summary.get("reusable_rules", 0),
@@ -1440,33 +1573,9 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             representation_report, association_report)
         report["mastery"] = mastery
         report["global_memory"] = memory.get("totals", {})
-        report["causal_evaluation"] = {
-            "supported_hypotheses": causal_report.get("supported_hypotheses", 0),
-            "evaluation": causal_report.get("evaluation", {}),
-            "limitations": causal_report.get("limitations", []),
-            "selected_view": causal_report.get("selected_view", "concrete"),
-            "view_evaluations": causal_report.get("view_evaluations", {}),
-            "matched_contrasts": causal_report.get("matched_contrasts", []),
-            "learning_curve": causal_report.get("learning_curve", []),
-            "learning_curve_trend": causal_report.get("learning_curve_trend", "insufficient_data"),
-        }
-        report["representation"] = {
-            "selected_scheme": representation_report.get("selected_scheme"),
-            "selection_status": representation_report.get("selection_status"),
-            "selected_evaluation": representation_report.get("selected_evaluation", {}),
-            "revisions": representation_report.get("revisions", []),
-        }
-        report["association"] = {
-            "evaluation": association_report.get("evaluation", {}),
-            "selected_evaluation": association_report.get("selected_evaluation", {}),
-            "selected_mode": association_report.get("selected_mode"),
-            "reinforced": association_report.get("reinforced", 0),
-            "weakened": association_report.get("weakened", 0),
-            "warning": association_report.get("warning"),
-            "learning_curve": association_report.get("learning_curve", []),
-            "learning_curve_trend": association_report.get("learning_curve_trend",
-                                                            "insufficient_data"),
-        }
+        report["causal_evaluation"] = causal_report
+        report["representation"] = representation_report
+        report["association"] = association_report
         report["error_memory"] = error_ledger.get("summary", {})
         report["experience_revision"] = experience_report.get("summary", {})
         report["autonomy"] = update_autonomy_state(curriculum, report)
@@ -1523,14 +1632,14 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             curriculum[url_bucket] = sorted(set(curriculum[url_bucket]) | set(quality_urls))
             visited = set(curriculum["completed_seeds"]) | set(curriculum["deferred_seeds"])
             discovered = discover_curriculum(report, visited, effective_network)
-            if update_collection_progress(curriculum, world_model):
+            if update_collection_progress(curriculum, event_structure):
                 known_discovered = {item["seed"] for item in discovered}
                 discovered.extend(item for item in discover_from_developmental_shelves(
                     visited, effective_network) if item["seed"] not in known_discovered)
             if report.get("autonomy", {}).get("mode") == "counterexample_hunt":
-                world_target = world_model.get("next_learning_target") or {}
-                targeted = (world_target if world_target.get("seed") not in visited
-                            and valid_curriculum_seed(world_target.get("seed", "")) else None)
+                event_target = event_structure.get("next_learning_target") or {}
+                targeted = (event_target if event_target.get("seed") not in visited
+                            and valid_curriculum_seed(event_target.get("seed", "")) else None)
                 if not targeted:
                     targeted = learned_rule_boundary_candidate(learned_rule_memory, visited)
                 if not targeted:
@@ -1660,6 +1769,9 @@ def main() -> None:
     ability_ja_parser = subparsers.add_parser(
         "ability-ja", help="demonstrate current capability on held-out evidence")
     ability_ja_parser.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
+    detail_parser = subparsers.add_parser(
+        "status-detail-ja", help="show a consolidated audit view for progress reviews")
+    detail_parser.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
     stop_parser = subparsers.add_parser("stop", help="request a safe stop between cycles")
     stop_parser.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
     args = parser.parse_args()
@@ -1673,8 +1785,10 @@ def main() -> None:
     if args.command == "ability-ja":
         print(render_ability_report(
             read_json(args.runtime / "status.json"),
-            read_json(args.runtime / "association-memory.json"),
-            read_json(args.runtime / "causal-memory.json")))
+            read_json(args.runtime / "event-structure.json")))
+        return
+    if args.command == "status-detail-ja":
+        print(render_detail_status(args.runtime))
         return
     if args.command == "stop":
         args.runtime.mkdir(parents=True, exist_ok=True)
