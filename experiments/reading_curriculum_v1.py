@@ -276,7 +276,7 @@ def maybe_advance_level(curriculum: dict, cycle: int) -> dict:
     # advance when the band is essentially exhausted: enough graduates OR every
     # available book at this level has been graduated (a thin shelf must not trap)
     need = min(GRADUATES_TO_ADVANCE, max(1, len(at_band) - len(stuck_band)))
-    if (len(graduated_band) < need or ungraduated_band) and graduated_band:
+    if not graduated_band or len(graduated_band) < need or ungraduated_band:
         return {"advanced": False,
                 "reason": f"{len(graduated_band)}/{need} band books graduated, "
                           f"{len(ungraduated_band)} still in rotation"}

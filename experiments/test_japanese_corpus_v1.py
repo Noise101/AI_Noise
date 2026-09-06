@@ -1,6 +1,6 @@
 import unittest
 
-from japanese_corpus_v1 import _clean, KERNEL
+from japanese_corpus_v1 import _clean, _aozora_title, KERNEL
 
 
 class JapaneseCorpusTest(unittest.TestCase):
@@ -14,6 +14,16 @@ class JapaneseCorpusTest(unittest.TestCase):
         self.assertNotIn("底本", cleaned)
         self.assertNotIn("パブリックドメイン", cleaned)
         self.assertNotIn("==", cleaned)
+
+    def test_aozora_title_prefers_the_clean_work_title_not_the_filename(self):
+        html = ('<head><meta name="DC.Title" content="赤い蝋燭" />'
+                '<title>新美南吉 赤い蝋燭</title></head>'
+                '<body><h1 class="title">赤い蝋燭</h1></body>')
+        self.assertEqual(_aozora_title(html), "赤い蝋燭")
+        # meta-only fallback (some older cards have no <h1 class="title">)
+        self.assertEqual(
+            _aozora_title('<meta  name="DC.Title"  content="ごん狐" />'), "ごん狐")
+        self.assertEqual(_aozora_title("<html>no title here</html>"), "")
 
     def test_kernel_is_a_non_empty_ordered_seed_list(self):
         self.assertGreaterEqual(len(KERNEL), 8)

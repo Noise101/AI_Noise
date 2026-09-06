@@ -96,6 +96,15 @@ _RT = re.compile(r"<rp>.*?</rp>|<rt>.*?</rt>", re.S)
 _TAG = re.compile(r"<[^>]+>")
 
 
+def _aozora_title(html: str) -> str:
+    for pat in (r'<h1[^>]*class="title"[^>]*>(.*?)</h1>',
+                r'<meta\s+name="DC\.Title"\s+content="([^"]+)"'):
+        m = re.search(pat, html, re.S)
+        if m:
+            return _TAG.sub("", m.group(1)).strip()
+    return ""
+
+
 def fetch_aozora(html_url: str) -> JapaneseText | None:
     """A work's XHTML file on aozora.gr.jp (Shift_JIS), ruby readings dropped."""
     try:
@@ -111,10 +120,7 @@ def fetch_aozora(html_url: str) -> JapaneseText | None:
     text = re.sub(r"[ \t　]+", "", re.sub(r"\n{2,}", "\n", text)).strip()
     if len(JP_CHARS.findall(text)) < 120:
         return None
-    title = ""
-    m = re.search(r'<meta name="DC.Title" content="([^"]+)"', html)
-    if m:
-        title = m.group(1)
+    title = _aozora_title(html)
     return JapaneseText(title=title or html_url.rsplit("/", 1)[-1], url=html_url, text=text)
 
 
@@ -129,6 +135,41 @@ def category_members(category: str, limit: int = 100) -> list[str]:
     except (NetworkBudgetExceeded, Exception):
         return []
     return [item["title"] for item in data.get("query", {}).get("categorymembers", [])]
+
+
+# Aozora author "person" pages -> their public-domain works (children's authors
+# and translators of children's classics).  Used to widen the shelf once the
+# kernel is exhausted, cheapest first.
+AOZORA_AUTHORS = {
+    "楠山正雄": 329, "新美南吉": 121, "小川未明": 1475, "宮沢賢治": 81,
+    "浜田広介": 1710, "菊池寛": 83, "鈴木三重吉": 1671,
+}
+_AOZORA_WORK = re.compile(r'href="\.\./cards/(\d+)/card(\d+)\.html"[^>]*>([^<]+)</a>')
+_AOZORA_HTMLFILE = re.compile(r'href="\./files/(\d+_\d+\.html)"')
+
+
+def aozora_author_works(person_id: int, limit: int = 40) -> list[tuple[str, str]]:
+    """[(title, work_html_url), ...] for one Aozora author, resolving each work
+    card to its XHTML file."""
+    list_url = f"https://www.aozora.gr.jp/index_pages/person{person_id}.html"
+    try:
+        raw = WEB_CACHE.get_bytes(list_url, AOZORA_UA, "text/html")
+    except (NetworkBudgetExceeded, Exception):
+        return []
+    html = raw.decode("shift_jis", errors="replace")
+    out = []
+    for card_person, card_id, title in _AOZORA_WORK.findall(html)[:limit]:
+        card_url = f"https://www.aozora.gr.jp/cards/{int(card_person):06d}/card{card_id}.html"
+        try:
+            card = WEB_CACHE.get_bytes(card_url, AOZORA_UA, "text/html").decode(
+                "shift_jis", errors="replace")
+        except (NetworkBudgetExceeded, Exception):
+            continue
+        m = _AOZORA_HTMLFILE.search(card)
+        if m:
+            out.append((title.strip(),
+                        f"https://www.aozora.gr.jp/cards/{int(card_person):06d}/files/{m.group(1)}"))
+    return out
 
 
 def fetch_kernel(network: int = 20) -> list[JapaneseText]:
