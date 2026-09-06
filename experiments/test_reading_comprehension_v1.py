@@ -73,6 +73,19 @@ class ReadingComprehensionTest(unittest.TestCase):
         self.assertGreater(good["score"], bad["score"])
         self.assertGreater(good["tests"]["consequence"], 0.4)
 
+    def test_incoherent_parse_is_gated_below_a_coherent_one(self):
+        model = rcp.ComprehensionModel().fit([s["events"] for s in structured_stories(n=80)])
+        coherent = structured_stories(n=1, seed=7)[0]["events"]
+        # same narrative, but the extractor collapsed every subject to a
+        # deictic placeholder and mangled the verbs
+        incoherent = [{"subject": "それ", "verb": v, "obj": "", "confidence": 0.9}
+                      for v in ("のをみつける", "まもなく", "だろう", "です", "う", "もなる")]
+        good = rcp.book_comprehension(coherent, model, set())
+        bad = rcp.book_comprehension(incoherent, model, set())
+        self.assertGreater(good["tests"]["coherence"], 0.9)
+        self.assertLess(bad["tests"]["coherence"], 0.3)
+        self.assertGreater(good["score"], bad["score"])
+
     def test_ordering_test_reconstructs_a_known_schema(self):
         model = rcp.ComprehensionModel().fit([s["events"] for s in structured_stories(n=80)])
         events = structured_stories(n=1, seed=5)[0]["events"]

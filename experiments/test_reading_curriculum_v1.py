@@ -42,6 +42,17 @@ class ReadingCurriculumTest(unittest.TestCase):
         self.assertEqual(out["status"], "graduated")
         self.assertEqual(cur["shelf"][bid]["status"], "graduated")
 
+    def test_cold_start_proxy_rewards_a_coherent_parse(self):
+        clean = [{"subject": "きつね", "verb": v, "obj": "", "confidence": 0.9}
+                 for v in ("みつける", "とる", "たべる", "かえる", "なく")]
+        self.assertGreaterEqual(rc._self_consistency(clean), rc.GRADUATE_COMPREHENSION)
+
+    def test_cold_start_proxy_does_not_graduate_a_broken_parse(self):
+        # every clause "それが<壊れた動詞>" -- high protagonist share, but not Japanese
+        broken = [{"subject": "それ", "verb": v, "obj": "", "confidence": 0.9}
+                  for v in ("うめる", "まもなく", "しぬ", "もでてく", "でる")]
+        self.assertLess(rc._self_consistency(broken), rc.GRADUATE_COMPREHENSION)
+
     def test_a_stuck_book_is_shelved_and_not_re_pulled(self):
         cur = rc.empty_curriculum()
         rc.register_books(cur, [book("A", "a", SIMPLE)], cycle=1)

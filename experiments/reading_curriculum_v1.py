@@ -133,17 +133,22 @@ def text_difficulty(text: str, event_count: int, known_words: set[str]) -> dict:
 
 
 def _self_consistency(events: list[dict]) -> float:
-    """Placeholder comprehension proxy until reading_comprehension_v1 exists:
-    a story is 'coherent' if one protagonist carries most events and there is a
-    beginning-middle-end spread of distinct verbs."""
+    """Cold-start comprehension proxy (used until reading_comprehension_v1 has
+    enough read books to fit a model): a story is 'coherent' if one protagonist
+    carries most events, there is a beginning-middle-end spread of distinct
+    verbs, and the extracted structure reads as Japanese rather than as
+    'それが<壊れた動詞>' on every clause."""
     if len(events) < 3:
         return 0.0
+    from japanese_retell_v1 import retelling_coherence
     subjects = Counter(e.get("subject", "") for e in events)
     protagonist_share = subjects.most_common(1)[0][1] / len(events)
     distinct_verbs = len({e.get("verb", "") for e in events})
     verb_spread = min(1.0, distinct_verbs / max(3, len(events) * 0.5))
     mean_conf = sum(e.get("confidence", 0.0) for e in events) / len(events)
-    return round(0.4 * protagonist_share + 0.3 * verb_spread + 0.3 * mean_conf, 3)
+    coherence = retelling_coherence(events)
+    return round(0.25 * protagonist_share + 0.2 * verb_spread
+                 + 0.15 * mean_conf + 0.4 * coherence, 3)
 
 
 BOOTSTRAP_KNOWN_WORDS = 60        # below this, level is book-count driven, not ZPD

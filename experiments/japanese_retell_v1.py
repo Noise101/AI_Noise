@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import math
 import random
+from collections import Counter
 
 import japanese_event_v1 as jevent
 
@@ -107,6 +108,84 @@ def retell(events: list[dict], max_sentences: int = 12,
     return "".join(out)
 
 
+# --- coherence ----------------------------------------------------------
+# score_retelling's f1 is a generate -> re-parse round trip: because retell()
+# serialises the very triples the re-parser then recovers, f1 stays high even
+# when every clause is "それが<壊れた動詞>" -- exactly the output a caregiver
+# flags as 意味不明.  retelling_coherence looks at the surface instead and is
+# folded into `fidelity` so the number the loop reads reflects readable
+# Japanese, not round-trip stability.
+_DEICTIC_SUBJECTS = {"それ", "これ", "あれ", "そこ", "ここ", "あそこ", "こう", "そう",
+                     "どれ", "どこ", "どちら", "なに", "なん"}
+_ADVERB_NOT_VERB = {"まもなく", "しばらく", "いったい", "やがて", "すぐ", "ずっと",
+                    "きっと", "とうとう", "だんだん", "もう", "まだ", "すこし",
+                    "たいへん", "どうして", "なぜ", "たぶん", "きゅうに"}
+_NOMINAL_IN_VERB = ("あげく", "はず", "ため", "こと", "とき", "ところ", "人", "ひと")
+_COPULA_TAIL = ("です", "ます", "である", "だった", "でした", "だろう", "でしょう")
+
+
+def _implausible_verb(verb: str) -> bool:
+    """The verb slot holds something that is not a plausible predicate: a
+    fragment left by mis-segmentation, a stranded particle, or an adverb.
+    Kept high-precision: を/へ never sit inside a real verb, は only ever
+    starts one (はなす, はこぶ), and だろう/です mark a copula, not a verb."""
+    if not verb or len(verb) <= 1:
+        return True
+    if verb in _ADVERB_NOT_VERB:
+        return True
+    if "を" in verb or "へ" in verb or "は" in verb[1:]:
+        return True
+    if any(nom in verb for nom in _NOMINAL_IN_VERB):
+        return True
+    if verb.endswith(_COPULA_TAIL) or "かもしれ" in verb:
+        return True
+    return False
+
+
+def _fragment_subject(subject: str) -> bool:
+    """A dropped subject is fine; a sentence fragment or a trailing-particle
+    noun phrase in the subject slot is not."""
+    if not subject:
+        return False
+    if len(subject) > 8:
+        return True
+    if subject.endswith(("の", "な", "は", "が", "を", "に", "で", "と", "も", "、")):
+        return True
+    return subject in _ADVERB_NOT_VERB
+
+
+def retelling_coherence(events: list[dict]) -> float:
+    """Is the template retelling readable Japanese, independent of the
+    generate -> re-parse round trip?  1.0 = nothing wrong; degrades toward 0
+    for a deictic placeholder carrying every clause, verbs that are really
+    mis-segmented particles or adverbs, and fragment subjects."""
+    scored = [e for e in events if e.get("verb")]
+    if len(scored) < 2:
+        return 1.0
+    n = len(scored)
+    subjects = [e.get("subject") or "" for e in scored]
+    verbs = [e.get("verb") or "" for e in scored]
+
+    named = [s for s in subjects if s]
+    modal, modal_ct = Counter(named).most_common(1)[0] if named else ("", 0)
+    modal_share = modal_ct / n
+    deictic = modal in _DEICTIC_SUBJECTS and modal_share >= 0.5
+
+    broken = sum(_implausible_verb(v) for v in verbs) / n
+    frag = sum(_fragment_subject(s) for s in subjects) / n
+    verb_variety = len(set(verbs)) / n
+
+    penalty = (0.55 if deictic else 0.0)
+    penalty += 0.60 * broken
+    penalty += 0.30 * frag
+    penalty += 0.25 * max(0.0, 0.55 - verb_variety)      # near-total verb repetition
+    # one subject mechanically opening most clauses is only a defect when the
+    # clauses themselves are degraded -- otherwise it is ordinary zero-anaphora
+    if not deictic and modal_share >= 0.5:
+        penalty += 0.30 * modal_share * (broken + frag)
+    return round(max(0.0, min(1.0, 1.0 - penalty)), 3)
+
+
 # --- scoring -------------------------------------------------------------
 def _triples(events: list[dict]) -> list[tuple[str, str, str]]:
     return [(e.get("subject", ""), e.get("verb", ""), e.get("obj", ""))
@@ -157,9 +236,14 @@ def score_retelling(original_events: list[dict], retold_text: str) -> dict:
     precision = overlap / total_retold if total_retold else 0.0
     f1 = (2 * recall * precision / (recall + precision)) if (recall + precision) else 0.0
     order = _order_correlation(original, retold)
-    fidelity = round(0.6 * f1 + 0.4 * order, 3)
+    structural = round(0.6 * f1 + 0.4 * order, 3)
+    coherence = retelling_coherence(original_events)
+    # a retelling that reads as broken Japanese is not a faithful retelling,
+    # however cleanly its triples survive the round trip
+    fidelity = round(structural * coherence, 3)
     return {"recall": round(recall, 3), "precision": round(precision, 3),
             "f1": round(f1, 3), "order_correlation": round(order, 3),
+            "structural_fidelity": structural, "coherence": coherence,
             "fidelity": fidelity,
             "original_events": total_orig, "retold_events": total_retold}
 

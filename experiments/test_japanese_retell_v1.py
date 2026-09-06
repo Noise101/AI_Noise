@@ -44,6 +44,31 @@ class RetellTest(unittest.TestCase):
         self.assertGreaterEqual(score["recall"], 0.99)
         self.assertGreaterEqual(score["order_correlation"], 0.99)
 
+    def test_coherent_retelling_keeps_full_fidelity(self):
+        events = _story(["いぬ", "いぬ", "ねこ"], ["みつける", "たべる", "なく"],
+                        ["さかな", "さかな", ""], "http://x/1")["events"]
+        score = jr.score_retelling(events, jr.retell(events))
+        self.assertGreaterEqual(score["coherence"], 0.99)
+        self.assertAlmostEqual(score["fidelity"], score["structural_fidelity"], places=3)
+
+    def test_deictic_placeholder_on_every_clause_is_incoherent(self):
+        # the "それが<壊れた動詞>" degeneracy a caregiver flags as 意味不明
+        events = [{"subject": "それ", "verb": v, "obj": "", "confidence": 0.9, "roles": {}}
+                  for v in ("うめる", "まもなく", "しぬ", "でる", "もでてく")]
+        self.assertLess(jr.retelling_coherence(events), 0.4)
+        score = jr.score_retelling(events, jr.retell(events))
+        self.assertLess(score["fidelity"], score["structural_fidelity"])
+        self.assertLess(score["fidelity"], 0.4)
+
+    def test_stranded_particle_in_the_verb_slot_lowers_coherence(self):
+        broken = [{"subject": "いったいまいにちどんな", "verb": "のをたべているんです",
+                   "obj": "", "confidence": 0.9, "roles": {}},
+                  {"subject": "いったいまいにちどんな", "verb": "きく",
+                   "obj": "", "confidence": 0.9, "roles": {}},
+                  {"subject": "いったいまいにちどんな", "verb": "う",
+                   "obj": "", "confidence": 0.9, "roles": {}}]
+        self.assertLess(jr.retelling_coherence(broken), 0.3)
+
     def test_in_order_retelling_beats_shuffled_on_held_out_stories(self):
         stories = folktale_stories()
         report = jr.evaluate_retelling(stories, {})

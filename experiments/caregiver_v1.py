@@ -69,7 +69,7 @@ def _fidelity_band(fidelity: float | None) -> int:
     the metric."""
     if fidelity is None:
         return 2
-    return 1 if fidelity >= 0.6 else 3 if fidelity < 0.35 else 2
+    return 1 if fidelity >= 0.65 else 3 if fidelity < 0.3 else 2
 
 
 def generate_questions(recent: list[dict], cycle: int, model=None) -> list[dict]:

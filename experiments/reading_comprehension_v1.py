@@ -144,13 +144,19 @@ def book_comprehension(events: list[dict], model: ComprehensionModel,
                 / max(1, len({e.get("subject") for e in events} |
                              {e.get("obj") for e in events})))
 
+    from japanese_retell_v1 import retelling_coherence
+    # a book whose extracted structure does not read as Japanese must not
+    # graduate on ordering/coverage cues alone -- gate the score by coherence
+    coherence = retelling_coherence(events)
     score = round(0.4 * consequence + 0.3 * max(0.0, ordering - 0.5) * 2
                   + 0.2 * protagonist + 0.1 * coverage, 3)
-    return {"score": min(1.0, score),
+    score = round(min(1.0, score) * (0.5 + 0.5 * coherence), 3)
+    return {"score": score,
             "tests": {"consequence": round(consequence, 3),
                       "consequence_baseline": round(consequence_baseline, 3),
                       "ordering": round(ordering, 3),
                       "protagonist": protagonist,
+                      "coherence": coherence,
                       "known_word_coverage": round(coverage, 3)}}
 
 
