@@ -56,6 +56,7 @@ from abstraction_world_v46 import (assess_open_transfer, empty_abstraction_memor
                                    learn_abstractions)
 from verified_experience_v47 import select_experience_profile
 from experience_rule_learning_v50 import learn_experience_rules
+import japanese_reader_v1 as japanese_reader
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -251,6 +252,40 @@ def _tool_use_ja(tool_use: dict) -> str:
         return "LLM操作       : 未計測（ローカルAI利用時のみ）"
     return (f"LLM操作       : 検証成功率 {rate:.0%}（LLM出力を自分の知識で検証できた割合、"
             f"傾向: {TREND_JA.get(tool_use.get('success_trend'), 'データ不足')}）")
+
+
+def _japanese_reading_ja(reading_status: dict) -> list[str]:
+    """Compact block for the parallel developmental Japanese reading loop."""
+    if not reading_status or reading_status.get("error"):
+        return [f"日本語読書     : 未実行" + (f"（{reading_status['error']}）"
+                                              if reading_status.get("error") else "")]
+    cur = reading_status.get("curriculum", {}) or {}
+    reading = reading_status.get("reading", {}) or {}
+    comp = reading_status.get("comprehension", {}) or {}
+    ret = reading_status.get("retelling", {}) or {}
+    seq = reading_status.get("sequence", {}) or {}
+    lines = [
+        f"読解レベル     : {cur.get('level')}（{cur.get('milestone')} / {cur.get('reading_age')}）",
+        f"本棚           : 回転中 {cur.get('in_rotation', 0)}、卒業 {cur.get('graduated', 0)}、"
+        f"棚上げ {cur.get('shelved_above_level', 0)}＋手詰まり {cur.get('shelved_stuck', 0)}",
+        f"日本語語彙     : seen {cur.get('vocabulary_seen', 0)}／used {cur.get('vocabulary_used', 0)}／"
+        f"explained {cur.get('vocabulary_explained', 0)}",
+        f"直近の読書     : {reading.get('title', '-')} → {reading.get('status', '-')} "
+        f"（理解 {reading.get('comprehension')}）",
+    ]
+    if comp.get("comprehension_score") is not None:
+        lines.append(f"理解（固定検証）: {comp.get('comprehension_score')}"
+                     f"（基準超え {comp.get('beats_baseline')}、傾向 "
+                     f"{TREND_JA.get(comp.get('comprehension_trend'), 'データ不足')}）")
+    if ret.get("fidelity") is not None:
+        lines.append(f"再話（固定検証）: 忠実度 {ret.get('fidelity')}／基準 {ret.get('fidelity_baseline')}"
+                     f"（基準超え {ret.get('beats_baseline')}）")
+    if seq.get("held_out_bits_per_char") is not None:
+        lines.append(f"日本語文字RNN  : {seq.get('held_out_bits_per_char')} bits/char"
+                     f"（基準 {seq.get('baseline_bits_per_char')}、基準超え {seq.get('beats_char_baseline')}）")
+    if reading_status.get("level_advance", {}).get("advanced"):
+        lines.append(f"★ レベル上昇 → {reading_status['level_advance']['level']}")
+    return lines
 
 
 def _event_ja(event: str | None) -> str:
@@ -546,6 +581,8 @@ def render_human_status(status: dict, now_epoch: float | None = None,
              + (f"（未見 {learned_eval.get('correct', 0)}/{learned_eval.get('total', 0)}、単純基準 {learned_eval.get('baseline_correct', 0)}）"
                 if learned_eval.get('total') else ""),
              f"最優先の弱点   : {DIMENSION_JA.get(mastery.get('weakest_dimension'), mastery.get('weakest_dimension') or '未判定')}",
+             "", "日本語読書（発達的・英語と並行）", "-" * 34,
+             *_japanese_reading_ja(status.get("japanese_reading", {})),
              "", "ストレージ", "-" * 34]
     lines.extend([
         f"永続データ     : {human_bytes(storage.get('runtime_bytes'))}",
@@ -1301,6 +1338,9 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "generative_dialogue": report.get("generative_dialogue") or {
             key: read_json(runtime / "generative-dialogue.json").get(key) for key in
             ("status", "overall_comprehension_rate", "comprehension_trend", "best_strategy")},
+        "japanese_reading": report.get("japanese_reading") or {
+            key: read_json(runtime / "reading-status.json").get(key) for key in
+            ("cycle", "reading", "curriculum", "comprehension", "retelling", "sequence")},
         "storage": read_json(runtime / "storage-status.json"),
         "global_memory": report.get("global_memory") or read_json(
             runtime / "global-language-memory.json").get("totals", {}),
@@ -1650,6 +1690,16 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                                              ("status", "overall_comprehension_rate",
                                               "comprehension_trend", "best_strategy")}
         write_json(curriculum_path, curriculum)
+        # Parallel developmental Japanese reading loop.  Its state lives entirely
+        # in .local/reading-*.json and is independent of the English pipeline; a
+        # failure here is caught so it can never stall the main worker.
+        try:
+            reading_status = japanese_reader.run_once(runtime)
+            report["japanese_reading"] = {k: reading_status.get(k) for k in
+                                          ("cycle", "books_fetched", "reading", "level_advance",
+                                           "curriculum", "comprehension", "retelling", "sequence")}
+        except Exception as reading_error:  # isolate the parallel loop
+            report["japanese_reading"] = {"error": f"{type(reading_error).__name__}: {reading_error}"}
         if report.get("autonomy", {}).get("mode") == "capability_plateau":
             latest = status_record(seed, runtime, "capability_plateau", round_number, report)
             write_json(status_path, latest)
