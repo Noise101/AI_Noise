@@ -100,6 +100,18 @@ _RUBY = re.compile(r"《[^》]*》|[｜|]")
 _NOTES = re.compile(r"(底本[:：].*|この作品は.*|パブリックドメイン.*|翻訳者[:：].*)", re.S)
 _BRACKET = re.compile(r"[\[［].{0,40}?[\]］]")
 JP_CHARS = re.compile(r"[぀-ヿ㐀-鿿]")
+_HIRA = re.compile(r"[ぁ-ゖ]")
+_KATA = re.compile(r"[ァ-ヶ]")
+
+
+def _modernise(text: str) -> str:
+    """Old children's texts are set entirely in katakana (一ピキノイヌガ…).
+    When katakana dominates over hiragana it is orthography, not loanwords:
+    fold it to hiragana so the parser and RNN see ordinary Japanese."""
+    kata, hira = len(_KATA.findall(text)), len(_HIRA.findall(text))
+    if kata >= 12 and kata > hira * 1.3:
+        text = _KATA.sub(lambda m: chr(ord(m.group()) - 0x60), text)
+    return text
 
 
 @dataclass
@@ -120,7 +132,7 @@ def _clean(raw: str) -> str:
     text = _BRACKET.sub("", text)
     text = re.sub(r"[ \t　]+", "", text)
     text = re.sub(r"\n{2,}", "\n", text).strip()
-    return text
+    return _modernise(text)
 
 
 def fetch(title: str) -> JapaneseText | None:
@@ -184,7 +196,7 @@ def fetch_aozora(html_url: str) -> JapaneseText | None:
         return None
     text = _RT.sub("", body.group(1))
     text = _TAG.sub("", text).replace("｜", "")
-    text = re.sub(r"[ \t　]+", "", re.sub(r"\n{2,}", "\n", text)).strip()
+    text = _modernise(re.sub(r"[ \t　]+", "", re.sub(r"\n{2,}", "\n", text)).strip())
     if len(JP_CHARS.findall(text)) < 120:
         return None
     title = _aozora_title(html)

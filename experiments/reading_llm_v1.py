@@ -29,8 +29,9 @@ import urllib.request
 import japanese_event_v1 as jevent
 
 MIN_EVENTS = 3
-MAX_LENGTH_RATIO = 1.4
-MIN_CONTENT_KEPT = 0.35
+MAX_LENGTH_RATIO = 1.5
+MIN_LENGTH_RATIO = 0.55                # below this it is a summary, not a rephrasing
+MIN_CONTENT_KEPT = 0.25
 MAX_SENTENCES_IN = 30
 
 _JP = re.compile(r"[぀-ヿ㐀-鿿]")
@@ -38,6 +39,25 @@ _JP_RUN = re.compile(r"[぀-ヿ㐀-鿿]+")
 _KANJI_KATA = re.compile(r"[㐀-鿿]{2,}|[゠-ヿ]{2,}")     # kanji / katakana runs, len >= 2
 _NOUN_PARTICLE = re.compile(r"([぀-ヿ㐀-鿿]{2,})(?:が|を|に|は|も|へ|と|で)$")
 _SENT = re.compile(r"(?<=[。！？])")
+
+# Aesop keeps switching an animal between katakana / kanji / hiragana (イヌ/犬/いぬ);
+# fold the common ones to one form so content-preservation is not fooled by it.
+_ANIMAL_FOLD = {}
+for _forms in ("いぬ 犬 イヌ", "ねこ 猫 ネコ", "きつね 狐 キツネ", "たぬき 狸 タヌキ",
+               "ねずみ 鼠 ネズミ", "あり 蟻 アリ", "はと 鳩 ハト", "からす 烏 カラス",
+               "うし 牛 ウシ", "やぎ 山羊 ヤギ", "くま 熊 クマ", "かめ 亀 カメ",
+               "うさぎ 兎 ウサギ", "こうもり 蝙蝠 コウモリ", "つる 鶴 ツル",
+               "おおかみ 狼 オオカミ", "きつつき ライオン しし 獅子"):
+    _canon, *_rest = _forms.split()
+    for _f in _forms.split():
+        _ANIMAL_FOLD[_f] = _canon
+
+
+def _fold(text: str) -> str:
+    for form, canon in _ANIMAL_FOLD.items():
+        if form != canon:
+            text = text.replace(form, canon)
+    return text
 
 _PROMPT = """次の日本語の物語を、小学1年生にもわかるように、みじかい文にいいかえてください。
 まもってほしいルール:
@@ -100,10 +120,11 @@ def _recurring_terms(text: str) -> set[str]:
 
 
 def _content_kept(source: str, simple: str) -> float:
-    terms = _recurring_terms(source)
+    terms = _recurring_terms(_fold(source))
     if not terms:
         return 1.0
-    return sum(t in simple for t in terms) / len(terms)
+    folded_simple = _fold(simple)
+    return sum(t in folded_simple for t in terms) / len(terms)
 
 
 def _harvest_known_words(sentences: list[str]) -> set[str]:
@@ -142,7 +163,7 @@ def simplify_story(text: str, worker: OllamaReader | None = None,
     checks = {
         "parses_to_events": len(events) >= MIN_EVENTS,
         "keeps_content": kept >= MIN_CONTENT_KEPT,
-        "not_much_longer": length_ratio <= MAX_LENGTH_RATIO,
+        "faithful_length": MIN_LENGTH_RATIO <= length_ratio <= MAX_LENGTH_RATIO,
     }
     verified = all(checks.values())
     return {

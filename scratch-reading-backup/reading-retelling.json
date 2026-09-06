@@ -1,0 +1,11 @@
+{
+ "version": 1,
+ "status": "insufficient_stories",
+ "train_stories": 29,
+ "test_stories": 7,
+ "fidelity": null,
+ "fidelity_baseline": null,
+ "beats_baseline": false,
+ "significant_streak": 0,
+ "learning_curve": []
+}

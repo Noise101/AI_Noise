@@ -1,6 +1,6 @@
 import unittest
 
-from japanese_corpus_v1 import _clean, _aozora_title, KERNEL_SEED, kernel_titles
+from japanese_corpus_v1 import _clean, _aozora_title, _modernise, KERNEL_SEED, kernel_titles
 
 
 class JapaneseCorpusTest(unittest.TestCase):
@@ -24,6 +24,16 @@ class JapaneseCorpusTest(unittest.TestCase):
         self.assertEqual(
             _aozora_title('<meta  name="DC.Title"  content="ごん狐" />'), "ごん狐")
         self.assertEqual(_aozora_title("<html>no title here</html>"), "")
+
+    def test_modernise_folds_all_katakana_orthography_to_hiragana(self):
+        katakana = "アルトキ、イヌガニクヲクワエテ、ハシヲワタリマシタ。"
+        out = _modernise(katakana)
+        self.assertIn("いぬがにくを", out)
+        self.assertNotIn("イヌ", out)
+
+    def test_modernise_leaves_normal_mixed_text_and_loanwords_alone(self):
+        mixed = "きつねはブドウをみつけました。コップの水をのみました。"
+        self.assertEqual(_modernise(mixed), mixed)
 
     def test_kernel_seed_is_a_small_verified_list(self):
         self.assertTrue(KERNEL_SEED)

@@ -1,0 +1,9 @@
+{
+ "version": 1,
+ "status": "insufficient_stories",
+ "train_stories": 30,
+ "test_stories": 6,
+ "comprehension_score": null,
+ "beats_baseline": false,
+ "learning_curve": []
+}

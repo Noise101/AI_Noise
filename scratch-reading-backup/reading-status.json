@@ -1,0 +1,103 @@
+{
+ "heartbeat": "2026-09-06T13:52:11Z",
+ "cycle": 123,
+ "books_fetched": 0,
+ "reading": {
+  "status": "shelved_no_progress",
+  "comprehension": 0.11,
+  "times_read": 7,
+  "book_level": 2.9,
+  "title": "赤いくつ",
+  "level": 2.9,
+  "retelling": "ちいさい女の子がいました。冬はあつぼったい木のくつをが来ました。いかにがいじらしく見えました。年よりのくつ屋のおかみさんが住にました。年よりのくつ屋のおかみさんが一足こしらえてくれました。年よりのくつ屋のおかみさんが女の子にやることにないました。女の子の名がカレンと言いました。はじめてそれをがいてみました。はじめてそれをが粗末な棺おけのうしろからつきました。はじめてそれをが年とったかっぷくのいいお年よりの奥さまをのせました。",
+  "retelling_score": {
+   "recall": 0.021,
+   "precision": 0.444,
+   "f1": 0.041,
+   "order_correlation": 1.0,
+   "fidelity": 0.424,
+   "original_events": 188,
+   "retold_events": 9
+  },
+  "free_retelling": "のわたしはにはししは聞いた。わたしを見ました。わたしはやん先所をなかった。とわた。それはなんかないればないとた三しはもうのは見てはいった。そのときともうちゅり出しればならなかった。犬はなぜ音を聞いた。わたしはさけんだ。「おまえますとわたしはもうしんか。来まえなく子どもだった。たいへ」「道がぼくは母さんをうではした。どおしくはそのとわたしが一人いた。水のせは行",
+  "free_retelling_score": {
+   "recall": 0.0,
+   "precision": 0.0,
+   "f1": 0.0,
+   "order_correlation": 1.0,
+   "fidelity": 0.4,
+   "original_events": 188,
+   "retold_events": 11
+  }
+ },
+ "level_advance": {
+  "advanced": false,
+  "reason": "4/4 band books graduated, 8 still in rotation"
+ },
+ "curriculum": {
+  "level": 3.0,
+  "milestone": "小学校低学年",
+  "reading_age": "おおよそ6歳向けの本",
+  "explained_ratio_target": 0.0,
+  "vocabulary_seen": 8339,
+  "vocabulary_used": 0,
+  "vocabulary_explained": 0,
+  "known_words": 8339,
+  "shelf_total": 40,
+  "in_rotation": 12,
+  "graduated": 6,
+  "shelved_above_level": 13,
+  "shelved_stuck": 9,
+  "unparsable": 0,
+  "graduated_since_advance": 0,
+  "mean_recent_comprehension": 0.788,
+  "level_advances": 3
+ },
+ "comprehension": {
+  "status": "insufficient_stories",
+  "comprehension_score": null,
+  "consequence": null,
+  "consequence_baseline": null,
+  "consequence_z": null,
+  "beats_baseline": false,
+  "comprehension_trend": null,
+  "test_stories": 6
+ },
+ "retelling": {
+  "status": "insufficient_stories",
+  "fidelity": null,
+  "fidelity_baseline": null,
+  "gain_z": null,
+  "beats_baseline": false,
+  "retelling_trend": null,
+  "test_stories": 7
+ },
+ "sequence": {
+  "status": "improvement_not_yet_significant",
+  "held_out_bits_per_char": 5.0803,
+  "baseline_bits_per_char": 6.0093,
+  "improvement_bits": 0.5725,
+  "improvement_z": 1.452,
+  "beats_char_baseline": false,
+  "perplexity_trend": "improving",
+  "steps_trained": 424905
+ },
+ "sequence_sample": "りました。とガとガス足はおまえなく見でもたちもまった。まわろうとはわたしはなんとあと父ンはリーズな同ょう」とわたしは思った。白のはどもはない。しばらくしに歌を聞いてしました。わたし",
+ "caregiver": {
+  "pending": 3,
+  "human_checked": 0,
+  "human_story_agreement": null,
+  "human_model_agreement": null,
+  "last_batch_cycle": 92
+ },
+ "caregiver_questions": [
+  "Noiseが「家なき子」を読んで、こう理解しました:\n    「生い立ちわたしが捨て子だいました。母親があると思いました。わたしがけっしてねどこにははいらなかいました。わたしが歌を歌いながら暖めてくれました。わたしがいまにいました。わたしが麻の前かけで頭からすっぽりくるんでくれました。」\n  この文章は だれの話に読めますか？　1) つい一度　2) 母親　3) かれ",
+  "Noiseが「朝に就ての童話的構図」を読んで、こう再話しました:\n    「ぷるぷるぷるぷる一ぴきの蟻の兵隊が向ふから走つて来りました。ぷるぷるぷるぷる一ぴきの蟻の兵隊がいちいち詳しく調べました。通れ伝令がしく羊歯の森のなかへ入つて行きました。あつちにがこつちにも忙しく聞え出しました。さすがう睡さにの歩哨もたうとしました。さすが何かひどく笑ひながらやつて」\n  日本語として意味が通っていますか？　1) だいたい通る　2) ときどき変　3) ほとんど意味不明",
+  "Noiseが「ありときのこ」を読んで、こう理解しました:\n    「ぷるぷるぷるぷる一ぴきの蟻の兵隊が向こうから走って来りました。ぷるぷるぷるぷる一ぴきの蟻の兵隊がいちいち詳しく調べました。通れ伝令がしく羊歯の森のなかへはいって行きました。いまがもいました。あっちにがこっちにも忙しく聞こえだしました。さすがうとうねむさにの歩哨もとしました。」\n  この文章は だれの話に読めますか？　1) 通れ伝令　2) いま　3) さす"
+ ],
+ "llm_scaffold": null,
+ "llm_scaffold_totals": {
+  "attempted": 0,
+  "verified": 0
+ }
+}
