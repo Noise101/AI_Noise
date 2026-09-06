@@ -24,6 +24,7 @@ from web_cache import WEB_CACHE, NetworkBudgetExceeded
 from curiosity_drive_v23 import curiosity_pressure
 from mastery_drive_v24 import assess_language_mastery
 from local_conversation_v25 import practice_once
+from llm_tooluse_v1 import OllamaWorker, run as run_tool_use
 from compact_runtime_v26 import compact_historical_seed_reports, compact_runtime
 from curriculum_scoring import curriculum_strategy_allowed, learned_curriculum_score
 from global_memory_v27 import empty_memory, mastery_report, merge_report
@@ -350,6 +351,17 @@ def render_detail_status(runtime: Path) -> str:
                 lines.append(f"      > {s[:76]}")
         for gate, ok in capability.get("capability_gates", {}).items():
             lines.append(f"  [{'x' if ok else ' '}] {gate}")
+
+    tool_use = read_json(runtime / "llm-tooluse.json")
+    if tool_use:
+        lines += ["", "LLM操作 (llm_tooluse_v1)", "-" * 46]
+        lines.append(f"status={tool_use.get('status')} 検証成功率={tool_use.get('overall_verified_rate')} "
+                     f"trend={tool_use.get('success_trend')}")
+        for key, bucket in sorted(tool_use.get("template_performance", {}).items()):
+            lines.append(f"  {key}: {bucket.get('verified')}/{bucket.get('attempts')} "
+                         f"検証率={bucket.get('verified_rate')}")
+        if tool_use.get("best_template"):
+            lines.append(f"  best: {tool_use['best_template']}")
 
     lines += ["", "抽出データ (verified_experience_v47)", "-" * 46]
     lines.append(f"accepted_sentences={verified.get('accepted_sentences')} "
@@ -1355,6 +1367,9 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
             key: read_json(runtime / "sequence-model.json").get(key) for key in
             ("status", "held_out_bits_per_char", "baseline_bits_per_char",
              "improvement_bits", "perplexity_trend", "steps_trained", "samples")},
+        "llm_tool_use": report.get("llm_tool_use") or {
+            key: read_json(runtime / "llm-tooluse.json").get(key) for key in
+            ("status", "overall_verified_rate", "success_trend", "best_template")},
         "storage": read_json(runtime / "storage-status.json"),
         "global_memory": report.get("global_memory") or read_json(
             runtime / "global-language-memory.json").get("totals", {}),
@@ -1665,6 +1680,23 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                                              "web_verification": verification,
                                              "noise_final_judgment": verification.get(
                                                  "hypothesis_status", "unresolved")}
+        # Learn to get verifiable-correct work out of the local model.  Once per
+        # curriculum, gated on the same local-model switch as conversation practice.
+        curriculum.setdefault("tool_use_practiced_seeds", [])
+        if local_conversation and seed not in curriculum["tool_use_practiced_seeds"]:
+            tool_use_path = runtime / "llm-tooluse.json"
+            admitted_sentences = [item["sentence"] for item in
+                                  parser_audit_memory.get("records", {}).values()
+                                  if item.get("curriculum_admitted") is True
+                                  and item.get("sentence")][:400]
+            tool_use = run_tool_use(grounded_forms, admitted_sentences,
+                                    OllamaWorker(), read_json(tool_use_path))
+            write_json(tool_use_path, tool_use)
+            curriculum["tool_use_practiced_seeds"].append(seed)
+            curriculum["tool_use_practiced_seeds"] = curriculum["tool_use_practiced_seeds"][-2000:]
+            report["llm_tool_use"] = {k: tool_use.get(k) for k in
+                                      ("status", "verified_this_run", "tasks_this_run",
+                                       "overall_verified_rate", "success_trend", "best_template")}
         write_json(curriculum_path, curriculum)
         if report.get("autonomy", {}).get("mode") == "capability_plateau":
             latest = status_record(seed, runtime, "capability_plateau", round_number, report)
