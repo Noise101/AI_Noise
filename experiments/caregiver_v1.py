@@ -47,12 +47,20 @@ def _distinct(seq):
 
 
 _PARTICLE_CHARS = set("はがをにへでとのも、。")
+# pronouns / deixis / quantifiers the parser leaves as "subjects" -- never a
+# meaningful multiple-choice answer for "whose story is it?"
+_NON_ENTITY = {"それ", "これ", "あれ", "どれ", "ここ", "そこ", "あそこ", "わたし", "わたくし",
+               "あなた", "きみ", "おまえ", "ぼく", "おれ", "だれ", "なに", "みんな", "みな",
+               "ひとり", "ふたり", "なるほう", "ある", "いる", "こと", "もの", "とき", "ところ",
+               "じぶん", "ひとつ", "そう", "どう", "なるほど"}
 
 
 def _name_like(subject: str) -> bool:
     """A caregiver question is only worth asking if the candidate answers look
-    like real story entities, not parser debris ('冬はあつぼったい木のくつを')."""
-    return bool(subject) and 2 <= len(subject) <= 6 and not (_PARTICLE_CHARS & set(subject))
+    like real story entities, not parser debris ('冬はあつぼったい木のくつを') or
+    pronouns ('それ')."""
+    return (bool(subject) and 2 <= len(subject) <= 6
+            and not (_PARTICLE_CHARS & set(subject)) and subject not in _NON_ENTITY)
 
 
 def _fidelity_band(fidelity: float | None) -> int:
