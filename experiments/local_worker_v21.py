@@ -29,6 +29,7 @@ from curriculum_scoring import curriculum_strategy_allowed, learned_curriculum_s
 from global_memory_v27 import empty_memory, mastery_report, merge_report
 from active_curriculum_v1 import active_learning_targets, deprioritise_syntactic_curiosity
 from capability_report_v1 import build_capability_report
+from sequence_model_v1 import train_and_evaluate as train_sequence_model
 from event_structure_v1 import (SELECTION_ALPHA, classify_trend, passes_gain_gate,
                                 train_and_evaluate as train_event_structure)
 from causal_lab_v30 import run_lab
@@ -341,6 +342,12 @@ def render_detail_status(runtime: Path) -> str:
         sm = capability.get("sequence_model", {})
         lines.append(f"  sequence_model     bits/char={sm.get('held_out_bits_per_char')} "
                      f"trend={sm.get('trend')} generative={sm.get('generative')}")
+        seq = read_json(runtime / "sequence-model.json")
+        if seq.get("samples"):
+            lines.append(f"    steps={seq.get('steps_trained')} "
+                         f"improvement_bits={seq.get('improvement_bits')}  生成例:")
+            for s in seq["samples"][:2]:
+                lines.append(f"      > {s[:76]}")
         for gate, ok in capability.get("capability_gates", {}).items():
             lines.append(f"  [{'x' if ok else ' '}] {gate}")
 
@@ -1344,6 +1351,10 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "event_structure": event_structure,
         "capability_report": report.get("capability_report")
                              or read_json(runtime / "capability-report.json"),
+        "sequence_model": report.get("sequence_model") or {
+            key: read_json(runtime / "sequence-model.json").get(key) for key in
+            ("status", "held_out_bits_per_char", "baseline_bits_per_char",
+             "improvement_bits", "perplexity_trend", "steps_trained", "samples")},
         "storage": read_json(runtime / "storage-status.json"),
         "global_memory": report.get("global_memory") or read_json(
             runtime / "global-language-memory.json").get("totals", {}),
@@ -1522,6 +1533,15 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                      event_structure.pop("emitted_events", []))
         write_json(event_structure_path, event_structure)
         report["event_structure"] = event_structure
+        # Tiny from-scratch character RNN: a continuous bits/char capability
+        # signal and a generative head. Time-boxed; accumulates across cycles.
+        sequence_path = runtime / "sequence-model.json"
+        sequence_model = train_sequence_model(parser_audit_memory, read_json(sequence_path))
+        write_json(sequence_path, sequence_model)
+        report["sequence_model"] = {k: sequence_model.get(k) for k in
+                                    ("status", "held_out_bits_per_char", "baseline_bits_per_char",
+                                     "improvement_bits", "perplexity_trend", "steps_trained",
+                                     "can_sample", "samples")}
         coherent_transitions = verified_experience.get(
             "coherent_transitions", verified_experience.get("transitions", {}))
         contextual_transitions = verified_experience.get("contextual_transitions", {})
