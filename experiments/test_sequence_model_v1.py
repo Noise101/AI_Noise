@@ -44,19 +44,35 @@ class SequenceModelTest(unittest.TestCase):
             source_texts(audit),
             {"u": "the first sentence should lead. the second sentence appears here in order."})
 
-    def test_positive_control_beats_the_char_baseline_and_loss_falls(self):
+    def test_positive_control_clears_the_paired_significance_test(self):
         audit = learnable_audit()
         first = train_and_evaluate(audit, {}, train_seconds=30, max_steps=400)
-        self.assertEqual(first["status"], "beats_char_baseline")
-        self.assertLess(first["held_out_bits_per_char"], first["baseline_bits_per_char"])
+        # a real, huge improvement -> very significant on the per-source test
+        self.assertGreater(first["improvement_z"], 3.0)
+        self.assertLess(first["improvement_p_one_sided"], 0.01)
+        self.assertTrue(first["beats_char_baseline_significant"])
+        # but "beats_char_baseline" needs it to hold for two consecutive cycles
+        self.assertEqual(first["status"], "improvement_not_yet_significant")
+        self.assertFalse(first["beats_char_baseline"])
         second = train_and_evaluate(audit, first, train_seconds=30, max_steps=400)
+        self.assertEqual(second["status"], "beats_char_baseline")
+        self.assertTrue(second["beats_char_baseline"])
+        self.assertEqual(second["significant_streak"], 2)
         self.assertLess(second["mean_train_loss"], first["mean_train_loss"] + 0.01)
-        self.assertGreater(second["steps_trained"], first["steps_trained"])
 
-    def test_negative_control_random_text_does_not_beat_baseline(self):
+    def test_negative_control_random_text_is_not_significant(self):
         report = train_and_evaluate(random_audit(), {}, train_seconds=30, max_steps=400)
-        self.assertGreaterEqual(report["held_out_bits_per_char"],
-                                report["baseline_bits_per_char"] - 0.15)
+        self.assertLess(report["improvement_z"], 3.0)
+        self.assertFalse(report["beats_char_baseline"])
+        self.assertFalse(report["beats_char_baseline_significant"])
+
+    def test_a_tiny_positive_point_gap_that_is_not_significant_earns_no_credit(self):
+        # one held-out source with a hair of improvement: z stays tiny, no credit
+        audit = audit_from({f"Book{c}": ["the fox saw the food and the fox ran home."] * 6
+                            for c in range(30)})
+        report = train_and_evaluate(audit, {}, train_seconds=30, max_steps=15)
+        if report["improvement_bits"] and report["improvement_bits"] > 0:
+            self.assertFalse(report["beats_char_baseline"] and report["improvement_z"] < 3.0)
 
     def test_benchmark_is_frozen_and_never_trains_on_held_out_sources(self):
         audit = learnable_audit()

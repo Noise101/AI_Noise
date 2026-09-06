@@ -241,9 +241,13 @@ def _sequence_model_ja(seq: dict) -> str:
     bpc, base = seq.get("held_out_bits_per_char"), seq.get("baseline_bits_per_char")
     if bpc is None:
         return "文字予測モデル : 訓練データ蓄積中（ゼロから学習する小型RNN、生成能力の基盤）"
-    verdict = "文字統計を学習中" if seq.get("status") == "beats_char_baseline" else "まだ基準未満"
-    return (f"文字予測モデル : {bpc:.2f} bits/char（基準 {base:.2f}、低いほど良い、{verdict}、"
-            f"傾向: {TREND_JA.get(seq.get('perplexity_trend'), 'データ不足')}）")
+    verdict = {"beats_char_baseline": "有意に基準超え（出典単位の対応検定）",
+               "improvement_not_yet_significant": "改善中だが有意性確認前",
+               "below_char_baseline": "まだ基準未満"}.get(seq.get("status"), seq.get("status"))
+    z = seq.get("improvement_z")
+    return (f"文字予測モデル : {bpc:.2f} bits/char（基準 {base:.2f}、低いほど良い、{verdict}"
+            + (f"、z={z:.1f}" if z is not None else "")
+            + f"、傾向: {TREND_JA.get(seq.get('perplexity_trend'), 'データ不足')}）")
 
 
 def _dialogue_ja(dialogue: dict) -> str:
@@ -373,11 +377,15 @@ def render_detail_status(runtime: Path) -> str:
                          + ("  [確定]" if d["confirmed_on_final_split"] else ""))
         sm = capability.get("sequence_model", {})
         lines.append(f"  sequence_model     bits/char={sm.get('held_out_bits_per_char')} "
-                     f"trend={sm.get('trend')} generative={sm.get('generative')}")
+                     f"base={sm.get('baseline_bits_per_char')} "
+                     f"improvement={sm.get('improvement_bits')} z={sm.get('improvement_z')} "
+                     f"p={sm.get('improvement_p_one_sided')} "
+                     f"beats_baseline={sm.get('beats_char_baseline')}")
         seq = read_json(runtime / "sequence-model.json")
         if seq.get("samples"):
             lines.append(f"    steps={seq.get('steps_trained')} "
-                         f"improvement_bits={seq.get('improvement_bits')}  生成例:")
+                         f"held_out_sources={seq.get('held_out_sources_evaluated')} "
+                         f"streak={seq.get('significant_streak')} status={seq.get('status')}  生成例:")
             for s in seq["samples"][:2]:
                 lines.append(f"      > {s[:76]}")
         for gate, ok in capability.get("capability_gates", {}).items():

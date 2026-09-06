@@ -90,9 +90,13 @@ def build_capability_report(event_structure: dict, verified_summary: dict,
         "evaluation": revision_eval,
     }
 
-    ppl = sequence_model.get("held_out_bits_per_char")
     sequence = {
-        "held_out_bits_per_char": ppl,
+        "held_out_bits_per_char": sequence_model.get("held_out_bits_per_char"),
+        "baseline_bits_per_char": sequence_model.get("baseline_bits_per_char"),
+        "improvement_bits": sequence_model.get("improvement_bits"),
+        "improvement_z": sequence_model.get("improvement_z"),
+        "improvement_p_one_sided": sequence_model.get("improvement_p_one_sided"),
+        "beats_char_baseline": bool(sequence_model.get("beats_char_baseline")),
         "trend": sequence_model.get("perplexity_trend", "not_yet_measured"),
         "generative": bool(sequence_model.get("can_sample")),
     }
@@ -104,7 +108,7 @@ def build_capability_report(event_structure: dict, verified_summary: dict,
             any(d["lift_per_1k_training_events"] > 0 and d["trend"] == "improving"
                 for d in dimensions.values()),
         "reusable_rules_beat_baseline": revision["material_lift"] and revision["reusable_rules"] > 0,
-        "sequence_model_perplexity_improving": sequence["trend"] == "improving",
+        "sequence_model_beats_char_baseline": sequence["beats_char_baseline"],
         "extraction_is_growing": extraction["accepted_sentences_delta"] >= 0,
     }
 

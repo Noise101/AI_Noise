@@ -40,6 +40,12 @@ DEFAULT_TRAIN_SECONDS = 8.0
 MIN_TRAIN_CHARS = 4000
 MIN_EVAL_CHARS = 2000
 MAX_EVAL_CHARS = 25000        # pure-Python eval is O(chars * hidden * vocab)
+MIN_EVAL_SOURCES = 8         # need enough independent documents for the paired test
+# One-sided z the per-source paired improvement must clear before the model is
+# credited with beating the char baseline.  z >= 3 is one-sided p ~= 0.0013 --
+# a strict single-hypothesis bar (there is one model and one baseline here, so
+# there is no model family to Bonferroni-correct over, unlike event_structure).
+SIGNIFICANCE_Z = 3.0
 BENCHMARK_SALT = "sequence-model-benchmark:v1"
 
 _KEEP = re.compile(r"[a-z .,!?'\"-]")
@@ -288,6 +294,10 @@ def train_and_evaluate(audit_memory: dict, previous: dict | None = None,
                 "benchmark": {"locked": False},
                 "train_chars": train_chars, "held_out_chars": held_chars,
                 "held_out_bits_per_char": None, "baseline_bits_per_char": None,
+                "improvement_bits": None, "improvement_z": None,
+                "improvement_p_one_sided": None, "held_out_sources_evaluated": 0,
+                "beats_char_baseline": False, "beats_char_baseline_significant": False,
+                "significant_streak": 0,
                 "perplexity_trend": "not_yet_measured", "can_sample": False,
                 "learning_curve": list(previous.get("learning_curve", [])), "samples": []}
 
@@ -317,29 +327,59 @@ def train_and_evaluate(audit_memory: dict, previous: dict | None = None,
     for url in train_urls:
         base_counts.update(texts[url])
     base_total = sum(base_counts.values())
-    base_nll = 0.0
-    held_n = 0
-    for url in held_urls:
-        for ch in texts[url]:
-            p = base_counts.get(ch, 0.5) / base_total
-            base_nll += -math.log(max(p, 1e-12))
-            held_n += 1
-    baseline_bpc = (base_nll / held_n / math.log(2)) if held_n else 0.0
+    log_base = {ch: math.log(max(base_counts.get(ch, 0.5) / base_total, 1e-12))
+                for text in texts.values() for ch in text}
 
-    model_bpc, evaluated = 0.0, 0
+    # Per held-out SOURCE: the model's and the baseline's bits/char.  Sources are
+    # independent documents (different collections), so a one-sided test over the
+    # per-source improvement is an honest significance check that also absorbs
+    # within-document autocorrelation.
+    per_source: list[tuple[float, float, int]] = []   # (model_bpc, baseline_bpc, n)
+    model_nll = base_nll = evaluated = 0.0
     for url in sorted(held_urls):
         if evaluated >= MAX_EVAL_CHARS:
             break
-        bpc, n = model.bits_per_char(texts[url][:MAX_EVAL_CHARS])
-        model_bpc += bpc * n
+        text = texts[url][:MAX_EVAL_CHARS]
+        m_bpc, n = model.bits_per_char(text)
+        if n < 40:
+            continue
+        b_nll = sum(-log_base.get(ch, math.log(1e-12)) for a, ch in zip(text, text[1:])
+                    if a in model.index and ch in model.index)
+        b_bpc = b_nll / n / math.log(2)
+        per_source.append((m_bpc, b_bpc, n))
+        model_nll += m_bpc * n
+        base_nll += b_bpc * n
         evaluated += n
-    model_bpc = model_bpc / evaluated if evaluated else 0.0
+    model_bpc = model_nll / evaluated if evaluated else 0.0
+    baseline_bpc = base_nll / evaluated if evaluated else 0.0
+
+    improvements = [b - m for m, b, _ in per_source]
+    n_sources = len(improvements)
+    mean_gain = sum(improvements) / n_sources if n_sources else 0.0
+    if n_sources >= 2:
+        var = sum((d - mean_gain) ** 2 for d in improvements) / (n_sources - 1)
+        se = math.sqrt(var / n_sources) if var > 0 else 0.0
+        z = mean_gain / se if se > 0 else (99.0 if mean_gain > 0 else 0.0)
+    else:
+        se = z = 0.0
+    p_one_sided = round(0.5 * math.erfc(z / math.sqrt(2)), 6) if z > 0 else 1.0
+
+    # The single point comparison would flip on noise once the model is good;
+    # require the per-source improvement to clear a strict one-sided z, and to
+    # have held for two consecutive cycles before it counts as capability.
+    significant_now = (n_sources >= MIN_EVAL_SOURCES and z >= SIGNIFICANCE_Z
+                       and evaluated >= MIN_EVAL_CHARS)
+    prior_significant = previous.get("beats_char_baseline_significant", False)
+    confirmed = significant_now and (prior_significant or previous.get("significant_streak", 0) >= 1)
+    streak = previous.get("significant_streak", 0) + 1 if significant_now else 0
 
     learning_curve = list(previous.get("learning_curve", []))
     point = {"steps_trained": steps_trained, "train_chars": train_chars,
              "held_out_bits_per_char": round(model_bpc, 4),
              "baseline_bits_per_char": round(baseline_bpc, 4),
-             "improvement_bits": round(baseline_bpc - model_bpc, 4)}
+             "improvement_bits": round(mean_gain, 4),
+             "improvement_z": round(z, 3), "p_one_sided": p_one_sided,
+             "significant": significant_now}
     if not learning_curve or learning_curve[-1]["steps_trained"] != steps_trained:
         learning_curve.append(point)
     learning_curve = learning_curve[-200:]
@@ -352,12 +392,12 @@ def train_and_evaluate(audit_memory: dict, previous: dict | None = None,
     else:
         trend = "insufficient_data"
 
-    beats_baseline = model_bpc < baseline_bpc and evaluated >= MIN_EVAL_CHARS
     samples = [model.sample("the ", 100, 0.7, rng), model.sample("a ", 100, 0.9, rng)]
 
     return {
         "version": VERSION,
-        "status": "beats_char_baseline" if beats_baseline else "below_char_baseline",
+        "status": "beats_char_baseline" if confirmed else
+                  "improvement_not_yet_significant" if mean_gain > 0 else "below_char_baseline",
         "benchmark": {"locked": True,
                       "held_out_collections": sorted({collection_key(u) for u in held_urls}),
                       "train_sources": len(train_urls), "held_out_sources": len(held_urls)},
@@ -367,15 +407,22 @@ def train_and_evaluate(audit_memory: dict, previous: dict | None = None,
         "mean_train_loss": round(loss_sum / steps, 4) if steps else None,
         "held_out_bits_per_char": round(model_bpc, 4),
         "baseline_bits_per_char": round(baseline_bpc, 4),
-        "improvement_bits": round(baseline_bpc - model_bpc, 4),
+        "improvement_bits": round(mean_gain, 4),
+        "held_out_sources_evaluated": n_sources,
+        "improvement_z": round(z, 3),
+        "improvement_p_one_sided": p_one_sided,
+        "improvement_ci_low_bits": round(mean_gain - 2 * se, 4),
+        "significant_streak": streak,
         "perplexity_trend": trend,
         "can_sample": True,
-        "beats_char_baseline": beats_baseline,
+        "beats_char_baseline": confirmed,
+        "beats_char_baseline_significant": significant_now,
         "learning_curve": learning_curve,
         "samples": samples,
         "state": model.state(),
         "limitations": ["character-level; no word or concept supervision",
-                        "credit only when held-out bits/char beats the order-0 baseline"],
+                        "credit only when the per-source improvement clears a strict "
+                        "one-sided z on two consecutive cycles"],
     }
 
 
@@ -391,9 +438,11 @@ def main() -> None:
     report = train_and_evaluate(audit, previous, args.seconds)
     out.write_text(json.dumps(report, ensure_ascii=False, separators=(",", ":")) + "\n",
                    encoding="utf-8")
-    print(json.dumps({k: report[k] for k in
+    print(json.dumps({k: report.get(k) for k in
                       ("status", "held_out_bits_per_char", "baseline_bits_per_char",
-                       "perplexity_trend", "steps_trained", "samples")}, ensure_ascii=False))
+                       "improvement_bits", "improvement_z", "improvement_p_one_sided",
+                       "beats_char_baseline", "perplexity_trend", "steps_trained")},
+                     ensure_ascii=False))
 
 
 if __name__ == "__main__":

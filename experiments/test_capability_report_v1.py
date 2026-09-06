@@ -59,11 +59,14 @@ class CapabilityReportTest(unittest.TestCase):
         report = build_capability_report(event_structure(), {}, {})
         self.assertIsNone(report["sequence_model"]["held_out_bits_per_char"])
         self.assertEqual(report["sequence_model"]["trend"], "not_yet_measured")
+        self.assertFalse(report["capability_gates"]["sequence_model_beats_char_baseline"])
         report2 = build_capability_report(
             event_structure(), {}, {},
-            sequence_model={"held_out_bits_per_char": 2.1, "perplexity_trend": "improving",
+            sequence_model={"held_out_bits_per_char": 2.1, "improvement_z": 5.0,
+                            "beats_char_baseline": True, "perplexity_trend": "improving",
                             "can_sample": True})
-        self.assertTrue(report2["capability_gates"]["sequence_model_perplexity_improving"])
+        self.assertTrue(report2["capability_gates"]["sequence_model_beats_char_baseline"])
+        self.assertEqual(report2["sequence_model"]["improvement_z"], 5.0)
         self.assertTrue(report2["sequence_model"]["generative"])
 
 
