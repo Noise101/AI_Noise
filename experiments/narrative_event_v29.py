@@ -189,11 +189,22 @@ class NarrativeEventExtractor:
             return results
         return [self.extract(sentence, recent_subject, recent_object)]
 
-    def extract_multi_sequence(self, sentences: list[str]) -> list[EventExtraction]:
+    def extract_multi_sequence(self, sentences: list[str],
+                               coreference: "list[str | None] | None" = None,
+                               object_coreference: "list[str | None] | None" = None
+                               ) -> list[EventExtraction]:
         results = []
         recent_subject = recent_object = None
-        for sentence in sentences:
-            extracted = self.extract_multiple(sentence, recent_subject, recent_object)
+        for index, sentence in enumerate(sentences):
+            # A within-document coreference pass (coreference_v1) supplies a
+            # better antecedent than "the last accepted subject": it survives an
+            # intervening failed extraction and follows definite descriptions
+            # ("the poor creature") back to the entity.
+            hinted_subject = coreference[index] if coreference and index < len(coreference) else None
+            hinted_object = (object_coreference[index]
+                             if object_coreference and index < len(object_coreference) else None)
+            extracted = self.extract_multiple(sentence, hinted_subject or recent_subject,
+                                              hinted_object or recent_object)
             results.extend(extracted)
             for result in extracted:
                 if result.accepted and result.event:

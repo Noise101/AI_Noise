@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 from collections import Counter, defaultdict
 
+from coreference_v1 import resolve_document
 from narrative_event_v29 import NarrativeEventExtractor
 
 
@@ -32,14 +33,22 @@ def rebuild_verified_experience(audit_memory: dict,
     rejected = Counter()
     sequences = []
     accepted_sentences = 0
+    coreference_resolutions = 0
     for (seed, source_url), records in sorted(grouped.items()):
         ordered = sorted(records, key=lambda item: item.get("source_position", 0))
         sentences = [item["sentence"] for item in ordered]
+        # Within-document coreference (coreference_v1): resolve subject/object
+        # pronouns to a number/animacy-compatible antecedent from a recency
+        # window, so an event sequence keeps one protagonist thread even across
+        # a sentence whose own extraction failed.
+        doc = resolve_document(sentences)
+        coreference_resolutions += doc.resolutions
         # A coordinate-clause sentence ("The fox saw the grapes and jumped.") is not
         # one ambiguous compound event: split it into its simple clauses first so each
         # can pass the per-clause developmental checks on its own merits, instead of
         # quarantining the whole sentence as outside_simple_clause.
-        results = extractor.extract_multi_sequence(sentences)
+        results = extractor.extract_multi_sequence(
+            sentences, doc.subject_hints, doc.object_hints)
         events = []
         for result in results:
             if result.accepted and result.event and result.quality >= 0.85:
@@ -99,6 +108,7 @@ def rebuild_verified_experience(audit_memory: dict,
             "coherent_transition_observations": sum(
                 sum(items.values()) for items in coherent_transitions.values()),
             "contextual_observations": sum(sum(items.values()) for items in contextual.values()),
+            "coreference_resolutions": coreference_resolutions,
             "quarantined_sentences": sum(rejected.values()),
             "quarantine_reasons": dict(rejected.most_common()),
         },
