@@ -1,7 +1,13 @@
 import gzip
 import json
+import os
 import tempfile
 import unittest
+
+# The parallel Japanese reading loop does its own network fetches, RNN training
+# and (when a story will not parse) a local-LLM call; work() runs it every
+# cycle.  These tests exercise the English pipeline, so switch it off.
+os.environ["AI_NOISE_SKIP_JAPANESE_READING"] = "1"
 import urllib.parse
 from types import SimpleNamespace
 from pathlib import Path

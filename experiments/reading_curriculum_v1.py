@@ -194,6 +194,7 @@ def register_books(curriculum: dict, books: list[dict], cycle: int) -> int:
         in_reach = est <= curriculum["level"] + LEVEL_STEP
         curriculum["shelf"][bid] = {
             "title": book["title"], "url": book["url"], "source": book.get("source", ""),
+            "text": book.get("text", ""),
             "difficulty": difficulty, "estimated_level": est,
             "schema": _schema_signature(book.get("verbs", [])),
             "times_read": 0, "comprehension_history": [],
@@ -264,6 +265,17 @@ def record_reading(curriculum: dict, book_id: str, events: list[dict],
     book = curriculum["shelf"].get(book_id)
     if not book:
         return {"status": "unknown_book"}
+    scorable = [e for e in events if e.get("verb")]
+    if len(scorable) < 3:
+        # Not enough structure to score -- the parser (or the LLM scaffold)
+        # could not turn this text into events.  Set it aside as unparsable
+        # rather than rereading it six times and calling it "stuck": it does
+        # not count as a comprehension failure and returns if the parser improves.
+        book["times_read"] = book.get("times_read", 0) + 1
+        book["last_read_cycle"] = cycle
+        book["status"] = "unparsable"
+        return {"status": "unparsable", "comprehension": None,
+                "times_read": book["times_read"], "book_level": book["estimated_level"]}
     if comprehension is not None:
         score = comprehension
     elif model is not None:                       # reading_comprehension_v1 model
@@ -306,10 +318,10 @@ def maybe_advance_level(curriculum: dict, cycle: int) -> dict:
     graduated_band = [b for b in at_band
                       if b["status"] == "graduated" and b["comprehension_history"]]
     ungraduated_band = [b for b in at_band if b["status"] == "in_rotation"]
-    stuck_band = [b for b in at_band if b["status"] == "shelved_stuck"]
+    dead_band = [b for b in at_band if b["status"] in ("shelved_stuck", "unparsable")]
     # advance when the band is essentially exhausted: enough graduates OR every
     # available book at this level has been graduated (a thin shelf must not trap)
-    need = min(GRADUATES_TO_ADVANCE, max(1, len(at_band) - len(stuck_band)))
+    need = min(GRADUATES_TO_ADVANCE, max(1, len(at_band) - len(dead_band)))
     if not graduated_band or len(graduated_band) < need or ungraduated_band:
         return {"advanced": False,
                 "reason": f"{len(graduated_band)}/{need} band books graduated, "
@@ -398,6 +410,7 @@ def summary(curriculum: dict) -> dict:
         "graduated": by_status.get("graduated", 0),
         "shelved_above_level": by_status.get("shelved_above_level", 0),
         "shelved_stuck": by_status.get("shelved_stuck", 0),
+        "unparsable": by_status.get("unparsable", 0),
         "graduated_since_advance": curriculum.get("graduated_since_advance", 0),
         "mean_recent_comprehension": round(sum(recent) / len(recent), 3) if recent else None,
         "level_advances": len(curriculum["level_history"]) - 1,

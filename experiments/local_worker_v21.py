@@ -285,6 +285,10 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
                      f"（基準 {seq.get('baseline_bits_per_char')}、基準超え {seq.get('beats_char_baseline')}）")
     if reading_status.get("level_advance", {}).get("advanced"):
         lines.append(f"★ レベル上昇 → {reading_status['level_advance']['level']}")
+    sc = reading_status.get("llm_scaffold_totals", {}) or {}
+    if sc.get("attempted"):
+        lines.append(f"LLM読解補助    : {sc.get('verified')}/{sc.get('attempted')}冊"
+                     f"（解析不能な物語をローカルLLMが平易化、検証済みのみ・固定検証には不使用）")
     care = reading_status.get("caregiver", {}) or {}
     if care.get("human_checked"):
         lines.append(f"保護者確認     : {care['human_checked']}問（物語一致 "
@@ -1350,7 +1354,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "japanese_reading": report.get("japanese_reading") or {
             key: read_json(runtime / "reading-status.json").get(key) for key in
             ("cycle", "reading", "curriculum", "comprehension", "retelling", "sequence",
-             "caregiver", "caregiver_questions")},
+             "caregiver", "caregiver_questions", "llm_scaffold_totals")},
         "storage": read_json(runtime / "storage-status.json"),
         "global_memory": report.get("global_memory") or read_json(
             runtime / "global-language-memory.json").get("totals", {}),
@@ -1703,14 +1707,16 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         # Parallel developmental Japanese reading loop.  Its state lives entirely
         # in .local/reading-*.json and is independent of the English pipeline; a
         # failure here is caught so it can never stall the main worker.
-        try:
-            reading_status = japanese_reader.run_once(runtime)
-            report["japanese_reading"] = {k: reading_status.get(k) for k in
-                                          ("cycle", "books_fetched", "reading", "level_advance",
-                                           "curriculum", "comprehension", "retelling", "sequence",
-                                           "caregiver", "caregiver_questions")}
-        except Exception as reading_error:  # isolate the parallel loop
-            report["japanese_reading"] = {"error": f"{type(reading_error).__name__}: {reading_error}"}
+        # AI_NOISE_SKIP_JAPANESE_READING=1 turns it off (tests, or English-only runs).
+        if os.environ.get("AI_NOISE_SKIP_JAPANESE_READING") != "1":
+            try:
+                reading_status = japanese_reader.run_once(runtime)
+                report["japanese_reading"] = {k: reading_status.get(k) for k in
+                                              ("cycle", "books_fetched", "reading", "level_advance",
+                                               "curriculum", "comprehension", "retelling", "sequence",
+                                               "caregiver", "caregiver_questions", "llm_scaffold_totals")}
+            except Exception as reading_error:  # isolate the parallel loop
+                report["japanese_reading"] = {"error": f"{type(reading_error).__name__}: {reading_error}"}
         if report.get("autonomy", {}).get("mode") == "capability_plateau":
             latest = status_record(seed, runtime, "capability_plateau", round_number, report)
             write_json(status_path, latest)

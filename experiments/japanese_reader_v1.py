@@ -30,6 +30,7 @@ import reading_comprehension_v1 as comprehension
 import japanese_retell_v1 as retell
 import japanese_sequence_v1 as sequence
 import caregiver_v1 as caregiver
+import reading_llm_v1 as reading_llm
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RUNTIME = ROOT / ".local"
@@ -65,6 +66,11 @@ def _write(path: Path, value: dict) -> None:
 
 def _events_of(text: str) -> list[dict]:
     return [e.__dict__ for e in jevent.extract_story(text)]
+
+
+def _scaffold_totals(scaffolded: dict) -> dict:
+    return {"attempted": len(scaffolded),
+            "verified": sum(1 for v in scaffolded.values() if v.get("status") == "simplified")}
 
 
 def _within_reach(text: str, level: float) -> bool:
@@ -159,17 +165,36 @@ def run_once(runtime: Path) -> dict:
         cur["last_fetch_cycle"] = cycle
         events_store = _read_events()
 
-    # a comprehension model from every story read so far
-    read_events = [ev for bid, ev in events_store.items()
-                   if cur["shelf"].get(bid, {}).get("times_read", 0) > 0 and len(ev) >= 3]
-    model = comprehension.ComprehensionModel().fit(read_events) if len(read_events) >= 5 else None
-
     book_id = curriculum.retention_check_due(cur, cycle) or curriculum.select_next_book(cur)
     reading = {"status": "no_book"}
+    scaffold = None
     if book_id:
+        # a per-book comprehension model must not train on the book it scores
+        others = [ev for bid, ev in events_store.items()
+                  if bid != book_id and cur["shelf"].get(bid, {}).get("times_read", 0) > 0
+                  and len(ev) >= 3]
+        model = comprehension.ComprehensionModel().fit(others) if len(others) >= 5 else None
         book = cur["shelf"][book_id]
         events = events_store.get(book_id) or _events_of(book.get("text", ""))
         events_store.setdefault(book_id, events)
+        # local-LLM reading scaffold: a story Noise cannot parse (a caregiver
+        # would paraphrase the hard passages) -- verified to parse and preserve
+        # content, then used only for this book's comprehension, never the
+        # frozen benchmark or the RNN.
+        tried = cur.setdefault("llm_scaffolded", {})
+        parseable = sum(1 for e in events if e.get("verb"))
+        if (parseable < reading_llm.MIN_EVENTS and book_id not in tried
+                and book.get("text") and reading_llm.OllamaReader().available()):
+            base_known = {w for w, info in cur.get("known_words", {}).items()
+                          if info.get("books", 0) >= 1}
+            scaffold = reading_llm.simplify_story(book["text"], base_known_words=base_known)
+            tried[book_id] = {"status": scaffold["status"],
+                              "event_count": scaffold.get("event_count", 0),
+                              "content_kept": scaffold.get("content_kept"), "cycle": cycle}
+            if scaffold.get("verified"):
+                events = scaffold["events"]
+                events_store[book_id] = events
+                book["scaffolded"] = True
         reading = curriculum.record_reading(cur, book_id, events, cycle, model=model)
         reading["title"] = book["title"]
         reading["level"] = book["estimated_level"]
@@ -180,16 +205,19 @@ def run_once(runtime: Path) -> dict:
 
     advance = curriculum.maybe_advance_level(cur, cycle)
 
-    # frozen-benchmark capability measurements over all stories with events
+    # frozen-benchmark capability measurements -- real reading only, never the
+    # LLM-scaffolded books
+    real = {bid for bid, b in cur["shelf"].items() if not b.get("scaffolded")}
     all_stories = [{"url": cur["shelf"][bid]["url"], "events": ev}
-                   for bid, ev in events_store.items() if bid in cur["shelf"] and len(ev) >= 3]
+                   for bid, ev in events_store.items()
+                   if bid in real and len(ev) >= 3]
     comp_report = comprehension.evaluate_comprehension(all_stories, prev_comp)
     retell_report = retell.evaluate_retelling(all_stories, prev_retell)
 
     # character RNN over the sentences read so far (continuous capability signal)
     seq_texts: dict[str, str] = {}
     for bid, ev in events_store.items():
-        if bid in cur["shelf"] and ev:
+        if bid in real and ev:
             url = cur["shelf"][bid]["url"]
             seq_texts[url] = seq_texts.get(url, "") + "".join(e.get("sentence", "") for e in ev)
     seq_report = sequence.train_and_evaluate(seq_texts, prev_seq, SEQUENCE_TRAIN_SECONDS)
@@ -244,6 +272,10 @@ def run_once(runtime: Path) -> dict:
         "sequence_sample": (seq_report.get("samples") or [""])[0],
         "caregiver": caregiver.summary(care_state),
         "caregiver_questions": [q["prompt"] for q in care_state.get("pending", [])],
+        "llm_scaffold": ({"book": reading.get("title"), **{k: scaffold.get(k) for k in
+                          ("status", "event_count", "content_kept", "length_ratio")}}
+                         if scaffold else None),
+        "llm_scaffold_totals": _scaffold_totals(cur.get("llm_scaffolded", {})),
     }
     _write(runtime / STATUS_FILE, status)
     return status
@@ -319,6 +351,10 @@ def render_status(runtime: Path) -> str:
         lines.append(f"  {free[:120]}")
     if s.get("level_advance", {}).get("advanced"):
         lines.append(f"★ レベル上昇 → {s['level_advance']['level']}")
+    sc = s.get("llm_scaffold_totals", {})
+    if sc.get("attempted"):
+        lines.append(f"LLM読解補助: {sc.get('verified')}/{sc.get('attempted')}冊 "
+                     f"(解析できない物語をローカルLLMが平易化、検証済みのみ採用・固定検証には不使用)")
     care = s.get("caregiver", {})
     if care.get("human_checked"):
         lines.append(f"保護者確認 : {care['human_checked']}問回答済み"
