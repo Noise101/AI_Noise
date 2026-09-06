@@ -63,6 +63,36 @@ and `representation_learning_v31` (all next-event predictors) were retired.
 Causal succession prediction is honestly unevaluated until the corpus carries
 contrastive or interventional evidence (invariant 6).
 
+## The learning stack below event_structure
+
+Five modules feed or extend the predictor, each earning capability credit only
+by the usual gate (beat the baseline on a frozen, source-disjoint split):
+
+- **`coreference_v1`** — within-document pronoun/entity resolution before
+  extraction, so an event sequence keeps one protagonist thread. Rule-based;
+  no coreference-by-description.
+- **`proposition_v1`** — turns discarded copular/possessive clauses into
+  `entity|relation|value` propositions. Currently a data feed only (measured to
+  carry no predictive signal on the present expository-heavy corpus).
+- **`sequence_model_v1`** — a tiny from-scratch character RNN (hidden 24,
+  ~4k params, no numpy, hand-written BPTT), time-boxed and incremental. Its
+  held-out bits/char is a *continuous* capability signal and its `sample()`
+  head is the generative substrate. It is not a substitute for a learning
+  mechanism and carries zero credit until it beats the order-0 char baseline.
+- **`active_curriculum_v1`** — retires closed-class curiosity gags ("in the")
+  and turns the frozen model's held-out misses into search seeds, so discovery
+  targets what the model gets wrong rather than what is frequent.
+- **`capability_report_v1`** — one continuous multi-dimensional dashboard
+  (per-task accuracy/lift/significance/coverage/trend, learning *efficiency* =
+  lift slope vs training size, sequence-model perplexity, extraction health,
+  boolean gates). Replaces "plateau: yes/no".
+
+`llm_tooluse_v1` and `generative_dialogue_v1` are skill loops, not knowledge
+paths: Noise formulates a checkable sub-task / composes an utterance, and the
+local model's reply is scored only for *usefulness* (verified against Noise's
+own grounded vocabulary and parser) or *comprehension* (was Noise understood).
+The reply never updates a belief (invariants 10, 13).
+
 ## Decision replay, not state replay
 
 `.local/events.jsonl` is an append-only, cross-module log (`{ts, curricula, module, event_type, before, after, reason}` per line) of discrete state-changing decisions: a benchmark locking, a selected model switching. It exists to answer "when and why did the system decide this" without trusting a human's memory of a status snapshot, and it coexists with (does not replace) each module's own bounded `revision_history`-style fields, which the algorithms themselves still read.

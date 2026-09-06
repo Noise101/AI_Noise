@@ -41,3 +41,10 @@ python3 -m unittest discover -v
 - `error_memory_v35.py`: 誤予測・反証・訂正内容を重複なく保存する横断的な誤り記憶
 - `visual_memory_v36.py`: 出典付き縮小画像を視覚特徴として観測し、言語との未検証連想を保存
 - `event_structure_v1.py`: world_model_v51／association_learning_v33／causal_experiment_v28／representation_learning_v31 を置換。次イベント予測に有意信号がないため、イベント内部構造（動詞クローズ・妥当性判定）を出典分離の固定ベンチマークで評価
+- `coreference_v1.py`: 出典内共参照。代名詞・エンティティを数・有生性・近接窓で解決し、抽出前に主語スレッドを一本化
+- `proposition_v1.py`: 行動抽出が捨てる繋辞・所有節を entity|relation|value 命題に変換（現状はデータ供給のみ）
+- `sequence_model_v1.py`: ゼロから学習する極小文字RNN（隠れ24、numpyなし、手書きBPTT）。連続的 bits/char 信号と生成ヘッド
+- `active_curriculum_v1.py`: 頻度駆動の閉じ級好奇心を退役させ、固定ベンチマークの誤りを検索シードに変える能動学習
+- `capability_report_v1.py`: 連続・多次元の能力ダッシュボード（学習効率＝lift勾配、perplexity、抽出健全性、ゲート）
+- `llm_tooluse_v1.py`: 検証可能なサブタスクをローカルモデルに投げ、接地語彙とパーサで検証し、有効なプロンプト形式を学習
+- `generative_dialogue_v1.py`: 発話を構成しローカルモデルを環境として使い、伝達成功を報酬に構成戦略を学習
