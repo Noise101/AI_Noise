@@ -26,6 +26,7 @@ QUICK_MODULES = [
     "test_capability_report_v1",
     "test_sequence_model_v1",
     "test_llm_tooluse_v1",
+    "test_generative_dialogue_v1",
     "test_event_structure_v1",
     "test_compact_runtime_v26",
     "test_global_memory_v27",

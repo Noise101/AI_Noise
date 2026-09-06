@@ -25,6 +25,8 @@ from curiosity_drive_v23 import curiosity_pressure
 from mastery_drive_v24 import assess_language_mastery
 from local_conversation_v25 import practice_once
 from llm_tooluse_v1 import OllamaWorker, run as run_tool_use
+from generative_dialogue_v1 import DialoguePartner, run as run_generative_dialogue
+from sequence_model_v1 import TinyRNN as SequenceRNN
 from compact_runtime_v26 import compact_historical_seed_reports, compact_runtime
 from curriculum_scoring import curriculum_strategy_allowed, learned_curriculum_score
 from global_memory_v27 import empty_memory, mastery_report, merge_report
@@ -362,6 +364,20 @@ def render_detail_status(runtime: Path) -> str:
                          f"検証率={bucket.get('verified_rate')}")
         if tool_use.get("best_template"):
             lines.append(f"  best: {tool_use['best_template']}")
+
+    dialogue_gen = read_json(runtime / "generative-dialogue.json")
+    if dialogue_gen:
+        lines += ["", "生成的対話 (generative_dialogue_v1)", "-" * 46]
+        lines.append(f"status={dialogue_gen.get('status')} "
+                     f"伝達成功率={dialogue_gen.get('overall_comprehension_rate')} "
+                     f"trend={dialogue_gen.get('comprehension_trend')} "
+                     f"best={dialogue_gen.get('best_strategy')}")
+        for strat, bucket in sorted(dialogue_gen.get("strategy_performance", {}).items()):
+            lines.append(f"  {strat}: {bucket.get('understood')}/{bucket.get('turns')} "
+                         f"伝達率={bucket.get('comprehension_rate')}")
+        for turn in dialogue_gen.get("turns", [])[-2:]:
+            lines.append(f"  N> {turn.get('utterance', '')[:70]}")
+            lines.append(f"  P> {(turn.get('partner_reply') or '')[:70]}")
 
     lines += ["", "抽出データ (verified_experience_v47)", "-" * 46]
     lines.append(f"accepted_sentences={verified.get('accepted_sentences')} "
@@ -1370,6 +1386,9 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "llm_tool_use": report.get("llm_tool_use") or {
             key: read_json(runtime / "llm-tooluse.json").get(key) for key in
             ("status", "overall_verified_rate", "success_trend", "best_template")},
+        "generative_dialogue": report.get("generative_dialogue") or {
+            key: read_json(runtime / "generative-dialogue.json").get(key) for key in
+            ("status", "overall_comprehension_rate", "comprehension_trend", "best_strategy")},
         "storage": read_json(runtime / "storage-status.json"),
         "global_memory": report.get("global_memory") or read_json(
             runtime / "global-language-memory.json").get("totals", {}),
@@ -1697,6 +1716,27 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             report["llm_tool_use"] = {k: tool_use.get(k) for k in
                                       ("status", "verified_this_run", "tasks_this_run",
                                        "overall_verified_rate", "success_trend", "best_template")}
+        # Generative dialogue: compose an utterance, measure whether it was
+        # understood, learn which composition strategy communicates.
+        curriculum.setdefault("dialogue_practiced_seeds", [])
+        if local_conversation and seed not in curriculum["dialogue_practiced_seeds"]:
+            dialogue_gen_path = runtime / "generative-dialogue.json"
+            spoken_events = [e for s in verified_experience.get("sequences", [])
+                             for e in s.get("events", [])][:400]
+            rnn_sampler = None
+            seq_state = sequence_model.get("state")
+            if seq_state and seq_state.get("vocab"):
+                rnn_model = SequenceRNN(seq_state["vocab"], seq_state)
+                rnn_sampler = lambda prime: rnn_model.sample(prime, 50, 0.7)
+            dialogue_gen = run_generative_dialogue(
+                spoken_events, DialoguePartner(), read_json(dialogue_gen_path),
+                rnn_sampler, topic=seed.split()[0] if seed else None)
+            write_json(dialogue_gen_path, dialogue_gen)
+            curriculum["dialogue_practiced_seeds"].append(seed)
+            curriculum["dialogue_practiced_seeds"] = curriculum["dialogue_practiced_seeds"][-2000:]
+            report["generative_dialogue"] = {k: dialogue_gen.get(k) for k in
+                                             ("status", "overall_comprehension_rate",
+                                              "comprehension_trend", "best_strategy")}
         write_json(curriculum_path, curriculum)
         if report.get("autonomy", {}).get("mode") == "capability_plateau":
             latest = status_record(seed, runtime, "capability_plateau", round_number, report)
