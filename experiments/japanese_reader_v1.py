@@ -86,15 +86,21 @@ def _fetch_more_books(cur: dict, cycle: int) -> int:
                     break
             if len(fetched) >= 8:
                 break
-    books = [{"title": s.title, "url": s.url, "source": "ja",
-              "text": s.text, "event_count": len(_events_of(s.text))} for s in fetched]
+    books = []
+    fetched_events = {}
+    for s in fetched:
+        evs = _events_of(s.text)
+        fetched_events[s.url] = evs
+        books.append({"title": s.title, "url": s.url, "source": "ja", "text": s.text,
+                      "event_count": len(evs),
+                      "verbs": [e.get("verb", "") for e in evs]})
     added = curriculum.register_books(cur, books, cycle)
     # keep the raw events for the books we just added
     if added:
         events = _read_events()
         for s in fetched:
             bid = curriculum._book_id(s.url, s.title)
-            events.setdefault(bid, _events_of(s.text))
+            events.setdefault(bid, fetched_events[s.url])
         _write_events(events)
     return added
 

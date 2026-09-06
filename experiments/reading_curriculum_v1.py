@@ -85,6 +85,19 @@ def _book_id(url: str, title: str) -> str:
     return hashlib.sha256(f"{url}|{title}".encode()).hexdigest()[:16]
 
 
+def _schema_signature(verbs: list[str]) -> list[str]:
+    """A book's narrative schema, coarsely: the distinct verbs it uses.  Two
+    stories that share many verbs tend to share structure (find -> want ->
+    try -> fail ...), so the curriculum can present familiar structure first."""
+    return sorted({v for v in verbs if v})[:40]
+
+
+def familiar_schema(curriculum: dict) -> set[str]:
+    """Verbs from every book the reader has already understood."""
+    return {v for b in curriculum["shelf"].values()
+            if b["status"] == "graduated" for v in b.get("schema", [])}
+
+
 def text_difficulty(text: str, event_count: int, known_words: set[str]) -> dict:
     words = WORD.findall(text)
     sentences = [s for s in SENT.split(text) if len(s) > 3]
@@ -177,6 +190,7 @@ def register_books(curriculum: dict, books: list[dict], cycle: int) -> int:
         curriculum["shelf"][bid] = {
             "title": book["title"], "url": book["url"], "source": book.get("source", ""),
             "difficulty": difficulty, "estimated_level": est,
+            "schema": _schema_signature(book.get("verbs", [])),
             "times_read": 0, "comprehension_history": [],
             "status": "in_rotation" if in_reach else "shelved_above_level",
             "shelved_at_level": None if in_reach else est,
@@ -215,13 +229,19 @@ def select_next_book(curriculum: dict) -> str | None:
         b["status"] = "in_rotation"
         return bid
 
+    familiar = familiar_schema(curriculum)
+
     def priority(item):
         bid, b = item
         cov = b["difficulty"].get("known_word_coverage", 0.5)
         # inside the ZPD is best; then prefer near the current level and least-read
         in_zpd = 0 if ZPD_KNOWN_LOW <= cov <= ZPD_KNOWN_HIGH else 1
-        return (in_zpd, abs(b["estimated_level"] - level), b["times_read"],
-                b.get("first_seen_cycle", 0))
+        # among otherwise-equal books, prefer one whose schema overlaps what the
+        # reader already understands (build on familiar structure first)
+        schema = set(b.get("schema", []))
+        familiarity = len(schema & familiar) / len(schema) if schema else 0.0
+        return (in_zpd, round(abs(b["estimated_level"] - level), 2), b["times_read"],
+                -round(familiarity, 2), b.get("first_seen_cycle", 0))
 
     return min(rotation, key=priority)[0]
 
@@ -242,6 +262,8 @@ def record_reading(curriculum: dict, book_id: str, events: list[dict],
     book["times_read"] += 1
     book["last_read_cycle"] = cycle
     book["comprehension_history"].append(round(score, 3))
+    if not book.get("schema"):
+        book["schema"] = _schema_signature([e.get("verb", "") for e in events])
 
     # grow known vocabulary from this book's events (subjects/objects/verbs)
     tokens = {t for e in events for t in (e.get("subject"), e.get("obj"), e.get("verb")) if t}

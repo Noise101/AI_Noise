@@ -4,9 +4,9 @@ import unittest
 import reading_curriculum_v1 as rc
 
 
-def book(title, url, level_text, events=8):
+def book(title, url, level_text, events=8, verbs=None):
     return {"title": title, "url": url, "source": "test",
-            "text": level_text, "event_count": events}
+            "text": level_text, "event_count": events, "verbs": verbs or []}
 
 
 SIMPLE = "きつねがぶどうを見つけました。きつねはとびあがりました。きつねはすっぱいと言いました。"
@@ -134,6 +134,24 @@ class ReadingCurriculumTest(unittest.TestCase):
         for i in range(6):
             rc.record_word_test(cur, f"語{i}", explained=True, cycle=3)
         self.assertTrue(rc.maybe_advance_level(cur, cycle=4)["advanced"])
+
+    def test_select_prefers_a_book_whose_schema_the_reader_already_knows(self):
+        cur = rc.empty_curriculum()
+        rc.register_books(cur, [
+            book("known-shape", "k", SIMPLE, verbs=["みつける", "たべる", "かえる"]),
+            book("new-shape", "n", SIMPLE, verbs=["さがす", "つくる", "おどる"]),
+        ], cycle=1)
+        # graduate a book that shares its verbs with "known-shape"
+        gid = rc._book_id("g", "g")
+        cur["shelf"][gid] = {"title": "g", "url": "g", "source": "t", "difficulty": {},
+                             "estimated_level": 1.5, "schema": ["みつける", "たべる"],
+                             "times_read": 1, "comprehension_history": [0.9],
+                             "status": "graduated", "shelved_at_level": None,
+                             "first_seen_cycle": 0, "last_read_cycle": 1}
+        self.assertEqual(cur["shelf"][rc.select_next_book(cur)]["title"], "known-shape")
+
+    def test_schema_signature_is_the_distinct_verbs(self):
+        self.assertEqual(rc._schema_signature(["a", "b", "a", "", "c"]), ["a", "b", "c"])
 
 
 if __name__ == "__main__":
