@@ -227,11 +227,18 @@ def select_next_book(curriculum: dict) -> str | None:
 
 
 def record_reading(curriculum: dict, book_id: str, events: list[dict],
-                   cycle: int, comprehension: float | None = None) -> dict:
+                   cycle: int, comprehension: float | None = None,
+                   model=None) -> dict:
     book = curriculum["shelf"].get(book_id)
     if not book:
         return {"status": "unknown_book"}
-    score = comprehension if comprehension is not None else _self_consistency(events)
+    if comprehension is not None:
+        score = comprehension
+    elif model is not None:                       # reading_comprehension_v1 model
+        from reading_comprehension_v1 import book_comprehension
+        score = book_comprehension(events, model, _known_set(curriculum))["score"]
+    else:
+        score = _self_consistency(events)         # cold-start proxy
     book["times_read"] += 1
     book["last_read_cycle"] = cycle
     book["comprehension_history"].append(round(score, 3))
