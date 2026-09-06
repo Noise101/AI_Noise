@@ -248,6 +248,7 @@ def render_detail_status(runtime: Path) -> str:
     curriculum = read_json(runtime / "curriculum-state.json")
     event_structure = read_json(runtime / "event-structure.json")
     revision = read_json(runtime / "experience-revision.json")
+    verified = read_json(runtime / "verified-experience.json").get("summary", {})
     status = read_json(runtime / "status.json")
 
     def ev(e):
@@ -324,6 +325,15 @@ def render_detail_status(runtime: Path) -> str:
         s = brc.get("selection", {})
         lines.append(f"  best_rejected {brc.get('task')}:{brc.get('model_id')}  "
                      f"lift={s.get('lift'):+d} p={s.get('one_sided_sign_p')} (未確認)")
+
+    lines += ["", "抽出データ (verified_experience_v47)", "-" * 46]
+    lines.append(f"accepted_sentences={verified.get('accepted_sentences')} "
+                 f"unique_events={verified.get('unique_events')} "
+                 f"coreference_resolutions={verified.get('coreference_resolutions')}")
+    lines.append(f"propositions={verified.get('propositions')} "
+                 f"unique={verified.get('unique_propositions')} "
+                 f"entities_with_properties={verified.get('entities_with_properties')} "
+                 f"(まだ予測信号なし — データ供給のみ)")
 
     lines += ["", "構造規則 (experience_revision_v37)", "-" * 46]
     rev_summary = revision.get("summary", {})

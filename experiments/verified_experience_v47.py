@@ -8,6 +8,7 @@ from collections import Counter, defaultdict
 
 from coreference_v1 import resolve_document
 from narrative_event_v29 import NarrativeEventExtractor
+from proposition_v1 import extract_document_propositions
 
 
 def rebuild_verified_experience(audit_memory: dict,
@@ -34,6 +35,9 @@ def rebuild_verified_experience(audit_memory: dict,
     sequences = []
     accepted_sentences = 0
     coreference_resolutions = 0
+    propositions: list[dict] = []
+    proposition_counts = Counter()
+    entity_properties: dict[str, set[str]] = defaultdict(set)
     for (seed, source_url), records in sorted(grouped.items()):
         ordered = sorted(records, key=lambda item: item.get("source_position", 0))
         sentences = [item["sentence"] for item in ordered]
@@ -43,6 +47,14 @@ def rebuild_verified_experience(audit_memory: dict,
         # a sentence whose own extraction failed.
         doc = resolve_document(sentences)
         coreference_resolutions += doc.resolutions
+        # Stative / relational propositions (proposition_v1) from the copular and
+        # possessive clauses the action-event parser discards.
+        for prop in extract_document_propositions(sentences, doc.subject_hints):
+            propositions.append({"key": prop.key, "subject": prop.subject,
+                                 "relation": prop.relation, "value": prop.value,
+                                 "polarity": prop.polarity, "source_url": source_url})
+            proposition_counts[prop.key] += 1
+            entity_properties[prop.subject].add(prop.value)
         # A coordinate-clause sentence ("The fox saw the grapes and jumped.") is not
         # one ambiguous compound event: split it into its simple clauses first so each
         # can pass the per-clause developmental checks on its own merits, instead of
@@ -101,9 +113,15 @@ def rebuild_verified_experience(audit_memory: dict,
             context: {outcome: sorted(sources) for outcome, sources in outcomes.items()}
             for context, outcomes in contextual_transition_sources.items()},
         "sequences": sequences,
+        "propositions": propositions,
+        "proposition_counts": dict(proposition_counts),
+        "entity_properties": {entity: sorted(values)
+                              for entity, values in sorted(entity_properties.items())},
         "summary": {
             "sources": len(grouped), "accepted_sentences": accepted_sentences,
             "events": sum(event_counts.values()), "unique_events": len(event_counts),
+            "propositions": len(propositions), "unique_propositions": len(proposition_counts),
+            "entities_with_properties": len(entity_properties),
             "transition_observations": sum(sum(items.values()) for items in transitions.values()),
             "coherent_transition_observations": sum(
                 sum(items.values()) for items in coherent_transitions.values()),
