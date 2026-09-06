@@ -164,6 +164,14 @@ def run_once(runtime: Path) -> dict:
             seq_texts[url] = seq_texts.get(url, "") + "".join(e.get("sentence", "") for e in ev)
     seq_report = sequence.train_and_evaluate(seq_texts, prev_seq, SEQUENCE_TRAIN_SECONDS)
 
+    # a free-generation retelling of the book just read, primed on its opening
+    if book_id and seq_report.get("state"):
+        opening = (events[0].get("sentence") if events else "") or "むかしむかし"
+        free = retell.free_retell(seq_report["state"], opening[:12])
+        if free:
+            reading["free_retelling"] = free
+            reading["free_retelling_score"] = retell.score_retelling(events, free)
+
     _write(runtime / CURRICULUM_FILE, cur)
     _write_events(events_store)
     _write(runtime / COMPREHENSION_FILE, comp_report)
@@ -240,8 +248,13 @@ def render_status(runtime: Path) -> str:
     retold = reading.get("retelling")
     if retold:
         rs = reading.get("retelling_score", {})
-        lines.append(f"Noiseの再話 : （再現{rs.get('recall')}／順序{rs.get('order_correlation')}）")
+        lines.append(f"再話(定型)  : （再現{rs.get('recall')}／順序{rs.get('order_correlation')}）")
         lines.append(f"  {retold[:120]}")
+    free = reading.get("free_retelling")
+    if free:
+        fs = reading.get("free_retelling_score", {})
+        lines.append(f"再話(RNN生成): （再現{fs.get('recall')}／忠実度{fs.get('fidelity')}）")
+        lines.append(f"  {free[:120]}")
     if s.get("level_advance", {}).get("advanced"):
         lines.append(f"★ レベル上昇 → {s['level_advance']['level']}")
     if s.get("error"):

@@ -62,6 +62,16 @@ class RetellTest(unittest.TestCase):
         self.assertIsNone(report["fidelity"])
         self.assertFalse(report["beats_baseline"])
 
+    def test_free_retell_is_a_noop_without_a_trained_rnn_state(self):
+        self.assertEqual(jr.free_retell(None, "むかしむかし"), "")
+        self.assertEqual(jr.free_retell({}, "むかしむかし"), "")
+
+    def test_free_retell_generates_japanese_from_a_state(self):
+        import japanese_sequence_v1 as js
+        model = js.TinyRNN(sorted("むかしあおじいさんやまへ行きました。犬が"))
+        text = jr.free_retell(model.state(), "むかし", length=30)
+        self.assertEqual(len(text), 30)
+
     def test_held_out_split_is_deterministic_and_disjoint(self):
         stories = folktale_stories()
         train = {s["url"] for s in stories if not jr._held_out(s["url"])}

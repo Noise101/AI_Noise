@@ -238,6 +238,18 @@ def evaluate_retelling(stories: list[dict], previous: dict | None = None) -> dic
     }
 
 
+def free_retell(rnn_state: dict | None, opening: str, length: int = 180) -> str:
+    """A free-generation retelling from the Japanese character RNN
+    (japanese_sequence_v1), primed on the story's opening.  Scored with the
+    same score_retelling; for a long time this will preserve almost no events
+    -- that is the point (generate badly, be corrected)."""
+    if not rnn_state or not rnn_state.get("vocab"):
+        return ""
+    from japanese_sequence_v1 import TinyRNN, generate
+    model = TinyRNN(rnn_state["vocab"], rnn_state)
+    return generate(model, opening or "むかしむかし", length=length)
+
+
 def main() -> None:
     import json
     import sys
