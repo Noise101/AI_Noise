@@ -27,6 +27,7 @@ from local_conversation_v25 import practice_once
 from compact_runtime_v26 import compact_historical_seed_reports, compact_runtime
 from curriculum_scoring import curriculum_strategy_allowed, learned_curriculum_score
 from global_memory_v27 import empty_memory, mastery_report, merge_report
+from active_curriculum_v1 import active_learning_targets, deprioritise_syntactic_curiosity
 from event_structure_v1 import (SELECTION_ALPHA, classify_trend, passes_gain_gate,
                                 train_and_evaluate as train_event_structure)
 from causal_lab_v30 import run_lab
@@ -1625,6 +1626,11 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
             write_json(status_path, latest)
             return latest
         merge_curiosity(curriculum, seed, report, round_number)
+        # Active learning: retire the closed-class phrase gaps that the
+        # frequency drive fixates on, cap the ledger, and let model misses --
+        # not token frequency -- steer discovery.
+        report["curiosity_maintenance"] = deprioritise_syntactic_curiosity(
+            curriculum["curiosity_ledger"])
         write_json(runtime / "curiosity-priors.json", {
             gap_id: {"pressure": item.get("pressure", 0.0), "status": item.get("status")}
             for gap_id, item in curriculum["curiosity_ledger"].items()
@@ -1646,6 +1652,11 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                 known_discovered = {item["seed"] for item in discovered}
                 discovered.extend(item for item in discover_from_developmental_shelves(
                     visited, effective_network) if item["seed"] not in known_discovered)
+            # Active learning: seeds aimed at the argument frames the frozen
+            # benchmark model predicts wrong, always in the candidate pool.
+            known_discovered = {item["seed"] for item in discovered}
+            discovered.extend(item for item in active_learning_targets(event_structure, visited)
+                              if item["seed"] not in known_discovered)
             if report.get("autonomy", {}).get("mode") == "counterexample_hunt":
                 event_target = event_structure.get("next_learning_target") or {}
                 targeted = (event_target if event_target.get("seed") not in visited

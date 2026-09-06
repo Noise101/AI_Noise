@@ -58,6 +58,13 @@ fire in the same cycle):
 All five sit comfortably above discover_curriculum()'s exploratory range
 (0.5-3.0): a targeted counterexample search during counterexample_hunt should
 usually outrank ordinary exploration once one is available.
+
+active_curriculum_v1.active_learning_targets() (proposal 3) is an eighth
+generator, always in the candidate pool (not gated on counterexample_hunt):
+  6.0  "seek more events with an argument frame the model predicts wrong" --
+       built from the frozen benchmark model's held-out cloze misses, ranked
+       by how often each (subject, object, predicted->observed) confusion
+       recurs. Same tier as structural_counterexample_candidate.
 """
 
 from __future__ import annotations
