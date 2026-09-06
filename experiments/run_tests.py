@@ -23,6 +23,7 @@ QUICK_MODULES = [
     "test_coreference_v1",
     "test_proposition_v1",
     "test_active_curriculum_v1",
+    "test_capability_report_v1",
     "test_event_structure_v1",
     "test_compact_runtime_v26",
     "test_global_memory_v27",

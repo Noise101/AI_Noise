@@ -28,6 +28,7 @@ from compact_runtime_v26 import compact_historical_seed_reports, compact_runtime
 from curriculum_scoring import curriculum_strategy_allowed, learned_curriculum_score
 from global_memory_v27 import empty_memory, mastery_report, merge_report
 from active_curriculum_v1 import active_learning_targets, deprioritise_syntactic_curiosity
+from capability_report_v1 import build_capability_report
 from event_structure_v1 import (SELECTION_ALPHA, classify_trend, passes_gain_gate,
                                 train_and_evaluate as train_event_structure)
 from causal_lab_v30 import run_lab
@@ -250,6 +251,7 @@ def render_detail_status(runtime: Path) -> str:
     event_structure = read_json(runtime / "event-structure.json")
     revision = read_json(runtime / "experience-revision.json")
     verified = read_json(runtime / "verified-experience.json").get("summary", {})
+    capability = read_json(runtime / "capability-report.json")
     status = read_json(runtime / "status.json")
 
     def ev(e):
@@ -326,6 +328,21 @@ def render_detail_status(runtime: Path) -> str:
         s = brc.get("selection", {})
         lines.append(f"  best_rejected {brc.get('task')}:{brc.get('model_id')}  "
                      f"lift={s.get('lift'):+d} p={s.get('one_sided_sign_p')} (未確認)")
+
+    if capability:
+        lines += ["", "能力ダッシュボード (capability_report_v1)", "-" * 46]
+        lines.append(f"見出し : {capability.get('headline')}  "
+                     f"ゲート {capability.get('capability_gates_passed')}/{capability.get('capability_gates_total')}")
+        for task, d in capability.get("dimensions", {}).items():
+            lines.append(f"  {task:18} acc={d['accuracy']:.3f} (base {d['baseline_accuracy']:.3f}) "
+                         f"lift={d['lift']:+d} p={d['one_sided_sign_p']} "
+                         f"eff={d['lift_per_1k_training_events']:+.2f}/1k trend={d['trend']}"
+                         + ("  [確定]" if d["confirmed_on_final_split"] else ""))
+        sm = capability.get("sequence_model", {})
+        lines.append(f"  sequence_model     bits/char={sm.get('held_out_bits_per_char')} "
+                     f"trend={sm.get('trend')} generative={sm.get('generative')}")
+        for gate, ok in capability.get("capability_gates", {}).items():
+            lines.append(f"  [{'x' if ok else ' '}] {gate}")
 
     lines += ["", "抽出データ (verified_experience_v47)", "-" * 46]
     lines.append(f"accepted_sentences={verified.get('accepted_sentences')} "
@@ -1325,6 +1342,8 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "learned_experience_rules": report.get("learned_experience_rules") or
                                     learned_rules.get("summary", {}),
         "event_structure": event_structure,
+        "capability_report": report.get("capability_report")
+                             or read_json(runtime / "capability-report.json"),
         "storage": read_json(runtime / "storage-status.json"),
         "global_memory": report.get("global_memory") or read_json(
             runtime / "global-language-memory.json").get("totals", {}),
@@ -1589,6 +1608,12 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
         report["association"] = association_report
         report["error_memory"] = error_ledger.get("summary", {})
         report["experience_revision"] = experience_report.get("summary", {})
+        capability_path = runtime / "capability-report.json"
+        capability_report = build_capability_report(
+            event_structure, verified_experience.get("summary", {}), experience_report,
+            read_json(capability_path), read_json(runtime / "sequence-model.json"))
+        write_json(capability_path, capability_report)
+        report["capability_report"] = capability_report
         report["autonomy"] = update_autonomy_state(curriculum, report)
         report["causal_lab"] = run_lab(seed)
         write_json(runtime / "causal-lab.json", report["causal_lab"])
