@@ -4,3 +4,4 @@ __pycache__/
 report*.json
 controller-state.json
 .local/
+scratch-reading-backup/
