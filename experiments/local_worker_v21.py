@@ -231,7 +231,36 @@ def capability_summary_lines(status: dict) -> list[str]:
           f"確認セット lift {(selected.get('final') or selected).get('lift', 0):+d}件"
           if selected else
           f"内部構造モデル : 基準超えモデルなし（傾向: {trend}）")),
+        _sequence_model_ja(status.get("sequence_model", {})),
+        _dialogue_ja(status.get("generative_dialogue", {})),
+        _tool_use_ja(status.get("llm_tool_use", {})),
     ]
+
+
+def _sequence_model_ja(seq: dict) -> str:
+    bpc, base = seq.get("held_out_bits_per_char"), seq.get("baseline_bits_per_char")
+    if bpc is None:
+        return "文字予測モデル : 訓練データ蓄積中（ゼロから学習する小型RNN、生成能力の基盤）"
+    verdict = "文字統計を学習中" if seq.get("status") == "beats_char_baseline" else "まだ基準未満"
+    return (f"文字予測モデル : {bpc:.2f} bits/char（基準 {base:.2f}、低いほど良い、{verdict}、"
+            f"傾向: {TREND_JA.get(seq.get('perplexity_trend'), 'データ不足')}）")
+
+
+def _dialogue_ja(dialogue: dict) -> str:
+    rate = dialogue.get("overall_comprehension_rate")
+    if rate is None or dialogue.get("status") != "ran":
+        return "会話（伝達成功）: 未計測（生成的対話はローカルAI利用時のみ）"
+    best = dialogue.get("best_strategy") or "評価中"
+    return (f"会話（伝達成功）: {rate:.0%}（自作発話が相手に伝わった割合、最良戦略 {best}、"
+            f"傾向: {TREND_JA.get(dialogue.get('comprehension_trend'), 'データ不足')}）")
+
+
+def _tool_use_ja(tool_use: dict) -> str:
+    rate = tool_use.get("overall_verified_rate")
+    if rate is None or tool_use.get("status") != "ran":
+        return "LLM操作       : 未計測（ローカルAI利用時のみ）"
+    return (f"LLM操作       : 検証成功率 {rate:.0%}（LLM出力を自分の知識で検証できた割合、"
+            f"傾向: {TREND_JA.get(tool_use.get('success_trend'), 'データ不足')}）")
 
 
 def _event_ja(event: str | None) -> str:
