@@ -59,6 +59,21 @@ class GenerativeDialogueTest(unittest.TestCase):
                                         "Nice weather we are having lately.")
         self.assertFalse(unrelated["understood"])
 
+    def test_a_follow_up_question_is_not_a_clarification_request(self):
+        # partner engages with the topic and asks a question -> still understood
+        score = score_comprehension("the rat ran the race",
+                                    "That sounds like a very fast rat! Did the rat win the race?")
+        self.assertFalse(score["clarification_request"])
+        self.assertTrue(score["understood"])
+
+    def test_explicit_non_comprehension_still_counts_as_a_clarification_request(self):
+        for reply in ("I can't tell what you mean by that.",
+                      "Could you clarify what you are saying?",
+                      "That doesn't make sense to me."):
+            score = score_comprehension("the fox wanted the grapes", reply)
+            self.assertTrue(score["clarification_request"], reply)
+            self.assertFalse(score["understood"])
+
     def test_unavailable_partner_reports_cleanly(self):
         report = run(EVENTS, ScriptedPartner([], available=False), {})
         self.assertEqual(report["status"], "partner_unavailable")

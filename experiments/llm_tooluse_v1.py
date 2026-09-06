@@ -127,19 +127,26 @@ def verify(task: dict, response: str, grounded_words: set[str],
         return {"verified": False, "reason": "no response"}
     grounded_ratio = _grounded_ratio(response, grounded_words)
     parsed = extractor.extract(response)
-    checks = {"grounded_vocabulary": grounded_ratio >= MIN_GROUNDED_RATIO,
-              "parses_to_event": bool(parsed.accepted and parsed.event)}
+    parses = bool(parsed.accepted and parsed.event)
     informational = {}
     if task["task_type"] == "simplify":
         original = task.get("source_sentence", "")
         original_event = extractor.extract(original)
-        checks["not_longer"] = len(_content_words(response)) <= len(_content_words(original)) + 2
-        # only meaningful when the original itself parsed
-        if original_event.accepted and original_event.event and parsed.accepted and parsed.event:
+        # The task is "simpler and in known words", not "a canonical SVO clause".
+        # parses_to_event is only informational for simplify -- the strict
+        # developmental parser rejects most fluent rewrites even when they are
+        # grounded and shorter.
+        checks = {"grounded_vocabulary": grounded_ratio >= MIN_GROUNDED_RATIO,
+                  "not_longer": len(_content_words(response))
+                  <= len(_content_words(original)) + 2}
+        informational["parses_to_event"] = parses
+        if original_event.accepted and original_event.event and parses:
             informational["keeps_the_action"] = (
                 original_event.event.action == parsed.event.action)
-    else:  # use_word
-        checks["contains_target"] = task["target_word"].lower() in _content_words(response)
+    else:  # use_word: the sentence must actually be a usable event with the word
+        checks = {"grounded_vocabulary": grounded_ratio >= MIN_GROUNDED_RATIO,
+                  "parses_to_event": parses,
+                  "contains_target": task["target_word"].lower() in _content_words(response)}
     verified = all(checks.values())
     return {"verified": verified, "checks": checks, "informational": informational,
             "grounded_ratio": round(grounded_ratio, 3), "response": response}

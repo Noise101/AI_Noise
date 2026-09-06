@@ -50,14 +50,34 @@ class LlmToolUseTest(unittest.TestCase):
         self.assertFalse(result["verified"])
         self.assertFalse(result["checks"]["grounded_vocabulary"])
 
-    def test_simplify_verifies_shorter_grounded_parsing_output(self):
+    def test_simplify_verifies_on_grounded_and_shorter_only(self):
         task = {"task_type": "simplify", "template_index": 1,
                 "source_sentence": "The ravenous fox perceived the succulent grapes upon the vine."}
         extractor = NarrativeEventExtractor("developmental_grounded_18")
         result = verify(task, "The fox saw the grapes.", GROUNDED, extractor)
+        self.assertEqual(set(result["checks"]), {"grounded_vocabulary", "not_longer"})
+        self.assertNotIn("parses_to_event", result["checks"])
+        self.assertIn("parses_to_event", result["informational"])
+        self.assertTrue(result["verified"])
+
+    def test_simplify_verifies_a_grounded_short_rewrite_that_does_not_parse(self):
+        task = {"task_type": "simplify", "template_index": 0,
+                "source_sentence": "The appointed minister administered ecclesiastical institutions."}
+        extractor = NarrativeEventExtractor("developmental_grounded_18")
+        # grounded, shorter, but not a canonical SVO clause the strict parser accepts
+        result = verify(task, "The big dog and the small cat ran.", GROUNDED, extractor)
         self.assertTrue(result["checks"]["grounded_vocabulary"])
         self.assertTrue(result["checks"]["not_longer"])
         self.assertTrue(result["verified"])
+
+    def test_simplify_still_fails_when_it_uses_unknown_words(self):
+        task = {"task_type": "simplify", "template_index": 0,
+                "source_sentence": "The fox wanted the grapes."}
+        extractor = NarrativeEventExtractor("developmental_grounded_18")
+        result = verify(task, "The vulpine creature coveted the viticultural produce.",
+                        GROUNDED, extractor)
+        self.assertFalse(result["verified"])
+        self.assertFalse(result["checks"]["grounded_vocabulary"])
 
     def test_run_records_verified_rate_per_template_and_accumulates(self):
         worker = ScriptedWorker(["The fox saw the food.", "The wolf chased the sheep."])

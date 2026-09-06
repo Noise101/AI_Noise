@@ -31,10 +31,15 @@ from narrative_event_v29 import VERBS
 
 VERSION = 1
 STRATEGIES = ("event", "event_pair", "rnn_extend", "rnn_free")
+# Explicit non-comprehension phrases only.  A bare "?" is not one of them: a
+# partner who asks a follow-up question ("Did it win a race?") has usually
+# understood and is engaging with the topic.
 CLARIFICATION_MARKERS = (
     "what do you mean", "i don't understand", "i do not understand", "unclear",
-    "could you clarify", "can you clarify", "what are you", "not sure what",
-    "doesn't make sense", "does not make sense", "confus", "rephrase", "?")
+    "could you clarify", "can you clarify", "what are you trying", "not sure what",
+    "don't quite understand", "can't tell what you mean", "cannot tell what you mean",
+    "can't quite tell", "doesn't make sense", "does not make sense", "confus",
+    "please rephrase", "i can't tell what", "i cannot tell what")
 _WORD = re.compile(r"[A-Za-z]+")
 _STOP = {"the", "a", "an", "and", "or", "but", "to", "of", "in", "on", "at", "is",
          "was", "were", "be", "it", "he", "she", "they", "his", "her", "with",
