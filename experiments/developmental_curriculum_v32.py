@@ -12,6 +12,19 @@ from pathlib import Path
 
 WORD = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
 
+# vocabulary_fit used to be a tent peaking at a fixed 65% known-word ratio. As
+# the known-vocabulary corpus grew, ordinary simple children's prose drifted
+# past that peak (median known_ratio ~0.95 on admitted material) and was
+# penalised for being "too easy" -- re-scoring past admissions with today's
+# vocabulary rejected more than half of them purely for that reason. Replaced
+# with a one-sided floor: full credit unless the text is genuinely too hard
+# (known_ratio below KNOWN_RATIO_FLOOR), then linear down to zero. The score
+# threshold is raised from 0.65 to 0.68 to hold overall selectivity roughly
+# constant given vocabulary_fit is now a near-constant 0.20 contribution
+# instead of a 0.10-0.20 range (see the audit thread for the simulation).
+KNOWN_RATIO_FLOOR = 0.30
+DEVELOPMENTAL_SCORE_THRESHOLD = 0.68
+
 
 def assess_source_quality(report: dict, known_words: set[str] | None = None) -> dict:
     sources = report.get("knowledge", {}).get("bootstrap", {}).get("sources", [])
@@ -31,7 +44,7 @@ def assess_source_quality(report: dict, known_words: set[str] | None = None) -> 
     known_words = known_words or set()
     known_ratio = (sum(word in known_words for word in all_words) / len(all_words)
                    if all_words and known_words else 0.5)
-    vocabulary_fit = max(0.0, 1 - abs(known_ratio - 0.65) / 0.65)
+    vocabulary_fit = 1.0 if known_ratio >= KNOWN_RATIO_FLOOR else known_ratio / KNOWN_RATIO_FLOOR
     subjects = [item["event"].split("|", 1)[0] for item in accepted_items]
     recurrence = 0.0 if not subjects else 1 - len(set(subjects)) / len(subjects)
     dialogue_ratio = sum(('"' in sentence or "“" in sentence or "?" in sentence)
@@ -51,10 +64,11 @@ def assess_source_quality(report: dict, known_words: set[str] | None = None) -> 
         reasons.append("sentences exceed the current child-level length")
     if recurrence < 0.15 and dialogue_ratio < 0.15:
         reasons.append("no recurring subject or dialogue structure")
-    if score < 0.65:
-        reasons.append("combined developmental score below 0.65")
+    if score < DEVELOPMENTAL_SCORE_THRESHOLD:
+        reasons.append(f"combined developmental score below {DEVELOPMENTAL_SCORE_THRESHOLD}")
     admitted = (accepted >= minimum_events and narrative_ratio >= 0.5 and short_ratio >= 0.7
-                and (recurrence >= 0.15 or dialogue_ratio >= 0.15) and score >= 0.65)
+                and (recurrence >= 0.15 or dialogue_ratio >= 0.15)
+                and score >= DEVELOPMENTAL_SCORE_THRESHOLD)
     return {"status": "developmental_passage" if admitted else "outside_current_level",
             "admit_to_global_memory": admitted, "score": round(score, 3),
             "accepted": accepted, "total": len(audits),
