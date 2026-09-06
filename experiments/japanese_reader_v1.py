@@ -43,8 +43,10 @@ STATUS_FILE = "reading-status.json"
 SEQUENCE_TRAIN_SECONDS = 5.0
 STOP_FILE = "READING_STOP"
 SHELF_LOW_WATER = 3           # in-rotation books below this -> fetch more
-FETCH_BUDGET = 12
+FETCH_BUDGET = 12           # network requests per shelf-widening pass
+FETCH_TARGET = 5            # books to add per pass (small: pacing + rate limits)
 FETCH_COOLDOWN = 5           # cycles to wait between shelf-widening fetches
+AOZORA_LEVEL_MARGIN = 3.0   # skip Aozora works this far above the reading level
 
 
 def _read(path: Path) -> dict:
@@ -65,28 +67,45 @@ def _events_of(text: str) -> list[dict]:
     return [e.__dict__ for e in jevent.extract_story(text)]
 
 
+def _within_reach(text: str, level: float) -> bool:
+    """Keep Aozora acquisition near the reading level so the shelf does not
+    fill with 家なき子 / 明日 while the reader is on picture books."""
+    try:
+        est = curriculum.text_difficulty(text, 0, set())["estimated_level"]
+    except Exception:
+        return True
+    return est <= level + AOZORA_LEVEL_MARGIN
+
+
 def _fetch_more_books(cur: dict, cycle: int) -> int:
-    """Widen the shelf: the kernel first, then Aozora children's authors."""
+    """Widen the shelf: verified Aesop/folktale kernel first, then Aozora
+    children's authors -- level-gated, paced, small batches."""
     WEB_CACHE.set_network_budget(FETCH_BUDGET)
     have = {b["url"] for b in cur["shelf"].values()}
-    fetched: list[dict] = []
-    for title in corpus.KERNEL:
-        if len(fetched) >= 6:
+    level = cur.get("level", 1.5)
+    fetched: list = []
+
+    def budget_left() -> bool:
+        return WEB_CACHE.remaining_network_budget() != 0
+
+    for title in corpus.kernel_titles():
+        if len(fetched) >= FETCH_TARGET or not budget_left():
             break
         story = corpus.fetch(title)
         if story and story.url not in have:
             fetched.append(story)
-    if len(fetched) < 3:
-        for name, pid in corpus.AOZORA_AUTHORS.items():
-            for wtitle, wurl in corpus.aozora_author_works(pid, limit=8):
+
+    if len(fetched) < FETCH_TARGET and budget_left():
+        for _name, pid in corpus.AOZORA_AUTHORS.items():
+            for _wtitle, wurl in corpus.aozora_author_works(pid, limit=6):
+                if len(fetched) >= FETCH_TARGET or not budget_left():
+                    break
                 if wurl in have or any(f.url == wurl for f in fetched):
                     continue
                 story = corpus.fetch_aozora(wurl)
-                if story:
+                if story and _within_reach(story.text, level):
                     fetched.append(story)
-                if len(fetched) >= 8:
-                    break
-            if len(fetched) >= 8:
+            if len(fetched) >= FETCH_TARGET or not budget_left():
                 break
     books = []
     fetched_events = {}
@@ -130,9 +149,12 @@ def run_once(runtime: Path) -> dict:
     events_store = _read_events()
 
     in_rotation = sum(1 for b in cur["shelf"].values() if b["status"] == "in_rotation")
+    reachable = in_rotation + sum(1 for b in cur["shelf"].values()
+                                 if b["status"] in ("shelved_above_level", "shelved_stuck"))
     fetched = 0
     cooled = cycle - cur.get("last_fetch_cycle", -FETCH_COOLDOWN) >= FETCH_COOLDOWN
-    if in_rotation < SHELF_LOW_WATER and cooled:
+    # honour the cooldown normally, but never sit with an empty shelf
+    if (in_rotation < SHELF_LOW_WATER and cooled) or reachable == 0:
         fetched = _fetch_more_books(cur, cycle)
         cur["last_fetch_cycle"] = cycle
         events_store = _read_events()

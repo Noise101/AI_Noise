@@ -46,8 +46,13 @@ from collections import Counter
 WORD = re.compile(r"[぀-ヿ㐀-鿿]+")
 KANJI = re.compile(r"[㐀-䶿一-鿿]")
 SENT = re.compile(r"[。！？]")
-SUBORDINATE = re.compile(r"(ので|けれど|けれども|ながら|たり|ば|たら|なら|"
-                         r"ても|でも|し、|が、|のに|ように|ため|という)")
+# Clause-linking connectives.  Anchored to a comma or clause break where
+# possible: bare ば/たら/なら/たり match far too many word-internal substrings
+# (のばす, ことば, あたり, ...) and made plain 敬体 folktales look like literary
+# prose.
+SUBORDINATE = re.compile(
+    r"(ので|けれど|けれども|ながら|のに|ように|ため|という"
+    r"|し、|が、|ば、|たら、|なら、|ても、|でも、|から、|と、)")
 
 GRADUATE_COMPREHENSION = 0.75      # a book is "understood" at/above this
 ADVANCE_COMPREHENSION = 0.80       # mean over recent graduates to raise the level
@@ -196,17 +201,24 @@ def register_books(curriculum: dict, books: list[dict], cycle: int) -> int:
             "shelved_at_level": None if in_reach else est,
             "first_seen_cycle": cycle, "last_read_cycle": None}
         added += 1
-    # Cold start: there must always be something to read.  If nothing is in
-    # rotation, drop the level to the easiest available book and unshelve it.
-    if not any(b["status"] == "in_rotation" for b in curriculum["shelf"].values()):
+    # Cold start: there must always be near-level material.  If no book sits
+    # within a step of the level, move the level to meet the easiest available
+    # book -- down to it normally, but also UP when every real text sits above
+    # the nominal start (a "level 1.5" with no level-1.5 material is meaningless).
+    near_level = [b for b in curriculum["shelf"].values()
+                  if b["estimated_level"] <= curriculum["level"] + LEVEL_STEP
+                  and b["status"] in ("in_rotation", "graduated")]
+    if not near_level and curriculum["shelf"]:
         easiest = min(curriculum["shelf"].values(),
                       key=lambda b: b["estimated_level"], default=None)
         if easiest:
             target = round(max(1.0, easiest["estimated_level"]) * 2) / 2
-            if target < curriculum["level"]:
+            if target != curriculum["level"]:
+                direction = "lower" if target < curriculum["level"] else "raise"
                 curriculum["level"] = target
                 curriculum["level_history"].append(
-                    {"cycle": cycle, "level": target, "reason": "cold start: no book in reach"})
+                    {"cycle": cycle, "level": target,
+                     "reason": f"cold start: {direction} to the easiest available book"})
             for b in curriculum["shelf"].values():
                 if b["estimated_level"] <= curriculum["level"] + LEVEL_STEP:
                     b["status"], b["shelved_at_level"] = "in_rotation", None

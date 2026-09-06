@@ -41,13 +41,14 @@ class JapaneseReaderTest(unittest.TestCase):
             return None
 
         self._orig = {
-            "KERNEL": reader.corpus.KERNEL,
+            "kernel_titles": reader.corpus.kernel_titles,
             "fetch": reader.corpus.fetch,
             "AOZORA_AUTHORS": reader.corpus.AOZORA_AUTHORS,
             "aozora_author_works": reader.corpus.aozora_author_works,
             "fetch_aozora": reader.corpus.fetch_aozora,
         }
-        reader.corpus.KERNEL = tuple(b.title for b in self._books)
+        titles = tuple(b.title for b in self._books)
+        reader.corpus.kernel_titles = lambda *a, **k: titles
         reader.corpus.fetch = fake_fetch
         reader.corpus.AOZORA_AUTHORS = {}
         reader.corpus.aozora_author_works = lambda *a, **k: []
@@ -81,7 +82,7 @@ class JapaneseReaderTest(unittest.TestCase):
             self.assertTrue((self.runtime / name).exists())
         # a second independent runtime does not see the first's books
         with tempfile.TemporaryDirectory() as other:
-            reader.corpus.KERNEL = ()
+            reader.corpus.kernel_titles = lambda *a, **k: ()
             status = reader.run_once(Path(other))
             self.assertEqual(status["reading"]["status"], "no_book")
 

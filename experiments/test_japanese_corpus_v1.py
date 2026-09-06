@@ -1,6 +1,6 @@
 import unittest
 
-from japanese_corpus_v1 import _clean, _aozora_title, KERNEL
+from japanese_corpus_v1 import _clean, _aozora_title, KERNEL_SEED, kernel_titles
 
 
 class JapaneseCorpusTest(unittest.TestCase):
@@ -25,9 +25,18 @@ class JapaneseCorpusTest(unittest.TestCase):
             _aozora_title('<meta  name="DC.Title"  content="ごん狐" />'), "ごん狐")
         self.assertEqual(_aozora_title("<html>no title here</html>"), "")
 
-    def test_kernel_is_a_non_empty_ordered_seed_list(self):
-        self.assertGreaterEqual(len(KERNEL), 8)
-        self.assertEqual(len(KERNEL), len(set(KERNEL)))
+    def test_kernel_seed_is_a_small_verified_list(self):
+        self.assertTrue(KERNEL_SEED)
+        self.assertEqual(len(KERNEL_SEED), len(set(KERNEL_SEED)))
+
+    def test_kernel_titles_offline_falls_back_to_the_seed(self):
+        import japanese_corpus_v1 as jc
+        orig = jc.aesop_kernel
+        jc.aesop_kernel = lambda *a, **k: ()
+        try:
+            self.assertEqual(kernel_titles(), KERNEL_SEED)
+        finally:
+            jc.aesop_kernel = orig
 
 
 if __name__ == "__main__":
