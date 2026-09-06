@@ -1,0 +1,105 @@
+import unittest
+
+import reading_curriculum_v1 as rc
+
+
+def book(title, url, level_text, events=8):
+    return {"title": title, "url": url, "source": "test",
+            "text": level_text, "event_count": events}
+
+
+SIMPLE = "きつねがぶどうを見つけました。きつねはとびあがりました。きつねはすっぱいと言いました。"
+MID = ("むかしむかし、おじいさんは山へしばかりに行きました。おばあさんは川へせんたくに行きました。"
+       "おばあさんは大きな桃を家へ持って帰りました。二人は桃を切りました。"
+       "桃の中から元気な男の子が生まれました。男の子は鬼を島でやっつけました。")
+HARDER = ("これは私が小さいときに村の茂平というおじいさんからきいたお話です。"
+          "むかしは私たちの村のちかくの中山というところに小さなお城があって、"
+          "中山さまというおとのさまがおられたそうです。")
+
+GOOD_EVENTS = [{"subject": "きつね", "verb": v, "obj": "", "confidence": 0.9}
+               for v in ("見つける", "とびあがる", "言う", "帰る")]
+
+
+class ReadingCurriculumTest(unittest.TestCase):
+    def test_difficulty_ranks_a_retelling_below_literary_prose(self):
+        easy = rc.text_difficulty(SIMPLE, 3, set())
+        hard = rc.text_difficulty(HARDER, 3, set())
+        self.assertLess(easy["estimated_level"], hard["estimated_level"])
+        self.assertLessEqual(easy["estimated_level"], 2.2)
+
+    def test_cold_start_always_leaves_one_book_in_rotation(self):
+        cur = rc.empty_curriculum()
+        rc.register_books(cur, [book("A", "a", HARDER), book("B", "b", SIMPLE)], cycle=1)
+        self.assertEqual(rc.summary(cur)["in_rotation"] + rc.summary(cur)["graduated"] >= 1, True)
+        self.assertIsNotNone(rc.select_next_book(cur))
+
+    def test_a_passing_comprehension_score_graduates_the_book(self):
+        cur = rc.empty_curriculum()
+        rc.register_books(cur, [book("A", "a", SIMPLE)], cycle=1)
+        bid = rc.select_next_book(cur)
+        out = rc.record_reading(cur, bid, GOOD_EVENTS, cycle=2, comprehension=0.9)
+        self.assertEqual(out["status"], "graduated")
+        self.assertEqual(cur["shelf"][bid]["status"], "graduated")
+
+    def test_a_stuck_book_is_shelved_and_not_re_pulled(self):
+        cur = rc.empty_curriculum()
+        rc.register_books(cur, [book("A", "a", SIMPLE)], cycle=1)
+        bid = rc.select_next_book(cur)
+        for c in range(2, 2 + rc.MAX_REREADS + 1):
+            rc.record_reading(cur, bid, GOOD_EVENTS, cycle=c, comprehension=0.5)
+        self.assertEqual(cur["shelf"][bid]["status"], "shelved_stuck")
+        self.assertIsNone(rc.select_next_book(cur))          # not re-pulled
+
+    def test_level_advances_when_the_band_is_exhausted_and_unshelves_reachable_books(self):
+        cur = rc.empty_curriculum()
+        rc.register_books(cur, [book("easy", "e", SIMPLE), book("mid", "m", MID)], cycle=1)
+        start = cur["level"]
+        mid = cur["shelf"][rc._book_id("m", "mid")]
+        self.assertEqual(mid["status"], "shelved_above_level")
+        mid["shelved_at_level"] = start + rc.LEVEL_STEP       # just out of reach now
+        bid = rc.select_next_book(cur)
+        rc.record_reading(cur, bid, GOOD_EVENTS, cycle=2, comprehension=0.9)
+        result = rc.maybe_advance_level(cur, cycle=3)
+        self.assertTrue(result["advanced"])
+        self.assertGreater(cur["level"], start)
+        self.assertEqual(result["unshelved"], 1)              # "mid" now reachable
+        self.assertEqual(mid["status"], "in_rotation")
+
+    def test_advancement_pauses_if_current_band_comprehension_drops(self):
+        cur = rc.empty_curriculum()
+        rc.register_books(cur, [book("g", "g", SIMPLE), book("r", "r", SIMPLE)], cycle=1)
+        # graduate one, but the other is in rotation with a poor recent score
+        rc.record_reading(cur, rc._book_id("g", "g"), GOOD_EVENTS, cycle=2, comprehension=0.9)
+        rc.record_reading(cur, rc._book_id("r", "r"), GOOD_EVENTS, cycle=3, comprehension=0.4)
+        self.assertFalse(rc.maybe_advance_level(cur, cycle=4)["advanced"])
+
+    def test_vocabulary_has_three_tiers_and_used_gates_known_once_tested(self):
+        cur = rc.empty_curriculum()
+        for c in range(1, 4):
+            rc.record_reading(cur, "x", [], cycle=c)          # unknown book, no-op events
+        cur["known_words"]["きつね"] = {"books": 3}
+        cur["known_words"]["ぶどう"] = {"books": 3}
+        self.assertEqual(rc.summary(cur)["vocabulary_seen"], 2)
+        self.assertEqual(len(rc._known_set(cur)), 2)          # seen tier while untested
+        rc.record_word_test(cur, "きつね", used=True, cycle=5)
+        rc.record_word_test(cur, "ぶどう", used=False, cycle=5)
+        self.assertEqual(rc.summary(cur)["vocabulary_used"], 1)
+        self.assertEqual(rc._known_set(cur), {"きつね"})       # used tier once any word tested
+        rc.record_word_test(cur, "きつね", explained=True, cycle=9)
+        self.assertEqual(rc.summary(cur)["vocabulary_explained"], 1)
+
+    def test_retention_check_returns_a_lower_level_graduate_after_the_interval(self):
+        cur = rc.empty_curriculum()
+        rc.register_books(cur, [book("low", "l", SIMPLE)], cycle=1)
+        bid = rc.select_next_book(cur)
+        rc.record_reading(cur, bid, GOOD_EVENTS, cycle=2, comprehension=0.9)
+        cur["level"] = 3.0                                    # reader has moved on
+        self.assertIsNone(rc.retention_check_due(cur, cycle=10))
+        self.assertEqual(rc.retention_check_due(cur, cycle=2 + rc.RETENTION_INTERVAL), bid)
+
+    def test_reading_age_is_monotonic_in_level(self):
+        self.assertLess(rc.reading_age(1.5), rc.reading_age(4.0))
+
+
+if __name__ == "__main__":
+    unittest.main()
