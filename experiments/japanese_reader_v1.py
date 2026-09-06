@@ -185,8 +185,10 @@ def run_once(runtime: Path) -> dict:
     care_state = _read(runtime / CAREGIVER_FILE) or caregiver.empty_state()
     caregiver.expire_if_stale(care_state, cycle)
     if caregiver.due(care_state, cycle):
+        current_fidelity = (reading.get("retelling_score") or {}).get("fidelity")
         recent = [{"title": b["title"], "url": b["url"],
                    "events": events_store.get(bid, []),
+                   "fidelity": current_fidelity if bid == book_id else None,
                    "_last": b.get("last_read_cycle") or 0}
                   for bid, b in cur["shelf"].items()
                   if b.get("times_read", 0) > 0 and len(events_store.get(bid, [])) >= 3]

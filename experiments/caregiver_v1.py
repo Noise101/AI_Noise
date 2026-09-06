@@ -55,14 +55,30 @@ def _name_like(subject: str) -> bool:
     return bool(subject) and 2 <= len(subject) <= 6 and not (_PARTICLE_CHARS & set(subject))
 
 
+def _fidelity_band(fidelity: float | None) -> int:
+    """Map the automated retelling fidelity onto the 3-point human scale, so
+    'human agreement' measures whether a person's coherence judgment tracks
+    the metric."""
+    if fidelity is None:
+        return 2
+    return 1 if fidelity >= 0.6 else 3 if fidelity < 0.35 else 2
+
+
 def generate_questions(recent: list[dict], cycle: int, model=None) -> list[dict]:
     """recent: [{"title", "url", "events"}], most-recently-read first.
 
-    Question kinds, all gradeable without parsing free text:
-      * protagonist -- who is the story about (3 options)
-      * actor       -- who did <obj> <verb> (options)
-      * order       -- did <verb A> happen before <verb B> (はい/いいえ)
+    The caregiver has NOT read these books, so every question is
+    self-contained: it shows what Noise understood (its own retelling) and
+    asks the reader to judge Noise's output, not to recall a story.
+
+      * retelling_coherent -- is this Japanese coherent? (1 通る / 2 ときどき変 / 3 意味不明)
+        graded against the automated fidelity band, so we learn whether a
+        person's judgment tracks the metric.
+      * protagonist_from_text -- reading only Noise's retelling, whose story is
+        it?  Tests whether the retelling actually conveys the protagonist.
     """
+    from japanese_retell_v1 import retell
+
     questions: list[dict] = []
     for book in recent:
         if len(questions) >= QUESTIONS_PER_BATCH:
@@ -70,39 +86,44 @@ def generate_questions(recent: list[dict], cycle: int, model=None) -> list[dict]
         events = [e for e in book.get("events", []) if e.get("verb")]
         if len(events) < 3:
             continue
-        subjects = [s for s in _distinct(e.get("subject") for e in events) if _name_like(s)]
         title = book.get("title") or "この本"
         url = book.get("url") or title
+        retold = retell(events, max_sentences=6)
+        if len(retold) < 20:
+            continue
+        excerpt = retold[:140]
         n = len(questions)
 
-        if len(subjects) >= 2:
+        subjects = [s for s in _distinct(e.get("subject") for e in events) if _name_like(s)]
+        if len(subjects) >= 2 and n % 2 == 0:
             counts = Counter(e.get("subject") for e in events if _name_like(e.get("subject") or ""))
             protagonist = counts.most_common(1)[0][0]
             options = _distinct([protagonist] + subjects)[:3]
-            options_sorted = sorted(options, key=lambda o: hashlib.md5(f"{url}{o}".encode()).hexdigest())
+            options.sort(key=lambda o: hashlib.md5(f"{url}{o}".encode()).hexdigest())
             questions.append({
                 "id": _qid(url, cycle, n), "cycle": cycle, "book": title, "url": url,
-                "kind": "protagonist",
-                "prompt": f"「{title}」は だれの お話ですか？　"
-                          + "　".join(f"{i+1}) {o}" for i, o in enumerate(options_sorted)),
-                "options": options_sorted,
-                "answer_story": options_sorted.index(protagonist) + 1,
-                "answer_model": (options_sorted.index(model.predict_protagonist(events[:2], options_sorted)) + 1)
+                "kind": "protagonist_from_text",
+                "prompt": (f"Noiseが「{title}」を読んで、こう理解しました:\n"
+                           f"    「{excerpt}」\n"
+                           f"  この文章は だれの話に読めますか？　"
+                           + "　".join(f"{i+1}) {o}" for i, o in enumerate(options))),
+                "options": options,
+                "answer_story": options.index(protagonist) + 1,
+                "answer_model": (options.index(model.predict_protagonist(events[:2], options)) + 1)
                                 if model is not None else None,
             })
             continue
 
-        verbs = _distinct(e.get("verb") for e in events)
-        if len(verbs) >= 2:
-            a, b = verbs[0], verbs[-1]
-            questions.append({
-                "id": _qid(url, cycle, n), "cycle": cycle, "book": title, "url": url,
-                "kind": "order",
-                "prompt": f"「{title}」で、「{a}」は「{b}」より さきに おきましたか？（はい/いいえ）",
-                "options": ["はい", "いいえ"],
-                "answer_story": 1,   # a precedes b by construction (verbs[0] .. verbs[-1])
-                "answer_model": None,
-            })
+        questions.append({
+            "id": _qid(url, cycle, n), "cycle": cycle, "book": title, "url": url,
+            "kind": "retelling_coherent",
+            "prompt": (f"Noiseが「{title}」を読んで、こう再話しました:\n"
+                       f"    「{excerpt}」\n"
+                       f"  日本語として意味が通っていますか？　1) だいたい通る　2) ときどき変　3) ほとんど意味不明"),
+            "options": ["1", "2", "3"],
+            "answer_story": _fidelity_band(book.get("fidelity")),
+            "answer_model": None,
+        })
     return questions
 
 
