@@ -1,3 +1,4 @@
+import re
 import unittest
 
 import reading_curriculum_v1 as rc
@@ -99,6 +100,40 @@ class ReadingCurriculumTest(unittest.TestCase):
 
     def test_reading_age_is_monotonic_in_level(self):
         self.assertLess(rc.reading_age(1.5), rc.reading_age(4.0))
+
+    def test_level_scale_runs_from_picture_book_to_middle_school(self):
+        # the endpoint goal is middle-school reading, not toddler books
+        self.assertEqual(rc.current_milestone(1.5), "絵本 (4歳・第一目標)")
+        self.assertEqual(rc.current_milestone(7.0), "中学生")
+        self.assertIn("最終目標", rc.current_milestone(9.5))
+        self.assertGreaterEqual(rc.MAX_LEVEL, 9.0)
+        # ~15 years old at the top of the scale
+        self.assertGreaterEqual(int(re.search(r"\d+", rc.reading_age(9.0)).group()), 14)
+
+    def test_explained_tier_only_gates_advancement_at_higher_levels(self):
+        self.assertEqual(rc.explained_ratio_target(2.0), 0.0)   # a 4-year-old defines nothing
+        self.assertEqual(rc.explained_ratio_target(3.5), 0.0)
+        self.assertGreater(rc.explained_ratio_target(7.0), 0.3)  # middle-school: explain most words
+
+    def test_advancement_at_a_high_level_requires_the_explained_tier(self):
+        cur = rc.empty_curriculum()
+        cur["level"] = 7.0
+        # a graduated band book with high comprehension, but recent vocabulary
+        # is `used` without being `explained`
+        bid = rc._book_id("b", "b")
+        cur["shelf"][bid] = {"title": "b", "url": "b", "source": "t",
+                             "difficulty": {}, "estimated_level": 7.0, "times_read": 1,
+                             "comprehension_history": [0.9], "status": "graduated",
+                             "shelved_at_level": None, "first_seen_cycle": 1,
+                             "last_read_cycle": 2, "graduated_cycle": 2}
+        for i in range(10):
+            rc.record_word_test(cur, f"語{i}", used=True, cycle=2)
+        blocked = rc.maybe_advance_level(cur, cycle=3)
+        self.assertFalse(blocked["advanced"])
+        self.assertIn("explained", blocked["reason"])
+        for i in range(6):
+            rc.record_word_test(cur, f"語{i}", explained=True, cycle=3)
+        self.assertTrue(rc.maybe_advance_level(cur, cycle=4)["advanced"])
 
 
 if __name__ == "__main__":

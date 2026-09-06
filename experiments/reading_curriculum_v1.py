@@ -59,12 +59,26 @@ KNOWN_AFTER_BOOKS = 2              # a word is "known" after this many distinct 
 ZPD_KNOWN_LOW, ZPD_KNOWN_HIGH = 0.88, 0.98
 RETENTION_INTERVAL = 25           # cycles between retention re-tests
 
-# reference calibration points (estimated_level for known text kinds)
-#   ~1.5  first-reader picture book (very short sentences, almost no kanji)
-#   ~2.2  folktale retelling in 敬体 (楠山正雄 style)
-#   ~3.5  translated fairy tale / longer folktale
-#   ~4.3  literary children's prose (新美南吉 ごんぎつね)
-#   ~5.0  宮沢賢治
+# The endpoint goal is middle-school reading (中学生); a picture-book level is
+# only the FIRST milestone.  estimated_level scale (roughly):
+#   ~1.5  絵本 / first reader          (~4歳)   -- first milestone
+#   ~3.0  昔話再話 (楠山正雄 style)      (小1-2)
+#   ~5.0  翻訳童話 / 新美南吉            (小5-6)
+#   ~7.0  宮沢賢治 / 随筆                (中1-2)
+#   ~9.0  芥川 / 説明文                  (中3+)   -- endpoint goal
+MILESTONES = ((1.5, "絵本 (4歳・第一目標)"), (3.0, "小学校低学年"),
+              (5.0, "小学校高学年"), (7.0, "中学生"), (9.0, "中学卒業レベル (最終目標)"))
+MAX_LEVEL = 10.0
+
+
+def explained_ratio_target(level: float) -> float:
+    """How much of recently-learned vocabulary should reach the `explained`
+    tier before advancing.  Zero for early readers (a 4-year-old defines
+    nothing); ramps in from level 4 so that by the middle-school endpoint most
+    words the reader claims are ones it can actually explain."""
+    if level < 4.0:
+        return 0.0
+    return round(min(0.8, 0.15 * (level - 4.0)), 3)
 
 
 def _book_id(url: str, title: str) -> str:
@@ -96,7 +110,7 @@ def text_difficulty(text: str, event_count: int, known_words: set[str]) -> dict:
              + 0.030 * min(45, features["mean_sentence_chars"])
              + 4.0 * features["kanji_density"]
              + 0.9 * features["subordinate_density"])
-    features["estimated_level"] = round(max(1.0, min(6.0, level)), 2)
+    features["estimated_level"] = round(max(1.0, min(MAX_LEVEL, level)), 2)
     return features
 
 
@@ -270,6 +284,15 @@ def maybe_advance_level(curriculum: dict, cycle: int) -> dict:
         return {"advanced": False, "reason": "comprehension on current band dropped"}
     if mean_recent < ADVANCE_COMPREHENSION:
         return {"advanced": False, "reason": f"mean comprehension {mean_recent:.2f} below bar"}
+    want_explained = explained_ratio_target(curriculum["level"])
+    if want_explained > 0:
+        recent = sorted(curriculum["known_words"].values(),
+                        key=lambda i: i.get("used_cycle", 0), reverse=True)[:40]
+        tested = [i for i in recent if i.get("used")]
+        got = (sum(bool(i.get("explained")) for i in tested) / len(tested)) if tested else 0.0
+        if got < want_explained:
+            return {"advanced": False,
+                    "reason": f"explained-tier {got:.0%} < {want_explained:.0%} target for this level"}
 
     new_level = round(curriculum["level"] + LEVEL_STEP, 2)
     curriculum["level"] = new_level
@@ -300,9 +323,17 @@ def retention_check_due(curriculum: dict, cycle: int) -> str | None:
     return min(lower, key=lambda item: item[1].get("graduated_cycle", 0))[0]
 
 
+def current_milestone(level: float) -> str:
+    label = MILESTONES[0][1]
+    for threshold, name in MILESTONES:
+        if level + 1e-6 >= threshold:
+            label = name
+    return label
+
+
 def reading_age(level: float) -> str:
-    """Interpretable readout, calibrated on graded-reader difficulty (rough)."""
-    years = 2 + (level - 1.0) * 1.6
+    """Interpretable readout: level 1.5 ~ 4 years, level 9 ~ 15 years (中3)."""
+    years = 4 + (level - 1.5) * 1.5
     return f"おおよそ{years:.0f}歳向けの本"
 
 
@@ -314,7 +345,9 @@ def summary(curriculum: dict) -> dict:
     recent = [b["comprehension_history"][-1] for b in graduated if b["comprehension_history"]][-10:]
     return {
         "level": curriculum["level"],
+        "milestone": current_milestone(curriculum["level"]),
         "reading_age": reading_age(curriculum["level"]),
+        "explained_ratio_target": explained_ratio_target(curriculum["level"]),
         "vocabulary_seen": sum(1 for i in words.values() if i.get("books", 0) >= KNOWN_AFTER_BOOKS),
         "vocabulary_used": sum(1 for i in words.values() if i.get("used")),
         "vocabulary_explained": sum(1 for i in words.values() if i.get("explained")),
