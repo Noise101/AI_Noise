@@ -69,6 +69,19 @@ class EventStructureTest(unittest.TestCase):
         self.assertEqual(report["selected"]["model_id"], "smoothed_argument")
         self.assertGreater(report["selected"]["lift"], 0)
 
+    def test_a_confirmed_model_stays_selected_through_the_milestone_wait(self):
+        data = verified(learnable_sequences(60))
+        first = train_and_evaluate(data, {})
+        self.assertEqual(first["selection_status"], "accepted_final_gain")
+        # Next cycle: training has barely grown, so no fresh final query fires,
+        # but the model that already cleared the final gate must not flap back.
+        second = train_and_evaluate(data, first)
+        self.assertEqual(second["selected"]["model_id"], "smoothed_argument")
+        self.assertTrue(second["selected"].get("stale_final"))
+        self.assertEqual(second["final_queries_used"], 1)
+        self.assertNotIn("selected_model_changed",
+                         [e["event_type"] for e in second["emitted_events"]])
+
     def test_negative_control_random_data_selects_nothing(self):
         report = train_and_evaluate(verified(noise_sequences(60)), {})
         self.assertIsNone(report["selected"])

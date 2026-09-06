@@ -419,6 +419,17 @@ def train_and_evaluate(verified_experience: dict, previous: dict | None = None) 
             selected = {"task": candidate["task"], "model_id": candidate["model_id"],
                         "selection": candidate["selection"], "final": final_eval,
                         **final_eval}
+    elif candidate and final_history:
+        # No fresh final query this cycle (milestone not reached, or budget
+        # spent). A model that already cleared the final gate stays selected on
+        # its last recorded final result rather than flapping back to the
+        # baseline while it waits for the next milestone.
+        last = final_history[-1]
+        if (last.get("task") == candidate["task"] and last.get("model_id") == candidate["model_id"]
+                and passes_gain_gate(last.get("evaluation", {}), FINAL_ALPHA)):
+            selected = {"task": candidate["task"], "model_id": candidate["model_id"],
+                        "selection": candidate["selection"], "final": last["evaluation"],
+                        "stale_final": True, **last["evaluation"]}
 
     best_candidate = max(evaluations, key=lambda item: (item["selection"]["lift"],
                          item["selection"]["coverage"]), default=None)
