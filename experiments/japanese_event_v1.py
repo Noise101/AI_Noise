@@ -33,7 +33,9 @@ from dataclasses import dataclass, field
 #   3 -> direct-speech (「…」と言った) events; te-form subject carries forward
 #   4 -> verb normalisation: negative-past, bare te-form, clause-tail stripping,
 #        った defaults to る; single-kanji topic は
-PARSER_VERSION = 4
+#   5 -> compound verbs (〜ておる, 〜ながら), copula ではなかった, ことができる,
+#        んだ -> ぶ/む/ぬ, 考える/思う in the table; adverbs out of the subject slot
+PARSER_VERSION = 5
 
 # character classes
 HIRAGANA = r"ぁ-ゖゝゞ"
@@ -78,7 +80,10 @@ OBJECT_MARKERS = ("を",)
 SENTENCE_END = "。！？、」』）\n 　"
 CONNECTIVES = {"そして", "それから", "すると", "しかし", "けれども", "でも",
                "ところが", "やがて", "また", "その", "この", "あの", "ある",
-               "むかし", "むかしむかし", "とても", "やがて", "ある日", "いつも"}
+               "むかし", "むかしむかし", "とても", "やがて", "ある日", "いつも",
+               "いろいろ", "だんだん", "そっと", "しずかに", "きゅうに", "にわかに",
+               "しばらく", "まもなく", "すっかり", "ちっとも", "とうとう", "しまいに",
+               "いきなり", "だいぶ", "もっと", "ずいぶん", "たいそう", "たいへん"}
 # body parts / faculties: in a 「Xは Yが <state>」 sensation clause (おなかがすく,
 # のどがかわく, あたまがいたい) the が-noun Y is part of the predicate, not the
 # agent -- the experiencer is the dropped topic.  Taking Y as the subject and
@@ -117,6 +122,8 @@ COUNTER_WORD = re.compile(
 VERB_TABLE = {
     "する": "する", "した": "する", "して": "する", "します": "する", "しました": "する",
     "しない": "する", "せず": "する", "できた": "できる", "できる": "できる",
+    "できました": "できる", "できません": "できる", "できませんでした": "できる",
+    "できない": "できる", "できなかった": "できる", "でき": "できる", "できて": "できる",
     "来た": "来る", "きた": "来る", "来る": "来る", "くる": "来る", "来ました": "来る", "きました": "来る",
     "行った": "行く", "いった": "行く", "行く": "行く", "いく": "行く", "行きました": "行く",
     "あった": "ある", "ある": "ある", "あります": "ある", "ありました": "ある", "ない": "ある",
@@ -131,6 +138,16 @@ VERB_TABLE = {
     "出た": "出る", "でた": "出る", "出ました": "出る", "入った": "入る", "はいった": "入る",
     "生まれた": "生まれる", "うまれた": "生まれる", "生まれました": "生まれる",
     "くれた": "くれる", "くれました": "くれる", "もらった": "もらう", "あげた": "あげる",
+    # frequent verbs the scanner otherwise mis-splits (考える at が, 思う as 思る…)
+    "考えた": "考える", "かんがえた": "考える", "考えました": "考える", "かんがえました": "考える",
+    "考える": "考える", "かんがえる": "考える", "考えて": "考える", "かんがえて": "考える",
+    "思った": "思う", "おもった": "思う", "思いました": "思う", "おもいました": "思う",
+    "思う": "思う", "おもう": "思う", "思って": "思う", "おもって": "思う",
+    "答えた": "答える", "こたえた": "答える", "答えました": "答える", "こたえました": "答える",
+    "わかった": "わかる", "わかりました": "わかる", "分かった": "わかる",
+    "わかる": "わかる", "わからない": "わかる", "わからなかった": "わかる", "わかって": "わかる",
+    "言って": "言う", "いって": "言う", "云った": "言う", "云いました": "言う", "云う": "言う",
+    "聞いた": "聞く", "きいた": "聞く", "聞きました": "聞く", "ききました": "聞く",
 }
 # godan: i-row (ます-stem last kana) -> dictionary u-row
 I_TO_U = {"い": "う", "き": "く", "ぎ": "ぐ", "し": "す", "ち": "つ",
@@ -140,10 +157,14 @@ I_TO_U = {"い": "う", "き": "く", "ぎ": "ぐ", "し": "す", "ち": "つ",
 # かかる, わかる are far more common in these stories than the odd new う-verb) and
 # list the frequent う-verbs whose stem ends the surface before った.
 GODAN_PAST = {"った": ["る", "つ", "う"], "いた": ["く"], "いだ": ["ぐ"],
-              "した": ["す"], "んだ": ["ぬ", "ぶ", "む"]}
+              "した": ["す"], "んだ": ["む", "ぶ", "ぬ"]}
 _GODAN_U_STEMS = ("思", "おも", "笑", "わら", "使", "つか", "歌", "うた", "買", "か",
                   "会", "合", "あ", "手伝", "てつだ", "もら", "はら", "うしな", "した",
                   "すく", "とりあ", "であ", "い")
+# …んだ that is really a ぶ-verb (遊ぶ/飛ぶ/呼ぶ/喜ぶ/運ぶ), or 死ぬ
+_GODAN_BU_STEMS = ("あそ", "遊", "と", "飛", "よ", "呼", "はこ", "運", "よろこ", "喜",
+                   "ころ", "転", "むす", "結", "えら", "選")
+_GODAN_NU_STEMS = ("し", "死")
 
 
 def normalise_text(text: str) -> str:
@@ -169,12 +190,18 @@ def _protect_quotes(text: str) -> "tuple[str, list[str]]":
 
 TE_AUX = re.compile(r"[てで](き(た|ました|ます)|くる|きます|"
                     r"い(た|ました|ます|きました|る)|いく|"
-                    r"しま(った|いました|う)|お(いた|きました)|み(た|ました|る))$")
+                    r"しま(った|いました|う)|"
+                    r"お(いた|きました|り|りました|ります|る|く)|"      # 〜ておる/ておく
+                    r"あ(る|った|ります|りました)|"                    # 〜てある
+                    r"み(た|ました|る))$")
+_NAGARA = re.compile(rf"^{JP}{{1,}}?(ながら|つつ)(?=.)")     # 見ながら言う -> drop 見ながら
 # clause-final nominalisers / conjunctions that hang off a finished verb
 _VERB_TAIL = re.compile(
-    r"(の(だ|です|である|でした)?|ん(だ|です)|(んだ|の)けれど[も]?|"
+    r"(の(だ|です|である|でした)?|(?<=[うくぐすつぬぶむる])ん(だ|です)|"
+    r"(?<=[うくぐすつぬぶむる])んだと|"
     r"から|ので|のに|けれど[も]?|"
-    r"のである|のでした|んだと|ということ)$")
+    r"(もの|の|わけ)?で(は|も)?(ない|なかった|ありません|ありませんでした)|"   # …ものではなかった
+    r"のである|のでした|ということ)$")
 _NEG_PAST = re.compile(r"な(かった|かっ)(ら|ので|のです|のである|から|けれど[も]?|り)?$")
 
 
@@ -183,6 +210,11 @@ def _dictionary_verb(surface: str) -> tuple[str, float]:
     surface = surface.strip("。、！？「」『』（）　 \n")
     if not surface:
         return "", 0.0
+    # 泳ぐことができた -> 泳ぐ (keep the content verb, drop the potential auxiliary)
+    surface = re.sub(r"こと(が|は|も)?でき.*$", "", surface) or surface
+    surface = re.sub(r"^(ことが|のが|ことは|のは|ことも|わけには)", "", surface)
+    surface = re.sub(r"^[はがを](?=でき|いられ|おられ)", "", surface)   # …ことはできない
+    surface = _NAGARA.sub("", surface, count=1)   # 見ながら言いました -> 言いました
     for _ in range(2):                           # 受けたのである -> 受けた
         stripped = _VERB_TAIL.sub("", surface)
         if stripped == surface or len(stripped) < 2:
@@ -221,6 +253,10 @@ def _dictionary_verb(surface: str) -> tuple[str, float]:
             root = surface[:-len(tail)]
             if tail == "った" and root.endswith(_GODAN_U_STEMS):
                 return root + "う", 0.7
+            if tail == "んだ" and root.endswith(_GODAN_BU_STEMS):
+                return root + "ぶ", 0.7
+            if tail == "んだ" and root.endswith(_GODAN_NU_STEMS):
+                return root + "ぬ", 0.75
             return root + options[0], 0.6
         if surface.endswith("た"):               # ichidan past: 食べた -> 食べる
             return surface[:-1] + "る", 0.65
@@ -339,11 +375,16 @@ def _split_particles(clause: str, known_words: "set[str] | None" = None) -> list
                 if not clause.startswith(particle, i) or not _noun_ok(current):
                     continue
                 # が followed by an inflection kana is verb-internal (上がる, 転がる);
-                # が at the very end of a fragment is a real subject marker
-                if particle == "が" and nxt and nxt in "るりっられろ":
+                # が at the very end of a fragment is a real subject marker.  が+え
+                # is verb-internal only when what follows inflects (かんがえた,
+                # きこえる) -- not before a noun (きつねがえさを).
+                if particle == "が" and nxt and (
+                        nxt in "るりっられろ"
+                        or (nxt == "え" and clause[i + 2:i + 3] in ("る", "た", "て", "ま", "よ", "な"))):
                     continue
-                # で in でした/です/でしょう or after ん is copula/verb-internal
-                if particle == "で" and ((nxt and nxt in "しす") or prev == "ん"):
+                # で in でした/です/でしょう, で+は (copula では), or after ん is
+                # copula / verb-internal, not a locative
+                if particle == "で" and ((nxt and nxt in "しすは") or prev == "ん"):
                     continue
                 # a known word spanning the particle -> not a boundary, but only
                 # when `nxt` continues that word.  An induced "こうもりが" chunk

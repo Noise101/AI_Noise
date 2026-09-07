@@ -135,6 +135,18 @@ class JapaneseEventTest(unittest.TestCase):
         self.assertEqual(_dictionary_verb("つかまった")[0], "つかまる")
         self.assertEqual(_dictionary_verb("受けたのである")[0], "受ける")
 
+    def test_verb_normalisation_compounds_and_copula(self):
+        self.assertEqual(_dictionary_verb("いっておりました")[0], "言う")
+        self.assertEqual(_dictionary_verb("見ながら言いました")[0], "言う")
+        self.assertEqual(_dictionary_verb("かんがえました")[0], "考える")
+        self.assertEqual(_dictionary_verb("くっつくものではなかった")[0], "くっつく")
+        self.assertEqual(_dictionary_verb("泳ぐことができました")[0], "泳ぐ")
+        self.assertEqual(_dictionary_verb("はできませんでした")[0], "できる")
+        self.assertEqual(_dictionary_verb("あそんだ")[0], "あそぶ")
+        # real verbs that start with a particle char are not truncated
+        self.assertEqual(_dictionary_verb("はしる")[0], "はしる")
+        self.assertEqual(_dictionary_verb("はいる")[0], "はいる")
+
     def test_te_auxiliary_is_stripped(self):
         self.assertEqual(_dictionary_verb("流れてきました")[0], "流れる")
 
