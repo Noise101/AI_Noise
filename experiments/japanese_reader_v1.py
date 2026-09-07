@@ -154,6 +154,11 @@ def run_once(runtime: Path) -> dict:
     cur["cycle"] = cycle
     events_store = _read_events()
 
+    # a better parser can rescue books an older one set aside: put them back in
+    # rotation and drop their stale cached events so they are re-extracted
+    for bid in curriculum.reevaluate_stale_parses(cur):
+        events_store.pop(bid, None)
+
     in_rotation = sum(1 for b in cur["shelf"].values() if b["status"] == "in_rotation")
     reachable = in_rotation + sum(1 for b in cur["shelf"].values()
                                  if b["status"] in ("shelved_above_level", "shelved_stuck"))

@@ -53,6 +53,22 @@ class ReadingCurriculumTest(unittest.TestCase):
                   for v in ("うめる", "まもなく", "しぬ", "もでてく", "でる")]
         self.assertLess(rc._self_consistency(broken), rc.GRADUATE_COMPREHENSION)
 
+    def test_stale_parse_books_return_to_rotation_on_a_parser_version_bump(self):
+        import japanese_event_v1 as jevent
+        cur = rc.empty_curriculum()
+        rc.register_books(cur, [book("A", "a", SIMPLE)], cycle=1)
+        bid = rc._book_id("a", "A")
+        cur["shelf"][bid].update(status="shelved_stuck", times_read=6,
+                                 comprehension_history=[0.2, 0.2, 0.2],
+                                 parser_version=jevent.PARSER_VERSION - 1)
+        reset = rc.reevaluate_stale_parses(cur)
+        self.assertEqual(reset, [bid])
+        self.assertEqual(cur["shelf"][bid]["status"], "in_rotation")
+        self.assertEqual(cur["shelf"][bid]["times_read"], 0)
+        self.assertEqual(cur["shelf"][bid]["comprehension_history"], [0.2, 0.2, 0.2])
+        # current-version books are left alone; no repeat reset
+        self.assertEqual(rc.reevaluate_stale_parses(cur), [])
+
     def test_a_stuck_book_is_shelved_and_not_re_pulled(self):
         cur = rc.empty_curriculum()
         rc.register_books(cur, [book("A", "a", SIMPLE)], cycle=1)

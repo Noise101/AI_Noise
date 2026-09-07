@@ -62,6 +62,29 @@ class JapaneseEventTest(unittest.TestCase):
                                "とてもかなしみました。")
         self.assertNotIn("いっぴき", [e.subject for e in events])
 
+    def test_multi_clause_sentence_recovers_the_buried_subject_and_main_verb(self):
+        # the が-marked subject sits mid-sentence behind a relative clause, the
+        # main verb is three fragments later -- the old per-fragment parser got
+        # neither
+        events = extract_story(
+            "あるとき、あそびまわっていたこうもりが、あやまって地べたにおちて、"
+            "そこにいたいたちに、つかまってしまいました。")
+        self.assertTrue(events)
+        self.assertEqual(events[-1].subject, "こうもり")
+        self.assertTrue(events[-1].subject_explicit)
+
+    def test_relative_clause_before_the_subject_is_stripped(self):
+        event = extract_clause("そこにいたいたちがこうもりをつかまえました。")
+        self.assertEqual(event.subject, "いたち")
+
+    def test_a_name_is_never_split_by_the_modifier_stripper(self):
+        from japanese_event_v1 import _strip_modifier
+        self.assertEqual(_strip_modifier("ももたろう"), "ももたろう")
+
+    def test_ga_at_the_end_of_a_comma_fragment_is_a_subject_marker(self):
+        events = extract_story("おおきなたいこをもったたぬきが、やまからおりてきました。")
+        self.assertEqual(events[-1].subject, "たぬき")
+
     def test_single_kanji_noun_is_a_valid_argument(self):
         event = extract_clause("おじいさんは山から帰りました。")
         self.assertEqual(event.roles.get("から"), "山")

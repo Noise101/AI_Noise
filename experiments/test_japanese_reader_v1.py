@@ -91,6 +91,23 @@ class JapaneseReaderTest(unittest.TestCase):
         text = reader.render_status(self.runtime)
         self.assertIn("Noise 日本語読書", text)
 
+    def test_a_parser_version_bump_re_reads_stuck_books(self):
+        import japanese_event_v1 as jevent
+        reader.run_once(self.runtime)
+        cur = reader._read(self.runtime / reader.CURRICULUM_FILE)
+        events = reader._read(self.runtime / reader.EVENTS_FILE)
+        stuck = next(bid for bid in cur["shelf"])
+        cur["shelf"][stuck].update(status="shelved_stuck", times_read=6,
+                                   parser_version=jevent.PARSER_VERSION - 1)
+        events[stuck] = [{"subject": "x", "verb": "stale", "obj": ""}]   # stale cache
+        reader._write(self.runtime / reader.CURRICULUM_FILE, cur)
+        reader._write(self.runtime / reader.EVENTS_FILE, events)
+        reader.run_once(self.runtime)
+        cur = reader._read(self.runtime / reader.CURRICULUM_FILE)
+        self.assertNotEqual(cur["shelf"][stuck]["status"], "shelved_stuck")
+        events = reader._read(self.runtime / reader.EVENTS_FILE)
+        self.assertNotEqual(events.get(stuck), [{"subject": "x", "verb": "stale", "obj": ""}])
+
     def test_caregiver_batch_does_not_crash_when_no_book_is_selectable(self):
         # regression: `model` is only bound inside `if book_id:`, but the
         # caregiver batch reads it -- no selectable book must not raise

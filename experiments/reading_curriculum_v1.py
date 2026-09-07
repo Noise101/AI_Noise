@@ -231,6 +231,25 @@ def register_books(curriculum: dict, books: list[dict], cycle: int) -> int:
     return added
 
 
+def reevaluate_stale_parses(curriculum: dict) -> list[str]:
+    """A book set aside as unparsable / shelved_stuck under an older extractor
+    (`select_next_book` only ever un-shelves `shelved_above_level`).  When the
+    parser version has moved on, put those books back in rotation and return
+    their ids so the caller can drop their cached events for a fresh reading.
+    Graduated books keep their standing; their comprehension history is kept."""
+    from japanese_event_v1 import PARSER_VERSION
+    reset = []
+    for bid, b in curriculum["shelf"].items():
+        if (b.get("status") in ("shelved_stuck", "unparsable")
+                and b.get("parser_version", 0) < PARSER_VERSION):
+            b["status"] = "in_rotation"
+            b["shelved_at_level"] = None
+            b["times_read"] = 0
+            b["parser_version"] = PARSER_VERSION      # don't loop on it next cycle
+            reset.append(bid)
+    return reset
+
+
 def select_next_book(curriculum: dict) -> str | None:
     level = curriculum["level"]
     rotation = [(bid, b) for bid, b in curriculum["shelf"].items()
@@ -270,6 +289,8 @@ def record_reading(curriculum: dict, book_id: str, events: list[dict],
     book = curriculum["shelf"].get(book_id)
     if not book:
         return {"status": "unknown_book"}
+    from japanese_event_v1 import PARSER_VERSION
+    book["parser_version"] = PARSER_VERSION       # which extractor produced this reading
     scorable = [e for e in events if e.get("verb")]
     if len(scorable) < 3:
         # Not enough structure to score -- the parser (or the LLM scaffold)

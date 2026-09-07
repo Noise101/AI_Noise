@@ -25,6 +25,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+# Bumped when extract_story changes enough that a book set aside as unparsable /
+# stuck under the old behaviour deserves a fresh reading (reading_curriculum_v1
+# stamps this per book; japanese_reader_v1 re-shelves the stragglers).
+#   1 -> initial per-fragment extractor
+#   2 -> sentence-level clause chaining + relative-clause / predicate-が fixes
+PARSER_VERSION = 2
+
 # character classes
 HIRAGANA = r"ぁ-ゖゝゞ"
 KATAKANA = r"ァ-ヺー"
@@ -39,6 +46,7 @@ SENT_SPLIT = re.compile(r"(?<=[。！？])")
 # (mid-run they are usually word-internal: もも, おも..., ...も).
 STRONG_PARTICLES = ["から", "が", "を", "に", "へ", "で", "と"]
 TOPIC_PARTICLES = ["は", "も"]
+_PARTICLE_TAILS = ("が", "を", "に", "へ", "で", "と", "は", "も", "から", "の")
 SUBJECT_MARKERS = ("が", "は", "も")
 OBJECT_MARKERS = ("を",)
 
@@ -198,6 +206,39 @@ def _noun_ok(raw: str) -> bool:
     return len(noun) >= 2 or (len(noun) == 1 and bool(_KANJI_KATA.match(noun)))
 
 
+_ADJ_MODIFIER = re.compile(
+    r"^(ちいさい|ちいさな|おおきい|おおきな|わかい|としとった|としよりの|うつくしい|"
+    r"きれいな|かわいい|やさしい|わるい|かなしい|うれしい|ずるい|おろかな|"
+    r"あわれな|びんぼうな|かねもちの|ゆうめいな|しあわせな|ふしあわせな)")
+
+
+# adnominal verb tails that unambiguously end a relative clause modifying the
+# following noun ("あそびまわっていた+こうもり", "そこにいた+いたち")
+_REL_CLAUSE_TAIL = ("ている", "ていた", "ていない", "てある", "でいる", "でいた",
+                    "った", "いた", "えた", "きた", "した", "ない", "れる", "られる")
+
+
+def _strip_modifier(noun: str) -> str:
+    """「あそびまわっていたこうもり」-> 「こうもり」, 「ちいさい女の子」-> 「女の子」:
+    drop a leading relative-clause verb or adjective so the head noun is the
+    subject, not a sentence fragment.  Conservative -- only unambiguous tails, so
+    a name like ももたろう is never split."""
+    noun = _ADJ_MODIFIER.sub("", noun)
+    for cut in range(len(noun) - 2, 1, -1):
+        prefix, head = noun[:cut], noun[cut:]
+        if not prefix.endswith(_REL_CLAUSE_TAIL):
+            continue
+        if head in ("こと", "もの", "ひと", "とき", "ところ", "ため"):
+            continue
+        # the head must look like a content noun, not the tail of one word
+        if not (len(head) >= 3 or _KANJI_KATA.match(head)):
+            continue
+        _, conf = _dictionary_verb(prefix)
+        if conf >= 0.6:
+            return _clean_noun(head)
+    return noun
+
+
 def _split_particles(clause: str, known_words: "set[str] | None" = None) -> list[tuple[str, str]]:
     """[(noun, particle), ...] for the case-marked NPs in one clause, in order.
 
@@ -224,16 +265,21 @@ def _split_particles(clause: str, known_words: "set[str] | None" = None) -> list
             for particle in STRONG_PARTICLES:
                 if not clause.startswith(particle, i) or not _noun_ok(current):
                     continue
-                # が followed by an inflection kana is verb-internal (上がる, 転がる)
-                if particle == "が" and nxt in "るりっられろ":
+                # が followed by an inflection kana is verb-internal (上がる, 転がる);
+                # が at the very end of a fragment is a real subject marker
+                if particle == "が" and nxt and nxt in "るりっられろ":
                     continue
                 # で in でした/です/でしょう or after ん is copula/verb-internal
-                if particle == "で" and (nxt in "しす" or prev == "ん"):
+                if particle == "で" and ((nxt and nxt in "しす") or prev == "ん"):
                     continue
-                # a known word spanning the particle -> not a boundary
-                if known_words and any(w for w in (current[-2:] + particle + nxt,
-                                                   current[-1:] + particle + nxt)
-                                       if w in known_words):
+                # a known word spanning the particle -> not a boundary, but only
+                # when `nxt` continues that word.  An induced "こうもりが" chunk
+                # (ends in the particle, or nxt is empty / a verb start) must not
+                # suppress the real subject marker.
+                _spanning = [current[-2:] + particle + nxt, current[-1:] + particle + nxt]
+                if (known_words and nxt and any(
+                        w in known_words and not w.endswith(_PARTICLE_TAILS)
+                        for w in _spanning)):
                     continue
                 matched = particle
                 break
@@ -249,7 +295,7 @@ def _split_particles(clause: str, known_words: "set[str] | None" = None) -> list
                             matched, seen_topic = particle, True
                             break
             if matched:
-                noun = _clean_noun(current)
+                noun = _strip_modifier(_clean_noun(current))
                 if noun and noun not in CONNECTIVES:
                     out.append((noun, matched))
                 current = ""
@@ -261,30 +307,21 @@ def _split_particles(clause: str, known_words: "set[str] | None" = None) -> list
     return out, verb_start
 
 
-def extract_clause(sentence: str, recent_subject: str | None = None,
-                   known_words: "set[str] | None" = None) -> JapaneseEvent | None:
-    text = normalise_text(sentence).strip()
-    if len(text) < 4:
-        return None
-    core = text.rstrip(SENTENCE_END)
-    # 「Xというもの」 -> the entity is X; drop the という so the scanner sees Xが/を
-    core = TO_IU.sub("", core, count=1) if TO_IU.search(core) else core
-    pairs, verb_start = _split_particles(core, known_words)
-    # the verb complex is whatever follows the last matched (noun, particle) --
-    # taken straight from the scanner so it agrees with which が/を it accepted
+def _verb_after(core: str, verb_start: int) -> "tuple[str, float]":
     verb_surface = re.sub(r"^[、。「」『』（）\s]+", "", core[verb_start:])
     verb_run = JP_RUN.search(verb_surface)
     if not verb_run:
-        return None
-    verb, verb_conf = _dictionary_verb(verb_run.group(0))
-    if not verb:
-        return None
+        return "", 0.0
+    return _dictionary_verb(verb_run.group(0))
 
+
+def _assemble_event(pairs: "list[tuple[str, str]]", verb: str, verb_conf: float,
+                    recent_subject: str | None, sentence: str) -> JapaneseEvent | None:
     subject = obj = ""
     roles: dict[str, str] = {}
     suppressed_ga = False
     for noun, particle in pairs:
-        if (particle == "が" and not subject and noun in PREDICATE_GA_NOUNS):
+        if particle == "が" and not subject and noun in PREDICATE_GA_NOUNS:
             # 「おなかがすいた」: the が-noun is the predicate's theme, not the
             # agent -- keep it as a role and let the dropped topic be the subject
             roles.setdefault("が", noun)
@@ -306,6 +343,22 @@ def extract_clause(sentence: str, recent_subject: str | None = None,
     return JapaneseEvent(subject=subject, verb=verb, obj=obj, confidence=confidence,
                          sentence=sentence.strip(), roles=roles,
                          subject_explicit=subject_explicit)
+
+
+def extract_clause(sentence: str, recent_subject: str | None = None,
+                   known_words: "set[str] | None" = None) -> JapaneseEvent | None:
+    """One event from one clause -- the standalone / single-clause entry point.
+    `extract_story` uses the chaining path below instead."""
+    text = normalise_text(sentence).strip()
+    if len(text) < 4:
+        return None
+    core = text.rstrip(SENTENCE_END)
+    core = TO_IU.sub("", core, count=1) if TO_IU.search(core) else core
+    pairs, verb_start = _split_particles(core, known_words)
+    verb, verb_conf = _verb_after(core, verb_start)
+    if not verb:
+        return None
+    return _assemble_event(pairs, verb, verb_conf, recent_subject, sentence)
 
 
 def learn_word_vocabulary(text: str, minimum_count: int = 2, top: int = 400) -> set[str]:
@@ -334,30 +387,61 @@ def learn_word_vocabulary(text: str, minimum_count: int = 2, top: int = 400) -> 
     return {form for _, form in sorted(scored, reverse=True)[:top]}
 
 
+def _bare_topic(clause: str) -> str | None:
+    bare = BARE_TOPIC.match(clause)
+    if not bare:
+        return None
+    topic = _strip_modifier(_clean_noun(bare.group(1)))
+    if _noun_ok(bare.group(1)) and topic not in CONNECTIVES and topic not in NON_TOPIC_NOUNS:
+        return topic
+    return ""                                    # a topic-shaped clause, but not an entity
+
+
+def _sentence_events(sentence: str, recent_subject: str | None,
+                     vocab: "set[str] | None") -> list[JapaneseEvent]:
+    """A multi-clause sentence is one predication chain: case-marked NPs from
+    every 、-fragment feed the sentence's verbs.  A fragment with no verb of its
+    own carries its NPs forward to the next verb (「…こうもりが、…おちて、…
+    つかまってしまいました」-> こうもり is the subject of both おちる and つかまる)."""
+    core = TO_IU.sub("", sentence, count=1) if TO_IU.search(sentence) else sentence
+    core = core.rstrip(SENTENCE_END)
+    frags = [f.strip() for f in re.split(r"、", core) if f.strip()]
+    events: list[JapaneseEvent] = []
+    carried: list[tuple[str, str]] = []          # NPs from verbless fragments
+    for frag in frags:
+        topic = _bare_topic(frag)
+        if topic is not None:
+            if topic:
+                recent_subject = topic
+            continue
+        pairs, verb_start = _split_particles(frag, vocab)
+        verb, verb_conf = _verb_after(frag, verb_start)
+        if not verb:                             # pure NP fragment -> carry it on
+            carried.extend(pairs)
+            continue
+        event = _assemble_event(carried + pairs, verb, verb_conf, recent_subject, sentence)
+        if event and event.confidence >= 0.4:
+            events.append(event)
+            carried = []                         # consumed by a trusted predicate
+            if event.subject:
+                recent_subject = event.subject
+        # else: this sub-clause's predicate is too weak to trust -- drop its own
+        # pairs but keep `carried` for a later main verb
+    return events
+
+
 def extract_story(text: str, known_words: "set[str] | None" = None) -> list[JapaneseEvent]:
-    """Ordered events for a whole story, threading the omitted subject."""
+    """Ordered events for a whole story, threading the omitted subject across
+    clauses and sentences."""
     vocab = known_words if known_words is not None else learn_word_vocabulary(text)
     events: list[JapaneseEvent] = []
     recent_subject: str | None = None
     for raw in SENT_SPLIT.split(normalise_text(text)):
         sentence = raw.strip()
-        if not sentence:
+        if len(sentence) < 4:
             continue
-        for clause in re.split(r"、(?=\S)", sentence):
-            bare = BARE_TOPIC.match(clause.strip())
-            if bare:
-                topic = _clean_noun(bare.group(1))
-                if (_noun_ok(bare.group(1)) and topic not in CONNECTIVES
-                        and topic not in NON_TOPIC_NOUNS):
-                    recent_subject = topic
-                continue
-            event = extract_clause(clause if clause.endswith(tuple("。！？")) else clause + "。",
-                                   recent_subject, vocab)
-            if event and event.confidence >= 0.4:
-                events.append(event)
-                # only an explicitly case-marked subject re-anchors the zero-
-                # anaphora thread; an inherited or suppressed one must not
-                # overwrite it with itself or with a predicate noun
-                if event.subject_explicit and event.subject:
-                    recent_subject = event.subject
+        for event in _sentence_events(sentence, recent_subject, vocab):
+            events.append(event)
+            if event.subject:
+                recent_subject = event.subject
     return events
