@@ -44,13 +44,21 @@ def _story_key(url: str) -> str:
 
 
 def _collection(url: str) -> str:
-    """Group a multi-part source (「イソップ童話集/きつねとつる」) so its parts do
-    not straddle train and test; a standalone work is its own collection."""
+    """Group a multi-part source (「イソップ童話集/きつねとつる」, an Aozora author's
+    files directory) so its parts never straddle train and test.  A standalone
+    work -- including a bare wiki page like /wiki/桃太郎, where the parent is only
+    the generic /wiki mount -- is its own collection.
+
+    parts == ['https:', '', host, seg1, seg2, ...]; real path segments start at
+    index 3.  A collection needs >= 2 directory segments above the leaf, so
+    /wiki/Title (one dir: "wiki") stays standalone while /wiki/Collection/Title
+    and /cards/NNN/files/xxx.html group on their parent.
+    """
     base = url.split("#")[0].split("?")[0].rstrip("/")
-    parent, _, leaf = base.rpartition("/")
-    # only treat the parent as a collection when the URL genuinely nests
-    # (a wiki subpage title, not just scheme "//")
-    return parent if leaf and parent.count("/") >= 3 else base
+    parts = base.split("/")
+    if len(parts[3:]) >= 3:
+        return "/".join(parts[:-1])
+    return base
 
 
 def _held_out(url: str) -> bool:
@@ -209,6 +217,8 @@ def vocabulary_use_test(word: str, events: list[dict], distractors: list[str],
     if len(trials) < 2 or len(distractors) < 2 or not cooccurrence:
         return {"tested": False, "reason": "need >=2 events, >=2 distractors, a co-occurrence table"}
     candidates = [word] + [d for d in distractors[:3] if d != word]
+    if len(candidates) < 2:
+        return {"tested": False, "reason": "need >=1 distinct distractor"}
     cloze_hits = reject_hits = 0
     for e in trials:
         target_slot = next(s for s in slots if e.get(s) == word)

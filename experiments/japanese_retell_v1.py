@@ -282,9 +282,14 @@ SIGNIFICANT_TRAIN_GROWTH = 1.4
 
 
 def _collection(url: str) -> str:
+    """Same grouping as reading_comprehension_v1._collection: a source's parts
+    (an Aozora author's files dir, a wiki collection's subpages) never straddle
+    train and test; a bare /wiki/Title page is its own collection."""
     base = url.split("#")[0].split("?")[0].rstrip("/")
-    parent, _, leaf = base.rpartition("/")
-    return parent if leaf and parent.count("/") >= 3 else base
+    parts = base.split("/")
+    if len(parts[3:]) >= 3:
+        return "/".join(parts[:-1])
+    return base
 
 
 def _held_out(url: str) -> bool:
