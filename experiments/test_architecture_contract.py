@@ -39,6 +39,36 @@ class ArchitectureContractTest(unittest.TestCase):
         self.assertFalse(proposal.verified)
         self.assertEqual(proposal.evidence_score, 0.0)
 
+    def test_reading_event_extraction_runs_without_a_morphological_analyser(self):
+        import os
+        prev = os.environ.get("AI_NOISE_NO_MORPHOLOGY")
+        os.environ["AI_NOISE_NO_MORPHOLOGY"] = "1"
+        try:
+            import morphology_teacher as mt
+            self.assertEqual(mt.get_teacher(refresh=True).name, "none")
+            import japanese_event_v1 as jevent
+            story = "きつねがぶどうを見つけました。きつねはとびあがりました。"
+            base = jevent.extract_story(story)
+            self.assertTrue(base)
+            # use_teacher=True and refine_event_dicts are no-ops, not errors
+            self.assertEqual([e.verb for e in jevent.extract_story(story, use_teacher=True)],
+                             [e.verb for e in base])
+            self.assertEqual(jevent.refine_event_dicts([e.__dict__ for e in base]),
+                             [e.__dict__ for e in base])
+        finally:
+            if prev is None:
+                os.environ.pop("AI_NOISE_NO_MORPHOLOGY", None)
+            else:
+                os.environ["AI_NOISE_NO_MORPHOLOGY"] = prev
+            import morphology_teacher as mt
+            mt.get_teacher(refresh=True)
+
+    def test_morphological_analyser_output_is_score_zero(self):
+        import morphology_teacher as mt
+        analysis = mt.MorphAnalysis("janome", [])
+        self.assertEqual(analysis.evidence_score, 0.0)
+        self.assertFalse(analysis.verified)
+
     def test_prediction_failure_changes_internal_belief(self):
         learner = StoryLearner()
         learner.observe_story(["Fox sees grapes.", "Fox jumps high."])

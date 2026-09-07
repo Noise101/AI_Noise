@@ -605,10 +605,17 @@ def _sentence_events(sentence: str, recent_subject: str | None,
     return events
 
 
-def extract_story(text: str, known_words: "set[str] | None" = None) -> list[JapaneseEvent]:
+def extract_story(text: str, known_words: "set[str] | None" = None,
+                  use_teacher: bool = False) -> list[JapaneseEvent]:
     """Ordered events for a whole story, threading the omitted subject across
     clauses and sentences.  Direct speech (「…」と言った) is pulled out first so a
-    quote's own 。 does not split the sentence."""
+    quote's own 。 does not split the sentence.
+
+    `use_teacher=True` runs a disclosed morphological analyser (evidence score 0)
+    over the same sentences afterwards and lets it correct verb dictionary forms
+    and strip relative-clause fragments from subjects.  It is OFF by default:
+    the frozen benchmarks, the character RNN, and boundary induction only ever
+    see the heuristic parse (ARCHITECTURE.md invariants 1, 16, 17)."""
     dequoted, quotes = _protect_quotes(normalise_text(text))
     vocab = known_words if known_words is not None else learn_word_vocabulary(
         _QUOTE_PH.sub("", dequoted))
@@ -622,4 +629,94 @@ def extract_story(text: str, known_words: "set[str] | None" = None) -> list[Japa
             events.append(event)
             if event.subject:
                 recent_subject = event.subject
+    if use_teacher:
+        events = refine_with_teacher(events)
     return events
+
+
+_TEACHER_AUX_VERBS = {"いる", "おる", "ある", "くる", "いく", "行く", "来る", "しまう",
+                      "みる", "見る", "おく", "くれる", "もらう", "あげる", "ゆく",
+                      "なる", "する", "だ", "です"}
+
+
+def _teacher_main_verb(analysis, heuristic_verb: str) -> str | None:
+    """The teacher's dictionary form for the SAME verb the heuristic found --
+    matched by a shared prefix.  No confident match -> keep the heuristic verb
+    (one event's `.sentence` is the whole, possibly multi-verb sentence, so a
+    positional fallback would often pick the wrong clause)."""
+    hv = heuristic_verb or ""
+    if len(hv) < 2:
+        return None
+    for m in analysis.morphemes:
+        if not m.is_verb:
+            continue
+        if (m.surface[:2] == hv[:2] or m.base[:2] == hv[:2]
+                or hv.startswith(m.surface[:3]) or m.base in hv or hv in m.base):
+            return m.base
+    return None
+
+
+def _teacher_noun_head(analysis, subject: str) -> str:
+    """Keep only the trailing noun run of `subject` (drops あそびまわっていた in
+    あそびまわっていたこうもり) using the analyser's part-of-speech tags."""
+    if not subject or len(subject) < 3:
+        return subject
+    acc, head = "", []
+    for m in analysis.morphemes:
+        if not acc and not subject.startswith(m.surface):
+            continue
+        if acc and not subject.startswith(acc + m.surface):
+            break
+        acc += m.surface
+        if m.pos in ("名詞", "代名詞"):
+            head.append(m.surface)
+        elif m.pos in ("動詞", "助動詞", "形容詞", "助詞"):
+            head = []
+        if acc == subject:
+            break
+    joined = "".join(head)
+    return joined if len(joined) >= 2 else subject
+
+
+def _refine_dicts(events: list[dict]) -> list[dict]:
+    try:
+        import morphology_teacher as _mt
+    except Exception:
+        return events
+    teacher = _mt.get_teacher()
+    if not teacher.available():
+        return events
+    analyses: dict[str, object] = {}
+    out: list[dict] = []
+    for e in events:
+        sent = e.get("sentence") or ""
+        if sent not in analyses:
+            analyses[sent] = teacher.analyse(sent)
+        a = analyses[sent]
+        e = dict(e)
+        if a is not None:
+            verb = _teacher_main_verb(a, e.get("verb", "")) or e.get("verb", "")
+            subject = _teacher_noun_head(a, e.get("subject", "")) if e.get("subject") else e.get("subject", "")
+            if verb != e.get("verb") or subject != e.get("subject"):
+                e["verb"], e["subject"] = verb, subject
+                e["confidence"] = round(min(0.95, (e.get("confidence") or 0.5) + 0.15), 3)
+        out.append(e)
+    return out
+
+
+def refine_with_teacher(events: list[JapaneseEvent]) -> list[JapaneseEvent]:
+    """Correct verb base forms and subject fragments using a disclosed
+    morphological analyser.  No-op when none is available -- the analyser's
+    output is a proposal (evidence score 0), never authority."""
+    refined = _refine_dicts([e.__dict__ for e in events])
+    return [JapaneseEvent(subject=d.get("subject", ""), verb=d.get("verb", ""),
+                          obj=d.get("obj", ""), confidence=d.get("confidence", 0.5),
+                          sentence=d.get("sentence", ""), roles=d.get("roles") or {},
+                          subject_explicit=d.get("subject_explicit", True))
+            for d in refined]
+
+
+def refine_event_dicts(events: list[dict]) -> list[dict]:
+    """Teacher refinement for events already in dict form (the reading loop's
+    cached events)."""
+    return _refine_dicts(events)

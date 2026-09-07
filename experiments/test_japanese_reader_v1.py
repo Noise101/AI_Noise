@@ -1,7 +1,11 @@
+import os
 import tempfile
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+
+# keep these tests analyser-independent; the teacher path has its own suite
+os.environ.setdefault("AI_NOISE_NO_MORPHOLOGY", "1")
 
 import japanese_reader_v1 as reader
 

@@ -207,13 +207,17 @@ def run_once(runtime: Path) -> dict:
                 events = scaffold["events"]
                 events_store[book_id] = events
                 book["scaffolded"] = True
-        reading = curriculum.record_reading(cur, book_id, events, cycle, model=model)
+        # per-book scoring may use the disclosed morphological teacher (evidence
+        # score 0); events_store keeps the heuristic parse for the frozen
+        # benchmarks and the RNN, exactly like the LLM scaffold split
+        scored = events if book.get("scaffolded") else jevent.refine_event_dicts(events)
+        reading = curriculum.record_reading(cur, book_id, scored, cycle, model=model)
         reading["title"] = book["title"]
         reading["level"] = book["estimated_level"]
         # what Noise understood, in its own (template) words
-        retold = retell.retell(events, max_sentences=10)
+        retold = retell.retell(scored, max_sentences=10)
         reading["retelling"] = retold
-        reading["retelling_score"] = retell.score_retelling(events, retold)
+        reading["retelling_score"] = retell.score_retelling(scored, retold)
 
     advance = curriculum.maybe_advance_level(cur, cycle)
 
@@ -249,7 +253,9 @@ def run_once(runtime: Path) -> dict:
     if caregiver.due(care_state, cycle):
         current_fidelity = (reading.get("retelling_score") or {}).get("fidelity")
         recent = [{"title": b["title"], "url": b["url"],
-                   "events": events_store.get(bid, []),
+                   # the caregiver judges the same (teacher-refined) retelling
+                   # that record_reading scored
+                   "events": jevent.refine_event_dicts(events_store.get(bid, [])),
                    "fidelity": current_fidelity if bid == book_id else None,
                    "_last": b.get("last_read_cycle") or 0}
                   for bid, b in cur["shelf"].items()

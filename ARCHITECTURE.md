@@ -49,6 +49,15 @@ AI_Noise belief update
 
 If the helper is absent, slow, malformed, repetitive, or low quality, the pipeline continues with autonomous enumeration and search. A larger local model is not a remedy for a missing learning mechanism.
 
+### Optional linguistic reference (morphological analyser)
+
+`morphology_teacher.py` may wrap a Japanese morphological analyser (system `fugashi`/`MeCab`, system `janome`, or the wheel vendored under `experiments/_vendor/`). It follows the **same boundary as the local model**: its segmentation, part-of-speech tags, and dictionary forms are proposals at evidence score 0, not authority.
+
+- It is used **only** in the developmental reading loop's *per-book* path (`japanese_reader_v1` → `record_reading`, the caregiver retelling), to correct verb dictionary forms and strip relative-clause fragments from subjects — the same slot as the LLM reading scaffold.
+- It never touches the **frozen** benchmarks (`evaluate_comprehension`, `evaluate_retelling`), the character RNN, or `japanese_boundaries_v18`. Those only ever see the heuristic parse (`extract_story` defaults `use_teacher=False`).
+- The autonomous word-boundary-discovery claim stays measured on the induction-only path. The analyser is a reference to check against, like a Wiktionary page — not a replacement for the discovery.
+- `AI_NOISE_NO_MORPHOLOGY=1` forces the null backend; `test_architecture_contract` asserts the reading loop still extracts events without any analyser.
+
 ## Predict within the event, not the next event
 
 The parsed corpus (isolated `subject|verb|object` clauses from real 19th-century
