@@ -437,6 +437,7 @@ def retract_pre_v2_confirmation(previous: dict | None) -> tuple[dict, dict | Non
     previous["selection_status"] = "pre_v2_confirmation_retracted_awaiting_re_evaluation"
     previous["eval_regime"] = EVAL_REGIME
     previous["eval_regime_migrated"] = True
+    previous["pre_v2_confirmation_retracted"] = True
     previous["final_queries_used"] = len(previous["final_attempt_history"])
     previous.pop("final_attempt", None)
     previous.setdefault("emitted_events", []).append(event)
@@ -476,6 +477,8 @@ def train_and_evaluate(verified_experience: dict, previous: dict | None = None) 
     if not benchmark["ready"]:
         report = _postponed_report(events, benchmark, previous)
         report["eval_regime"] = EVAL_REGIME
+        report["pre_v2_confirmation_retracted"] = bool(
+            regime_migrated or previous.get("pre_v2_confirmation_retracted"))
         return report
 
     if not previous.get("benchmark", {}).get("locked"):
@@ -616,6 +619,10 @@ def train_and_evaluate(verified_experience: dict, previous: dict | None = None) 
         "version": VERSION,
         "eval_regime": EVAL_REGIME,
         "eval_regime_migrated": regime_migrated,
+        # durable: an event-level "確定" was retracted at some point (here or by
+        # retract_pre_v2_confirmation) -- keep the marker so an audit can see it
+        "pre_v2_confirmation_retracted": bool(
+            regime_migrated or previous.get("pre_v2_confirmation_retracted")),
         "benchmark": {"locked": True, "status": "ready", "selection_regime": BENCHMARK_REGIME,
                       "benchmark_collections": benchmark["benchmark_collections"],
                       "selection_collections": benchmark["selection_collections"],

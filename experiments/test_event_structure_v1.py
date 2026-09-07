@@ -219,6 +219,7 @@ class EventStructureTest(unittest.TestCase):
         self.assertEqual(migrated["final_attempt_history"], [])   # stale entry dropped
         self.assertEqual(migrated["final_queries_used"], 0)       # budget re-initialised
         self.assertEqual(migrated["eval_regime"], es.EVAL_REGIME)
+        self.assertTrue(migrated["pre_v2_confirmation_retracted"])   # durable audit marker
         # the frozen snapshot is preserved, not re-extracted
         self.assertEqual(migrated["benchmark"]["selection_event_snapshot"], [["a", "b", "c", "u"]])
         # idempotent
