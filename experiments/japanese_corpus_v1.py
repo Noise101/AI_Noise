@@ -36,7 +36,7 @@ _last_fetch_at = 0.0
 # all-kana subpages (pulled live by aesop_kernel) and 猿蟹合戦 is the one folktale
 # page that reliably exists.  The 楠山正雄 folktale retellings live on Aozora and
 # come in through AOZORA_AUTHORS.
-KERNEL_SEED = ("猿蟹合戦",)
+KERNEL_SEED = ("猿蟹合戦", "独逸童話集", "お伽噺")
 AESOP_PREFIX = "イソップ童話集/"
 
 
@@ -216,13 +216,33 @@ def category_members(category: str, limit: int = 100) -> list[str]:
     return [item["title"] for item in data.get("query", {}).get("categorymembers", [])]
 
 
-# Aozora author "person" pages -> their public-domain works (children's authors
-# and translators of children's classics).  Used to widen the shelf once the
-# kernel is exhausted, cheapest first.
+# Aozora author "person" pages -> their public-domain works.  Person IDs are
+# from list_person_all_extended_utf8.csv; the earlier 浜田広介 1710 / 鈴木三重吉
+# 1671 were wrong (a German poet, and 津田黄昏).  Ordered easiest first: folktale
+# retellings and 幼年童話, then 童謡, then the more literary children's authors.
 AOZORA_AUTHORS = {
-    "楠山正雄": 329, "新美南吉": 121, "小川未明": 1475, "宮沢賢治": 81,
-    "浜田広介": 1710, "菊池寛": 83, "鈴木三重吉": 1671,
+    "楠山正雄": 329,        # 日本の folktale retellings, 敬体, ~300 works
+    "村山籌子": 1172,       # 幼年童話 -- the simplest
+    "新美南吉": 121,
+    "巌谷小波": 981,        # お伽噺の祖 -- 日本昔噺 / 世界お伽噺
+    "佐々木喜善": 263,      # 聴耳草紙 -- Tōno folk tales, short and plain
+    "鈴木三重吉": 107,      # 赤い鳥, 古事記物語
+    "宮原晃一郎": 809,      # Andersen / Nordic tale translations
+    "北原白秋": 106,        # 童謡 -- very short
+    "野口雨情": 286,        # 童謡
+    "秋田雨雀": 1584,       # 童話劇
+    "小川未明": 1475,
+    "浜田広介": 1054,       # some works only; 廣介 kanji varies
+    "夢野久作": 96,         # 蟻のおれい etc. children's pieces
+    "有島武郎": 25,         # 一房の葡萄
+    "豊島与志雄": 906,
+    "芥川竜之介": 879,      # 蜘蛛の糸 / 杜子春 / アグニの神
+    "菊池寛": 83,
+    "宮沢賢治": 81,
 }
+# ja.wikisource pages / collections worth trying beyond イソップ童話集
+_WIKISOURCE_EXTRA = ("独逸童話集", "お伽噺", "こがね丸", "花咲爺", "舌切雀",
+                     "かちかち山", "文福茶釜", "浦島太郎", "一寸法師")
 _AOZORA_WORK = re.compile(r'href="\.\./cards/(\d+)/card(\d+)\.html"[^>]*>([^<]+)</a>')
 _AOZORA_HTMLFILE = re.compile(r'href="\./files/(\d+_\d+\.html)"')
 

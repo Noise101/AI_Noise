@@ -207,27 +207,27 @@ def register_books(curriculum: dict, books: list[dict], cycle: int) -> int:
             "shelved_at_level": None if in_reach else est,
             "first_seen_cycle": cycle, "last_read_cycle": None}
         added += 1
-    # Cold start: there must always be near-level material.  If no book sits
-    # within a step of the level, move the level to meet the easiest available
-    # book -- down to it normally, but also UP when every real text sits above
-    # the nominal start (a "level 1.5" with no level-1.5 material is meaningless).
+    # Cold start: the level must sit near real material.  If NOTHING on the shelf
+    # is within a step of the level, move the level to the easiest text -- but
+    # never below `floor_level` (the highest level a real advance has reached):
+    # a level once earned is not surrendered just because its band's books are
+    # temporarily shelved_stuck.
     near_level = [b for b in curriculum["shelf"].values()
-                  if b["estimated_level"] <= curriculum["level"] + LEVEL_STEP
-                  and b["status"] in ("in_rotation", "graduated")]
+                  if b["estimated_level"] <= curriculum["level"] + LEVEL_STEP]
     if not near_level and curriculum["shelf"]:
-        easiest = min(curriculum["shelf"].values(),
-                      key=lambda b: b["estimated_level"], default=None)
-        if easiest:
-            target = round(max(1.0, easiest["estimated_level"]) * 2) / 2
-            if target != curriculum["level"]:
-                direction = "lower" if target < curriculum["level"] else "raise"
-                curriculum["level"] = target
-                curriculum["level_history"].append(
-                    {"cycle": cycle, "level": target,
-                     "reason": f"cold start: {direction} to the easiest available book"})
-            for b in curriculum["shelf"].values():
-                if b["estimated_level"] <= curriculum["level"] + LEVEL_STEP:
-                    b["status"], b["shelved_at_level"] = "in_rotation", None
+        easiest = min(curriculum["shelf"].values(), key=lambda b: b["estimated_level"])
+        floor = curriculum.get("floor_level", 1.0)
+        target = max(floor, round(max(1.0, easiest["estimated_level"]) * 2) / 2)
+        if target != curriculum["level"]:
+            direction = "lower" if target < curriculum["level"] else "raise"
+            curriculum["level"] = target
+            curriculum["level_history"].append(
+                {"cycle": cycle, "level": target,
+                 "reason": f"cold start: {direction} to the easiest available book"})
+        for b in curriculum["shelf"].values():
+            if (b["estimated_level"] <= curriculum["level"] + LEVEL_STEP
+                    and b["status"] == "shelved_above_level"):
+                b["status"], b["shelved_at_level"] = "in_rotation", None
     return added
 
 
@@ -268,6 +268,7 @@ def reset_level_for_new_parser(curriculum: dict, cycle: int) -> dict:
         return {"reset": False}
     old = curriculum["level"]
     curriculum["level"] = target
+    curriculum["floor_level"] = target           # re-walk: the old earned floor is dropped too
     curriculum["graduated_since_advance"] = 0
     curriculum["level_history"].append(
         {"cycle": cycle, "level": target,
@@ -286,15 +287,23 @@ def select_next_book(curriculum: dict) -> str | None:
     rotation = [(bid, b) for bid, b in curriculum["shelf"].items()
                 if b["status"] == "in_rotation"]
     if not rotation:
-        # never idle: pull the closest not-yet-graduated shelved book as a
-        # stretch read (the caller should also request more books at this level)
+        # never idle: pull the closest shelved-above book as a stretch read
+        # (the caller should also request more books at this level)
         stretch = [(bid, b) for bid, b in curriculum["shelf"].items()
                    if b["status"] == "shelved_above_level"]
-        # a stuck book only becomes readable again after a level rise
-        if not stretch:
+        if stretch:
+            bid, b = min(stretch, key=lambda item: item[1]["estimated_level"])
+            b["status"] = "in_rotation"
+            return bid
+        # otherwise give a shelved_stuck book another attempt rather than idling
+        # or dropping the level -- fresh eyes (parser upgrades, grown vocabulary)
+        stuck = [(bid, b) for bid, b in curriculum["shelf"].items()
+                 if b["status"] == "shelved_stuck"]
+        if not stuck:
             return None
-        bid, b = min(stretch, key=lambda item: item[1]["estimated_level"])
-        b["status"] = "in_rotation"
+        bid, b = min(stuck, key=lambda item: (item[1].get("last_read_cycle") or 0,
+                                              item[1]["estimated_level"]))
+        b["status"], b["times_read"] = "in_rotation", 0
         return bid
 
     familiar = familiar_schema(curriculum)
@@ -406,6 +415,7 @@ def maybe_advance_level(curriculum: dict, cycle: int) -> dict:
 
     new_level = round(curriculum["level"] + LEVEL_STEP, 2)
     curriculum["level"] = new_level
+    curriculum["floor_level"] = new_level        # an earned level is never surrendered
     curriculum["graduated_since_advance"] = 0
     curriculum["level_history"].append({"cycle": cycle, "level": new_level,
                                         "reason": f"{len(recent_scores)} graduates, "

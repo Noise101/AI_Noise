@@ -43,11 +43,12 @@ CAREGIVER_FILE = "caregiver.json"
 STATUS_FILE = "reading-status.json"
 SEQUENCE_TRAIN_SECONDS = 5.0
 STOP_FILE = "READING_STOP"
-SHELF_LOW_WATER = 3           # in-rotation books below this -> fetch more
-FETCH_BUDGET = 12           # network requests per shelf-widening pass
-FETCH_TARGET = 5            # books to add per pass (small: pacing + rate limits)
-FETCH_COOLDOWN = 5           # cycles to wait between shelf-widening fetches
+SHELF_LOW_WATER = 4           # in-rotation books below this -> fetch more
+FETCH_BUDGET = 20           # network requests per shelf-widening pass
+FETCH_TARGET = 10           # books to add per pass
+FETCH_COOLDOWN = 4           # cycles to wait between shelf-widening fetches
 AOZORA_LEVEL_MARGIN = 3.0   # skip Aozora works this far above the reading level
+AOZORA_WORKS_PER_AUTHOR = 10
 
 
 def _read(path: Path) -> dict:
@@ -102,8 +103,13 @@ def _fetch_more_books(cur: dict, cycle: int) -> int:
             fetched.append(story)
 
     if len(fetched) < FETCH_TARGET and budget_left():
-        for _name, pid in corpus.AOZORA_AUTHORS.items():
-            for _wtitle, wurl in corpus.aozora_author_works(pid, limit=6):
+        # rotate which author we start from so every author gets sampled over
+        # successive passes, not just the first few each time
+        authors = list(corpus.AOZORA_AUTHORS.items())
+        start = cur.get("_aozora_cursor", 0) % max(1, len(authors))
+        cur["_aozora_cursor"] = start + 1
+        for _name, pid in authors[start:] + authors[:start]:
+            for _wtitle, wurl in corpus.aozora_author_works(pid, limit=AOZORA_WORKS_PER_AUTHOR):
                 if len(fetched) >= FETCH_TARGET or not budget_left():
                     break
                 if wurl in have or any(f.url == wurl for f in fetched):

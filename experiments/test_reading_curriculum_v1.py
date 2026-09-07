@@ -85,14 +85,37 @@ class ReadingCurriculumTest(unittest.TestCase):
                                     for b in cur["shelf"].values()), 1)
         self.assertEqual(rc.reset_level_for_new_parser(cur, cycle=10)["reset"], False)
 
-    def test_a_stuck_book_is_shelved_and_not_re_pulled(self):
+    def test_a_stuck_book_is_shelved_but_retried_as_a_last_resort(self):
         cur = rc.empty_curriculum()
-        rc.register_books(cur, [book("A", "a", SIMPLE)], cycle=1)
-        bid = rc.select_next_book(cur)
+        rc.register_books(cur, [book("A", "a", SIMPLE), book("B", "b", SIMPLE)], cycle=1)
+        stuck = rc._book_id("a", "A")
         for c in range(2, 2 + rc.MAX_REREADS + 1):
-            rc.record_reading(cur, bid, GOOD_EVENTS, cycle=c, comprehension=0.5)
-        self.assertEqual(cur["shelf"][bid]["status"], "shelved_stuck")
-        self.assertIsNone(rc.select_next_book(cur))          # not re-pulled
+            rc.record_reading(cur, stuck, GOOD_EVENTS, cycle=c, comprehension=0.5)
+        self.assertEqual(cur["shelf"][stuck]["status"], "shelved_stuck")
+        # while B is in rotation the stuck book is left alone
+        self.assertEqual(rc.select_next_book(cur), rc._book_id("b", "B"))
+        for c in range(20, 20 + rc.MAX_REREADS + 1):
+            rc.record_reading(cur, rc._book_id("b", "B"), GOOD_EVENTS, cycle=c, comprehension=0.5)
+        # now nothing else is readable -> retry the stuck book rather than idle
+        self.assertIsNotNone(rc.select_next_book(cur))
+        self.assertEqual(cur["shelf"][stuck]["times_read"], 0)
+
+    def test_an_earned_level_is_never_surrendered_when_its_band_gets_stuck(self):
+        cur = rc.empty_curriculum()
+        rc.register_books(cur, [book("easy", "e", SIMPLE)], cycle=1)
+        bid = rc._book_id("e", "easy")
+        rc.record_reading(cur, bid, GOOD_EVENTS, cycle=2, comprehension=0.9)   # graduate
+        rc.maybe_advance_level(cur, cycle=3)
+        earned = cur["level"]
+        self.assertGreater(earned, 1.5)
+        self.assertEqual(cur["floor_level"], earned)
+        # a much easier book appears and the band's books are all stuck
+        rc.register_books(cur, [book("tiny", "t", "ねこがきた。")], cycle=4)
+        for b in cur["shelf"].values():
+            if b["status"] != "graduated":
+                b["status"] = "shelved_stuck"
+        rc.register_books(cur, [book("tiny2", "t2", "いぬがきた。")], cycle=5)
+        self.assertGreaterEqual(cur["level"], earned)          # not dropped below floor
 
     def test_level_advances_when_the_band_is_exhausted_and_unshelves_reachable_books(self):
         cur = rc.empty_curriculum()
