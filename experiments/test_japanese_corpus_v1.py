@@ -32,8 +32,22 @@ class JapaneseCorpusTest(unittest.TestCase):
         self.assertNotIn("イヌ", out)
 
     def test_modernise_leaves_normal_mixed_text_and_loanwords_alone(self):
-        mixed = "きつねはブドウをみつけました。コップの水をのみました。"
+        mixed = "きつねはブドウをみつけました。コップの水をのみました。今日はいい天気だ。"
         self.assertEqual(_modernise(mixed), mixed)
+
+    def test_modernise_folds_historical_kana_to_modern(self):
+        old = ("あひるさんのお母さんは、真赤な洋服をかつてやりたいとおもひました。"
+               "きれいだらうと、ゐましたが、あひるちやんはこまつてしまひました。"
+               "「きません」といひました。")
+        out = _modernise(old)
+        self.assertIn("かって", out)
+        self.assertIn("おもいました", out)
+        self.assertIn("こまってしまいました", out)
+        self.assertIn("といいました", out)
+        self.assertIn("ちゃん", out)
+        self.assertNotIn("ゐ", out)
+        # あひる (家鴨) keeps its ひ -- it is not old orthography
+        self.assertIn("あひる", out)
 
     def test_kernel_seed_is_a_small_verified_list(self):
         self.assertTrue(KERNEL_SEED)

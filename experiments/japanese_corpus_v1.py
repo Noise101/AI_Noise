@@ -104,14 +104,52 @@ _HIRA = re.compile(r"[ぁ-ゖ]")
 _KATA = re.compile(r"[ァ-ヶ]")
 
 
+# 歴史的仮名遣い -> 現代仮名遣い: regular, bounded rules.  The risky word-medial
+# はひふへほ -> わいうえお is applied only in clear verb/adjective contexts (after
+# a kanji or before an inflection), never to the は / へ particles.
+_OLD_KANA_TABLE = str.maketrans({"ゐ": "い", "ゑ": "え", "ヰ": "イ", "ヱ": "エ",
+                                 "ゔ": "ぶ"})
+_OLD_KANA_SUB = [
+    (re.compile(r"くわ"), "か"), (re.compile(r"ぐわ"), "が"),
+    (re.compile(r"ぢ"), "じ"), (re.compile(r"づ"), "ず"),
+    # sokuon written つ: 言つた / 待つて / ぶつかつた
+    (re.compile(r"([ぁ-ゖ㐀-鿿])つ(?=[たてちゃ])"), r"\1っ"),
+    (re.compile(r"ちやん"), "ちゃん"),                     # 〜ちやん -> 〜ちゃん
+    # au / iu / eu -> ou / yuu / you  (さう->そう, ませう->ましょう, てふ->ちょう)
+    (re.compile(r"(せ|でせ|ませ|ましせ)う"), r"\1ょう"),
+    (re.compile(r"やう"), "よう"), (re.compile(r"さう"), "そう"),
+    (re.compile(r"かう(?=[。、」\s]|$)"), "こう"), (re.compile(r"だら?う"), "だろう"),
+    (re.compile(r"てふ"), "ちょう"), (re.compile(r"けふ"), "きょう"),
+    # verb endings: 〜ひ / 〜ひます / 〜ふ  (思ひ, 買ふ, 言ひました)
+    (re.compile(r"ひ(?=(まし|ます|なさ|た|て|、|。|」))"), "い"),
+    (re.compile(r"([ぁ-ゖ])ふ(?=[。、」\s]|$)"), r"\1う"),
+    (re.compile(r"([かあこそのま])は(?=[。、」\s]|$)"), r"\1わ"),   # かは(川). 〜は particle excluded
+    (re.compile(r"いへ(?=ば|、|。)"), "いえ"),
+]
+
+
+def _dekana(text: str) -> str:
+    """Fold 歴史的仮名遣い to modern kana so the parser and RNN see one
+    orthography.  Applied to Aozora children's texts (pre-1946)."""
+    marks = sum(text.count(m) for m in ("ゐ", "ゑ", "なつた", "つた。", "さう", "ひました",
+                                        "ひます", "やう", "ませう"))
+    if marks < 3:
+        return text
+    text = text.translate(_OLD_KANA_TABLE)
+    for pattern, repl in _OLD_KANA_SUB:
+        text = pattern.sub(repl, text)
+    return text
+
+
 def _modernise(text: str) -> str:
-    """Old children's texts are set entirely in katakana (一ピキノイヌガ…).
-    When katakana dominates over hiragana it is orthography, not loanwords:
-    fold it to hiragana so the parser and RNN see ordinary Japanese."""
+    """Old children's texts are set entirely in katakana (一ピキノイヌガ…) or in
+    歴史的仮名遣い (なつた, おもひ, ゐる).  When katakana dominates it is
+    orthography, not loanwords: fold it to hiragana.  Then fold historical kana
+    so the parser and RNN see one modern orthography."""
     kata, hira = len(_KATA.findall(text)), len(_HIRA.findall(text))
     if kata >= 12 and kata > hira * 1.3:
         text = _KATA.sub(lambda m: chr(ord(m.group()) - 0x60), text)
-    return text
+    return _dekana(text)
 
 
 @dataclass
