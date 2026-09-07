@@ -335,6 +335,11 @@ def evaluate_comprehension(stories: list[dict], previous: dict | None = None,
     model_fp = _comprehension_model_fingerprint(train_stories)
 
     sel = _measure(tiers.selection_snapshot, model, known)
+    if sel is None:
+        return {**base, "status": "insufficient_stories", "beats_baseline": False,
+                "capability_confirmed": False, "comprehension_score": None,
+                "train_stories": len(train_events),
+                "capability_pending_reason": "no scorable selection stories"}
     sel_measurements = prev.get("selection_measurements", 0) + 1
     last_sig_train = prev.get("selection_last_significant_train", 0)
     grew = len(train_events) >= max(1, last_sig_train) * SIGNIFICANT_TRAIN_GROWTH
