@@ -168,6 +168,7 @@ def run_once(runtime: Path) -> dict:
     book_id = curriculum.retention_check_due(cur, cycle) or curriculum.select_next_book(cur)
     reading = {"status": "no_book"}
     scaffold = None
+    model = None                                  # caregiver batch reads this even with no book
     if book_id:
         # a per-book comprehension model must not train on the book it scores
         others = [ev for bid, ev in events_store.items()

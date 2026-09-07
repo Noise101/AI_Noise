@@ -91,6 +91,27 @@ class JapaneseReaderTest(unittest.TestCase):
         text = reader.render_status(self.runtime)
         self.assertIn("Noise 日本語読書", text)
 
+    def test_caregiver_batch_does_not_crash_when_no_book_is_selectable(self):
+        # regression: `model` is only bound inside `if book_id:`, but the
+        # caregiver batch reads it -- no selectable book must not raise
+        reader.run_once(self.runtime)                    # read + populate shelf
+        cur = reader._read(self.runtime / reader.CURRICULUM_FILE)
+        cur["cycle"] = 40                                # past the caregiver interval
+        reader._write(self.runtime / reader.CURRICULUM_FILE, cur)
+        care = self.runtime / reader.CAREGIVER_FILE
+        state = reader._read(care) or {}
+        state["pending"], state["last_batch_cycle"] = [], 0   # a batch is due
+        reader._write(care, state)
+        orig_select, orig_retention = reader.curriculum.select_next_book, reader.curriculum.retention_check_due
+        reader.curriculum.select_next_book = lambda *a, **k: None
+        reader.curriculum.retention_check_due = lambda *a, **k: None
+        try:
+            status = reader.run_once(self.runtime)       # must not raise
+        finally:
+            reader.curriculum.select_next_book = orig_select
+            reader.curriculum.retention_check_due = orig_retention
+        self.assertEqual(status["reading"]["status"], "no_book")
+
 
 if __name__ == "__main__":
     unittest.main()

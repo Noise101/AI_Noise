@@ -91,6 +91,7 @@ PHASE_JA = {
     "supervisor_retry_wait": "監督機構による再試行待ち", "resource_paused": "外部取得の再開待ち",
     "storage_check": "容量確認中", "curriculum_exhausted": "教材候補を再探索中",
     "capability_plateau": "能力停滞のため無効な収集を停止",
+    "japanese_only": "英語側は停滞、日本語読書のみ継続中",
     "worker_error_wait": "内部エラーから復旧待ち", "stopped_by_user": "ユーザー操作で停止",
     "round_budget_exhausted": "指定回数を完了", "error": "エラー停止",
 }
@@ -1824,6 +1825,29 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
     return latest
 
 
+def japanese_only_loop(seed: str, runtime: Path, interval: float) -> dict:
+    """The English pipeline has plateaued (human action needed) but the parallel
+    Japanese reading loop is independent -- keep it running on its own until STOP
+    instead of taking it down with the main worker."""
+    stop_path = runtime / "STOP"
+    period = max(interval, 20.0)
+    rounds = 0
+    while not stop_path.exists():
+        if os.environ.get("AI_NOISE_SKIP_JAPANESE_READING") != "1":
+            rounds += 1
+            try:
+                japanese_reader.run_once(runtime)
+            except Exception as error:            # isolate, same as in work()
+                pass
+        latest = status_record(seed, runtime, "japanese_only", rounds)
+        write_json(runtime / "status.json", latest)
+        if not wait_for_retry(stop_path, period):
+            break
+    latest = status_record(seed, runtime, "stopped_by_user", rounds)
+    write_json(runtime / "status.json", latest)
+    return latest
+
+
 def supervise(seed: str, runtime: Path, max_rounds: int, interval: float,
               steps: int, seconds: float, network: int, local_conversation: bool = True,
               max_runtime_mb: int = 20 * 1024) -> dict:
@@ -1840,6 +1864,8 @@ def supervise(seed: str, runtime: Path, max_rounds: int, interval: float,
             result = status_record(current_seed, runtime, "worker_error_wait", 0,
                                    error=f"{type(error).__name__}: {error}")
             result["traceback"] = traceback.format_exc()[-4000:]
+        if result.get("phase") == "capability_plateau" and not stop_path.exists() and max_rounds <= 0:
+            return japanese_only_loop(seed, runtime, interval)
         if result.get("phase") in {"stopped_by_user", "capability_plateau"} or stop_path.exists():
             return result
         if max_rounds > 0:

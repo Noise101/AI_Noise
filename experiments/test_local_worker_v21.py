@@ -722,6 +722,23 @@ class LocalWorkerTest(unittest.TestCase):
         self.assertEqual(work_loop.call_count, 3)
         self.assertEqual(result["phase"], "stopped_by_user")
 
+    @patch("local_worker_v21.japanese_reader.run_once")
+    @patch("local_worker_v21.wait_for_retry", side_effect=[True, False])
+    @patch("local_worker_v21.work", return_value={"phase": "capability_plateau", "seed": "one"})
+    def test_english_plateau_keeps_the_japanese_loop_running(self, work_loop, _wait, run_once):
+        run_once.return_value = {}
+        prev = os.environ.pop("AI_NOISE_SKIP_JAPANESE_READING", None)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                result = supervise("one", Path(directory), 0, 0, 1, 1, 1,
+                                   local_conversation=False)
+        finally:
+            if prev is not None:
+                os.environ["AI_NOISE_SKIP_JAPANESE_READING"] = prev
+        self.assertEqual(work_loop.call_count, 1)          # English not re-run
+        self.assertGreaterEqual(run_once.call_count, 1)    # Japanese kept going
+        self.assertEqual(result["phase"], "stopped_by_user")
+
     @patch("local_worker_v21.work", return_value={"phase": "round_budget_exhausted"})
     def test_supervisor_respects_explicit_round_limit(self, work_loop):
         with tempfile.TemporaryDirectory() as directory:
