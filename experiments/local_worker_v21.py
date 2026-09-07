@@ -284,33 +284,42 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
         lines.append(f"直近の理解度    : 自力 {sva.get('self_comprehension')}{aided_txt}")
     def _tier_line(label, m):
         if not m or not m.get("selection_fingerprint"):
-            st = m.get("status") if m else None
-            return f"{label}: {st or '未計測'}"
-        fh = m.get("final_status")
-        cap = "確定" if m.get("capability_confirmed") else f"未確定（{m.get('capability_pending_reason')}）"
-        return (f"{label}: {cap}\n"
+            reason = (m or {}).get("selection_insufficient_reason") or (m or {}).get("status")
+            return f"{label}: 未確定（{reason or '未計測'}）"
+        cap = ("確定（過去のcheckpoint）" if m.get("capability_confirmed_ever") else
+               f"未確定（{m.get('capability_pending_reason')}）")
+        cur = ("現行モデルも確認済" if m.get("capability_confirmed_current_model") else
+               "現行モデルは未再確認")
+        tc = m.get("tier_collection_counts") or {}
+        cps = m.get("confirmed_checkpoints") or []
+        return (f"{label}: {cap}／{cur}\n"
                 f"  selection {m.get('selection_stories')}話/{m.get('selection_fingerprint')}"
-                f"（測定 {m.get('selection_measurements')}回、有意連続 {m.get('selection_significant_streak', 0)}、"
-                f"能力判定には非使用）\n"
-                f"  final {fh}／開封 {m.get('final_opened_count')}/{m.get('final_query_budget')}"
-                + (f"、結果 有意={m.get('final_result', {}).get('significant') if m.get('final_result') else None}" if m.get("final_result") else "")
-                + (f"、モデル変更で失効" if m.get("final_stale_for_current_model") else "")
-                + f"、reserve {m.get('reserve_stories')}話\n"
-                f"  作品集 train/sel/final/reserve = {list((m.get('tier_collection_counts') or {}).values())}"
-                f"／重複なし {m.get('collections_disjoint')}")
+                f"（測定 {m.get('selection_measurements')}回、有意連続 {m.get('selection_significant_streak', 0)}"
+                f"、次の連続に必要な train {m.get('selection_next_streak_train')}、能力判定には非使用）\n"
+                f"  candidate/final {m.get('final_opened_count')}/{m.get('final_query_budget')}"
+                + (f"、確認checkpoint {[c.get('model_fingerprint') for c in cps]}" if cps else "")
+                + f"、reserve {m.get('reserve_stories')}話、状態 {m.get('final_status')}\n"
+                f"  作品集 train/sel/final/reserve = "
+                f"[{tc.get('train')},{tc.get('selection')},{tc.get('final')},{tc.get('reserve')}]"
+                f"（学習済 {m.get('tier_collections_ever_trained')}）／重複なし {m.get('collections_disjoint')}")
 
     if comp.get("status") == "measured":
         lines.append(f"直近の理解度（診断）: score {comp.get('comprehension_score')} "
                      f"（selection の帰結 z={comp.get('consequence_z')}、傾向 "
                      f"{TREND_JA.get(comp.get('comprehension_trend'), 'データ不足')}）")
     lines.append(_tier_line("理解（能力）", comp))
-    if ret.get("status") == "measured":
+    if ret.get("status") in ("measured", "measurement_invalid"):
         lines.append(f"再話＝物語順序復元（診断）: 利得 {ret.get('order_gain')}"
                      f"（RNN {ret.get('rnn_pairwise_accuracy')} vs 位置基準 "
                      f"{ret.get('position_baseline_accuracy')}、今回再計算 {ret.get('recomputed')}）")
+        bm = ret.get("baseline_corpus_matches_rnn")
         lines.append(f"  RNN指紋 {ret.get('rnn_fingerprint')}（regime {ret.get('rnn_training_regime')}）"
                      f"／評価時steps {ret.get('rnn_steps_at_eval')}→現在 {ret.get('rnn_steps_now')}"
                      f"／{ret.get('next_reeval')}")
+        lines.append(f"  RNN学習source {ret.get('rnn_training_url_count')}件 = baseline source "
+                     f"{ret.get('baseline_source_count')}件／一致 {bm}"
+                     + ("" if bm is not False else
+                        f"（欠落 {ret.get('rnn_training_urls_missing_from_corpus')}）→測定無効"))
     lines.append(_tier_line("再話（能力）", ret))
     for m, name in ((comp, "理解"), (ret, "再話")):
         if m.get("regime_reset_from"):
@@ -338,15 +347,27 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
                      f"証拠0・学習非使用）")
     if seq.get("held_out_bits_per_char") is not None:
         rlog = reading_status.get("sequence_retirement_log") or []
-        lines.append(f"日本語文字RNN  : {seq.get('held_out_bits_per_char')} bits/char"
-                     f"（基準 {seq.get('baseline_bits_per_char')}、基準超え {seq.get('beats_char_baseline')}"
-                     f"、steps {seq.get('steps_trained')}、regime {seq.get('training_regime')}）")
-        if rlog and not seq.get("beats_char_baseline"):
+        lines.append(f"日本語文字RNN（診断のみ・能力判定に不使用）: "
+                     f"{seq.get('held_out_bits_per_char')} bits/char"
+                     f"（基準 {seq.get('baseline_bits_per_char')}、z {seq.get('improvement_z')}"
+                     f"、steps {seq.get('steps_trained')}、regime {seq.get('training_regime')}"
+                     f"、累積学習source {seq.get('ever_trained_source_count')}"
+                     f"（今回+{seq.get('sources_added_this_cycle', 0)}）"
+                     f"、累積学習作品集 {reading_status.get('sequence_ever_trained_collections')}）")
+        if seq.get("reset_reason"):
+            cols = [c.get("kind") for c in (seq.get("reset_collisions") or [])]
+            lines.append(f"  ⚠ 今回RNN退役: {seq.get('reset_reason')}"
+                         f"（衝突 {cols[:5]}）、clean再訓練を step 0 から開始"
+                         f"（親指紋 {seq.get('parent_model_fingerprint')}）")
+        elif rlog:
             last = rlog[-1]
-            lines.append(f"  ⚠ 旧RNNを汚染可能性により退役（{last.get('reset_reason')}、"
-                         f"旧{last.get('retired_steps_trained')}steps→退避済）、新RNNをクリーン再訓練中"
-                         f"（親指紋 {seq.get('parent_model_fingerprint')}、clean開始 "
-                         f"{seq.get('started_clean_at')}、退役 {len(rlog)}回、新モデル評価が出るまで能力値は非表示）")
+            lines.append(f"  退役履歴 {len(rlog)}回（最後: {last.get('reset_reason')}、"
+                         f"旧{last.get('retired_steps_trained')}steps→退避済、"
+                         f"clean開始 {seq.get('started_clean_at')}）")
+        if seq.get("boundary_migrated"):
+            lines.append(f"  RNN training_regime を安全移行（コード変更のみ、重み・step 継続）")
+        if seq.get("dropped_trained_sources"):
+            lines.append(f"  ⚠ 学習済みで現在コーパスに無い source {len(seq['dropped_trained_sources'])}件")
     if reading_status.get("level_advance", {}).get("advanced"):
         lines.append(f"★ レベル上昇 → {reading_status['level_advance']['level']}")
     sc = reading_status.get("llm_scaffold_totals", {}) or {}
@@ -1420,7 +1441,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
             key: read_json(runtime / "reading-status.json").get(key) for key in
             ("cycle", "reading", "curriculum", "comprehension", "retelling", "sequence",
              "caregiver", "caregiver_questions", "llm_scaffold_totals",
-             "aided_reading", "schema_migration", "self_vs_aided", "aided_store", "provenance", "sequence_retirement_log")},
+             "aided_reading", "schema_migration", "self_vs_aided", "aided_store", "provenance", "sequence_retirement_log", "sequence_ever_trained_fingerprint", "sequence_boundary_fingerprint", "sequence_ever_trained_collections")},
         "storage": read_json(runtime / "storage-status.json"),
         "global_memory": report.get("global_memory") or read_json(
             runtime / "global-language-memory.json").get("totals", {}),
@@ -1781,7 +1802,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                                               ("cycle", "books_fetched", "reading", "level_advance",
                                                "curriculum", "comprehension", "retelling", "sequence",
                                                "caregiver", "caregiver_questions", "llm_scaffold_totals",
-                                               "aided_reading", "schema_migration", "self_vs_aided", "aided_store", "provenance", "sequence_retirement_log")}
+                                               "aided_reading", "schema_migration", "self_vs_aided", "aided_store", "provenance", "sequence_retirement_log", "sequence_ever_trained_fingerprint", "sequence_boundary_fingerprint", "sequence_ever_trained_collections")}
             except Exception as reading_error:  # isolate the parallel loop
                 report["japanese_reading"] = {"error": f"{type(reading_error).__name__}: {reading_error}"}
         if report.get("autonomy", {}).get("mode") == "capability_plateau":

@@ -202,7 +202,7 @@ class RetellTest(unittest.TestCase):
 
     def test_insufficient_stories_reports_cleanly(self):
         report = jr.evaluate_retelling(folktale_stories(n=10), {})
-        self.assertEqual(report["status"], "insufficient_stories")
+        self.assertEqual(report["status"], "insufficient_selection_stories")
         self.assertIsNone(report["roundtrip_fidelity"])
         self.assertFalse(report["beats_baseline"])
 
@@ -228,16 +228,34 @@ class RetellTest(unittest.TestCase):
     def test_final_needs_selection_significance_which_an_untrained_rnn_lacks(self):
         stories = folktale_stories(260)
         r = jr.evaluate_retelling(stories, {}, rnn_state=self._rnn())
-        # untrained RNN -> selection not significant -> final never opens
+        # untrained RNN -> selection not significant -> no candidate, no final
         self.assertFalse((r.get("selection") or {}).get("significant"))
-        self.assertEqual(r["final_status"] in ("unopened", "insufficient_final_stories",
-                                               "no_generation_model"), True)
+        self.assertEqual(r["final_status"], "awaiting_selection_streak_2")
         self.assertFalse(r["capability_confirmed"])
-        self.assertIn("final not yet opened", r["capability_pending_reason"] or "")
+        self.assertFalse(r["capability_confirmed_ever"])
+        self.assertEqual(r["final_opened_count"], 0)
 
     def test_train_selection_final_are_collection_disjoint(self):
         r = jr.evaluate_retelling(folktale_stories(260), {}, rnn_state=self._rnn())
         self.assertTrue(r["collections_disjoint"], r["collection_disjointness"])
+
+    def test_baseline_uses_exactly_the_rnn_training_sources(self):
+        # re-audit #6 P1-6: pass the RNN's training URLs; the position baseline is
+        # built from EXACTLY those, and a mismatch invalidates the measurement.
+        stories = folktale_stories(260)
+        rnn_urls = {s["url"] for s in stories[:120]}
+        r = jr.evaluate_retelling(stories, {}, rnn_state=self._rnn(),
+                                  rnn_training_urls=rnn_urls)
+        self.assertEqual(r["rnn_training_url_count"], len(rnn_urls))
+        self.assertTrue(r["baseline_corpus_matches_rnn"])
+        self.assertIn("baseline_source_fingerprint", r)
+        # a URL the RNN trained on that is missing from the corpus -> invalid
+        bad = jr.evaluate_retelling(stories, {}, rnn_state=self._rnn(),
+                                    rnn_training_urls=rnn_urls | {"http://not/in/corpus"})
+        self.assertFalse(bad["baseline_corpus_matches_rnn"])
+        self.assertEqual(bad["status"], "measurement_invalid")
+        self.assertFalse(bad["capability_confirmed"])
+        self.assertIn("baseline corpus", bad["capability_pending_reason"])
 
     def test_re_measuring_the_same_snapshot_twice_is_not_a_replication(self):
         stories = folktale_stories(140)

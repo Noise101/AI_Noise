@@ -35,51 +35,57 @@ def unstructured_stories(n=120, seed=2):
 class ReadingComprehensionTest(unittest.TestCase):
     def _grow(self, prev, sizes):
         r = prev
-        for i, n in enumerate(sizes):
-            r = rcp.evaluate_comprehension(structured_stories(n=n, seed=1), r)
+        for n in sizes:
+            r = rcp.evaluate_comprehension(structured_stories(n=n, seed=1), r, cycle=n)
         return r
 
     def test_selection_alone_never_confirms_capability(self):
-        # SELECTION is diagnostic: significant there is NOT a capability claim,
-        # no matter how many times it is measured.
-        r = rcp.evaluate_comprehension(structured_stories(n=160), {})
+        r = rcp.evaluate_comprehension(structured_stories(n=160), {}, cycle=1)
         self.assertEqual(r["status"], "measured")
-        self.assertTrue(r["selection"]["significant"])           # structured data does beat freq
+        self.assertTrue(r["selection"]["significant"])
         self.assertFalse(r["capability_confirmed"])
         self.assertEqual(r["final_opened_count"], 0)
-        for _ in range(4):                                       # re-measure the same selection
-            r = rcp.evaluate_comprehension(structured_stories(n=160), r)
+        for i in range(4):                                       # re-measure the same selection
+            r = rcp.evaluate_comprehension(structured_stories(n=160), r, cycle=2 + i)
         self.assertFalse(r["capability_confirmed"])              # still not confirmed
         self.assertGreaterEqual(r["selection_measurements"], 5)
+        # streak never advances without training growth (anchor-based, P1-3)
+        self.assertLessEqual(r["selection_significant_streak"], 1)
 
-    def test_capability_needs_an_unopened_final_to_also_pass(self):
-        r = self._grow({}, [160, 260])                           # grow -> sel streak >= 2
+    def test_gradual_growth_reaches_streak_2_and_confirms(self):
+        # re-audit #6 P1-3: 160->180->...->430 gradual growth must eventually
+        # advance the anchor-based streak to 2 and register + pass a final.
+        r = self._grow({}, [160, 180, 200, 230])
         self.assertGreaterEqual(r["selection_significant_streak"], 2)
         self.assertGreaterEqual(r["final_opened_count"], 1)
-        self.assertEqual(r["final_status"], "opened")
         self.assertTrue(r["final_result"]["significant"])
-        self.assertTrue(r["capability_confirmed"])
-        # the final's preconditions were frozen from the selection side
+        self.assertTrue(r["capability_confirmed_ever"])
         pre = r["final_preconditions"]
-        for k in ("model_fingerprint", "parser_version", "eval_regime", "scoring_version",
-                  "baseline_definition", "significance_z", "selection_result",
-                  "final_snapshot_fingerprint", "final_query_index"):
+        for k in ("model_fingerprint", "identity", "significance_z", "selection_fingerprint",
+                  "final_snapshot_fingerprint", "registered_at_train"):
             self.assertIn(k, pre)
 
-    def test_re_measuring_the_same_final_is_not_a_second_confirmation(self):
-        r = self._grow({}, [160, 260])
-        opened = r["final_opened_count"]
-        self.assertGreaterEqual(opened, 1)
-        r2 = rcp.evaluate_comprehension(structured_stories(n=260, seed=1), r)  # same model + data
-        self.assertEqual(r2["final_opened_count"], opened)       # no extra open
-        self.assertEqual(r2["final_history"], r["final_history"])
+    def test_ordinary_continued_training_does_not_burn_the_reserve(self):
+        # re-audit #6 P1-4: after a pass, a one-book / few-cycle model change must
+        # NOT open the reserve.  The reserve opens only for a NEW candidate.
+        r = self._grow({}, [160, 180, 200, 230])
+        n_after_first = r["final_opened_count"]
+        self.assertGreaterEqual(n_after_first, 1)
+        r2 = rcp.evaluate_comprehension(structured_stories(n=235, seed=1), r, cycle=235)  # +1-ish
+        self.assertEqual(r2["final_opened_count"], n_after_first)           # no new final
+        self.assertTrue(r2["capability_confirmed_ever"])                    # still confirmed ever
+        self.assertFalse(r2["capability_confirmed_current_model"])          # but model moved on
+        r3 = self._grow(r2, [400])                                         # a real retraining
+        self.assertGreater(r3["final_opened_count"], n_after_first)         # NOW a fresh final
+        self.assertLessEqual(r3["final_opened_count"], rcp.jb.FINAL_QUERY_BUDGET)
 
-    def test_budget_caps_independent_finals_then_reports_stale(self):
-        r = self._grow({}, [160, 260, 460, 820])                 # 4 big retrainings
-        self.assertLessEqual(r["final_opened_count"], rcp.jb.FINAL_QUERY_BUDGET)
-        if r["final_opened_count"] >= rcp.jb.FINAL_QUERY_BUDGET and r["final_stale_for_current_model"]:
-            self.assertEqual(r["final_status"], "stale_needs_fresh_final")
-            self.assertFalse(r["capability_confirmed"])
+    def test_confirmed_checkpoint_is_permanent_and_separate_from_current(self):
+        r = self._grow({}, [160, 180, 200, 230, 300])
+        self.assertTrue(r["capability_confirmed_ever"])
+        self.assertGreaterEqual(len(r["confirmed_checkpoints"]), 1)
+        cp = r["confirmed_checkpoints"][0]
+        self.assertIn("model_fingerprint", cp)
+        self.assertIn("final_snapshot_fingerprint", cp)
 
     def test_train_selection_final_collections_are_disjoint(self):
         r = self._grow({}, [160, 260])
@@ -90,30 +96,61 @@ class ReadingComprehensionTest(unittest.TestCase):
         self.assertTrue(r["collections_disjoint"])
 
     def test_eval_regime_change_does_not_inherit_the_old_streak_or_finals(self):
-        old = {"eval_regime": "legacy_regime_v0", "significant_streak": 2,
+        old = {"eval_regime": "legacy_regime_v0",
                "selection_significant_streak": 2, "capability_confirmed": True,
-               "beats_baseline": True, "final_history": [{"tier": "final", "result": {"significant": True}}],
+               "capability_confirmed_ever": True,
+               "candidate_checkpoints": [{"final_result": {"significant": True}}],
                "test_snapshot": [{"url": s["url"], "events": s["events"]}
                                  for s in structured_stories(120) if rcp._held_out(s["url"])],
                "learning_curve": [{"train_stories": 25}]}
-        r = rcp.evaluate_comprehension(structured_stories(n=160), old)
+        r = rcp.evaluate_comprehension(structured_stories(n=160), old, cycle=1)
         self.assertEqual(r["eval_regime"], rcp.EVAL_REGIME)
         self.assertEqual(r["regime_reset_from"], "legacy_regime_v0")
         self.assertFalse(r["capability_confirmed"])
+        self.assertFalse(r["capability_confirmed_ever"])
         self.assertEqual(r["final_opened_count"], 0)             # old finals not inherited
         self.assertLessEqual(r["selection_significant_streak"], 1)
 
-    def test_insufficient_final_stories_is_reported_honestly(self):
-        # too few collections in the 'final' tier -> no fake final
-        r = rcp.evaluate_comprehension(structured_stories(n=45), {})
+    def test_insufficient_final_or_selection_is_reported_honestly(self):
+        r = rcp.evaluate_comprehension(structured_stories(n=45), {}, cycle=1)
+        self.assertFalse(r["capability_confirmed"])
         if r["status"] == "measured":
-            self.assertIn(r["final_status"], ("unopened", "insufficient_final_stories"))
-            self.assertFalse(r["capability_confirmed"])
+            self.assertIn(r["final_status"],
+                          ("awaiting_selection_streak_2", "registerable_next_cycle",
+                           "candidate_registered_final_snapshot_unavailable"))
+        else:
+            self.assertEqual(r["status"], "insufficient_selection_stories")
 
     def test_snapshot_fingerprint_depends_on_event_content(self):
         a = [{"url": "http://x/1", "events": [{"subject": "a", "verb": "b", "obj": ""}]}]
         b = [{"url": "http://x/1", "events": [{"subject": "a", "verb": "CHANGED", "obj": ""}]}]
         self.assertNotEqual(rcp._fingerprint(a), rcp._fingerprint(b))
+
+    def test_comprehension_model_fingerprint_tracks_event_content_and_parser(self):
+        # re-audit #6 P1-5: same URL, changed events -> different fingerprint
+        a = [{"url": "u1", "events": [{"subject": "a", "verb": "b", "obj": "c"}]},
+             {"url": "u2", "events": [{"subject": "d", "verb": "e", "obj": "f"}]}]
+        b = [{"url": "u1", "events": [{"subject": "a", "verb": "ZZZ", "obj": "c"}]},
+             {"url": "u2", "events": [{"subject": "d", "verb": "e", "obj": "f"}]}]
+        self.assertNotEqual(rcp._comprehension_model_fingerprint(a),
+                            rcp._comprehension_model_fingerprint(b))
+        tf = rcp.comprehension_training_fingerprint(a)
+        for k in ("identity", "identity_fingerprint", "training_set_fingerprint",
+                  "training_source_count", "training_urls"):
+            self.assertIn(k, tf)
+        self.assertIn("parser_version", tf["identity"])
+
+    def test_a_parser_change_makes_old_selection_snapshot_not_reused_as_current(self):
+        # a regime bump on a parser change means the old test_snapshot is demoted
+        # to selection and the confirmation resets (never flows as current ability)
+        old = {"eval_regime": "tiered_frozen_v1", "capability_confirmed_ever": True,
+               "candidate_checkpoints": [{"final_result": {"significant": True}}],
+               "test_snapshot": [{"url": s["url"], "events": s["events"]}
+                                 for s in structured_stories(120) if rcp._held_out(s["url"])]}
+        r = rcp.evaluate_comprehension(structured_stories(160), old, cycle=1)
+        self.assertEqual(r["regime_reset_from"], "tiered_frozen_v1")
+        self.assertFalse(r["capability_confirmed"])
+        self.assertFalse(r["capability_confirmed_ever"])
 
     def test_unstructured_stories_do_not_beat_the_baseline(self):
         report = rcp.evaluate_comprehension(unstructured_stories(), {})
@@ -130,8 +167,8 @@ class ReadingComprehensionTest(unittest.TestCase):
         self.assertEqual(test_urls, {s["url"] for s in stories if rcp._held_out(s["url"])})
 
     def test_insufficient_stories_reports_cleanly(self):
-        report = rcp.evaluate_comprehension(structured_stories(n=10), {})
-        self.assertEqual(report["status"], "insufficient_stories")
+        report = rcp.evaluate_comprehension(structured_stories(n=10), {}, cycle=1)
+        self.assertEqual(report["status"], "insufficient_selection_stories")
         self.assertIsNone(report["comprehension_score"])
         self.assertFalse(report["beats_baseline"])
 

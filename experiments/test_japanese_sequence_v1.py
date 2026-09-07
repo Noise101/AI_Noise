@@ -28,16 +28,17 @@ class JapaneseSequenceTest(unittest.TestCase):
             js.collection_key("https://ja.wikisource.org/wiki/桃太郎"),
             js.collection_key("https://ja.wikisource.org/wiki/桃太郎"))
 
-    def test_positive_control_beats_the_char_baseline_after_two_cycles(self):
+    def test_character_benchmark_is_diagnostic_only_never_a_capability(self):
+        # re-audit #6 P2-1: repeating the same held-out set never confers a
+        # confirmed capability -- this benchmark is a learning signal only.
         texts = learnable_texts()
         first = js.train_and_evaluate(texts, {}, train_seconds=30, max_steps=500)
         self.assertGreater(first["improvement_z"], js.SIGNIFICANCE_Z)
-        self.assertTrue(first["beats_char_baseline_significant"])
+        self.assertEqual(first["capability_status"], "diagnostic_only")
         self.assertFalse(first["beats_char_baseline"])
         second = js.train_and_evaluate(texts, first, train_seconds=30, max_steps=500)
-        self.assertEqual(second["status"], "beats_char_baseline")
-        self.assertTrue(second["beats_char_baseline"])
-        self.assertEqual(second["significant_streak"], 2)
+        self.assertFalse(second["beats_char_baseline"])           # even after two significant cycles
+        self.assertNotEqual(second["status"], "beats_char_baseline")
 
     def test_negative_control_random_kana_is_not_significant(self):
         report = js.train_and_evaluate(random_texts(), {}, train_seconds=30, max_steps=500)
@@ -115,10 +116,20 @@ class JapaneseSequenceTest(unittest.TestCase):
         self.assertIsNone(r2["reset_reason"])
         self.assertGreater(r2["steps_trained"], r1["steps_trained"])
 
-    def test_a_boundary_change_retires_the_model(self):
+    def test_a_new_forbidden_collection_it_never_trained_on_does_NOT_retire(self):
+        # re-audit #6 P1-1: a brand-new selection/final collection must not wipe
+        # a model that has never trained on it.
         r1 = self._clean_state()
         r2 = js.train_and_evaluate(learnable_texts(40), r1, train_seconds=30, max_steps=60,
-                                   training_context=self._ctx(forbidden=["https://x/wiki/Y"]))
+                                   training_context=self._ctx(forbidden=["https://ja.wikisource.org/wiki/NEVER_TRAINED"]))
+        self.assertIsNone(r2["reset_reason"])
+        self.assertGreater(r2["steps_trained"], r1["steps_trained"])
+
+    def test_a_semantic_boundary_change_retires_the_model(self):
+        r1 = self._clean_state()
+        ctx2 = self._ctx(); ctx2["parser_version"] = 99          # a real semantic change
+        r2 = js.train_and_evaluate(learnable_texts(40), r1, train_seconds=30, max_steps=60,
+                                   training_context=ctx2)
         self.assertEqual(r2["reset_reason"], "training_boundary_changed")
         self.assertLess(r2["steps_trained"], r1["steps_trained"])
         self.assertEqual(r2["parent_model_fingerprint"], r1["model_fingerprint"])
@@ -130,15 +141,14 @@ class JapaneseSequenceTest(unittest.TestCase):
                                    training_context=ctx2)
         self.assertEqual(r2["reset_reason"], "training_boundary_changed")
 
-    def test_a_forbidden_collection_in_training_retires_the_model(self):
+    def test_forbidding_a_collection_it_HAS_trained_on_retires_the_model(self):
         r1 = self._clean_state()
-        # a selection/final collection sneaks into the training texts
-        texts = dict(learnable_texts(40))
-        bad_col = js._collection_for_forbidden(next(iter(texts)))
-        r2 = js.train_and_evaluate(texts, r1, train_seconds=30, max_steps=60,
-                                   training_context=self._ctx(forbidden=[bad_col]))
-        self.assertIn(r2["reset_reason"],
-                      ("training_boundary_changed", "forbidden_collection_present_in_training_set"))
+        trained_col = js._collection_of(next(iter(r1["ever_trained_sources"])))
+        r2 = js.train_and_evaluate(learnable_texts(40), r1, train_seconds=30, max_steps=60,
+                                   training_context=self._ctx(forbidden=[trained_col]))
+        self.assertTrue(r2["reset_reason"].startswith("trained_data_invalidated"))
+        self.assertIn("trained_collection_now_held_out",
+                      {c["kind"] for c in r2["reset_collisions"]})
         self.assertLess(r2["steps_trained"], r1["steps_trained"])
 
     def test_the_retired_state_is_returned_for_archiving_and_streaks_reset(self):
@@ -146,22 +156,41 @@ class JapaneseSequenceTest(unittest.TestCase):
                             "Whh": [[0.1] * 24] * 24, "Why": [[0.1] * 24] * 5,
                             "bh": [0.0] * 24, "by": [0.0] * 5},
                   "steps_trained": 999_999, "model_fingerprint": "x",
-                  "significant_streak": 2, "beats_char_baseline_significant": True}
+                  "significant_streak": 2}
         r = js.train_and_evaluate(learnable_texts(40), legacy, train_seconds=30, max_steps=40,
                                   training_context=self._ctx())
         self.assertTrue(r["retired_model"]["retired_state"])
         self.assertLessEqual(r["significant_streak"], 1)        # not inherited (was 2)
-        self.assertFalse(r.get("beats_char_baseline"))          # needs a fresh 2-in-a-row
+        self.assertFalse(r.get("beats_char_baseline"))
         self.assertEqual(len(r["retirement_log"]), 1)
+
+    def test_a_compatible_predecessor_regime_migrates_without_retiring(self):
+        r1 = self._clean_state()
+        legacy_v1 = {"state": r1["state"], "steps_trained": 356583, "model_fingerprint": "keepme",
+                     "training_regime": "jseq_clean_v1",
+                     "training_data_fingerprint": {"training_sources": [
+                         {"url": u, "text_hash": h} for u, h in r1["ever_trained_sources"].items()],
+                         "boundary_fingerprint": "OLD"}}
+        r2 = js.train_and_evaluate(learnable_texts(40), legacy_v1, train_seconds=30, max_steps=60,
+                                   training_context=self._ctx())
+        self.assertIsNone(r2["reset_reason"])
+        self.assertTrue(r2["boundary_migrated"])
+        self.assertGreaterEqual(r2["steps_trained"], 356583)
+        self.assertEqual(r2["training_regime"], "jseq_clean_v2")
 
     def test_training_data_fingerprint_is_auditable(self):
         r = self._clean_state()
         tdf = r["training_data_fingerprint"]
-        for k in ("boundary_fingerprint", "training_set_fingerprint", "training_regime",
-                  "parser_version", "provenance_policy", "normalisation_version",
-                  "training_source_count", "training_sources", "forbidden_collections"):
+        for k in ("boundary_fingerprint", "ever_trained_set_fingerprint", "training_regime",
+                  "split_policy_version", "parser_version", "provenance_policy",
+                  "normalisation_version", "ever_trained_source_count",
+                  "ever_trained_sources", "ever_trained_collections"):
             self.assertIn(k, tdf)
-        self.assertEqual(len(tdf["training_sources"]), tdf["training_source_count"])
+        self.assertEqual(len(tdf["ever_trained_sources"]), tdf["ever_trained_source_count"])
+        # the boundary fingerprint does NOT depend on the dynamic forbidden list
+        b1 = js.boundary_fingerprint({"parser_version": 5, "forbidden_collections": ["a"]})
+        b2 = js.boundary_fingerprint({"parser_version": 5, "forbidden_collections": ["a", "b", "c"]})
+        self.assertEqual(b1, b2)
 
 
 if __name__ == "__main__":

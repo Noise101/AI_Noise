@@ -317,9 +317,14 @@ def run_once(runtime: Path) -> dict:
     all_stories = [{"url": cur["shelf"][bid]["url"], "events": ev}
                    for bid, ev in heur_store.items()
                    if bid in cur["shelf"] and len(ev) >= 3]
-    comp_forbidden = comprehension.forbidden_training_collections(prev_comp, all_stories)
-    retell_forbidden = retell.forbidden_training_collections(prev_retell, all_stories)
-    training_data_fp = None
+    # the RNN's cumulative training ledger (collections it has EVER trained on):
+    # a collection here can never be moved into a held-out tier.
+    rnn_ever_trained_cols = set(
+        (prev_seq.get("training_data_fingerprint") or {}).get("ever_trained_collections") or [])
+    comp_forbidden = comprehension.forbidden_training_collections(
+        prev_comp, all_stories, ever_trained_collections=rnn_ever_trained_cols, cycle=cycle)
+    retell_forbidden = retell.forbidden_training_collections(
+        prev_retell, all_stories, ever_trained_collections=rnn_ever_trained_cols, cycle=cycle)
 
     # character RNN over the sentences of the books Noise has READ.  Every
     # collection that feeds a comprehension or retelling SELECTION / FINAL / RESERVE
@@ -341,7 +346,6 @@ def run_once(runtime: Path) -> dict:
     }
     seq_report = sequence.train_and_evaluate(seq_texts, prev_seq, SEQUENCE_TRAIN_SECONDS,
                                              training_context=training_context)
-    training_data_fp = (seq_report.get("training_data_fingerprint") or {}).get("training_set_fingerprint")
 
     # archive a retired (contaminated) RNN, then keep only metadata in the report
     retired = seq_report.get("retired_model")
@@ -352,12 +356,20 @@ def run_once(runtime: Path) -> dict:
         _write(audit_dir / f"reading-sequence-retired-{stamp}.json", retired)
         seq_report["retired_model"] = {k: v for k, v in retired.items() if k != "retired_state"}
 
+    # use the POST-training cumulative ledger for the tier pinning + baseline
+    rnn_ever_trained_cols = set(
+        (seq_report.get("training_data_fingerprint") or {}).get("ever_trained_collections") or [])
+    rnn_training_urls = sorted(
+        s["url"] for s in (seq_report.get("training_data_fingerprint") or {}).get("ever_trained_sources", []))
     comp_report = comprehension.evaluate_comprehension(
-        all_stories, prev_comp, training_data_fingerprint=training_data_fp)
+        all_stories, prev_comp, ever_trained_collections=rnn_ever_trained_cols, cycle=cycle)
 
-    # retelling capability -- narrative order recovery, tiered selection + final
-    retell_report = retell.evaluate_retelling(all_stories, prev_retell,
-                                              rnn_state=seq_report.get("state"))
+    # retelling -- the position baseline is built from EXACTLY the RNN's training
+    # URLs (P1-6), so pass them in.
+    retell_report = retell.evaluate_retelling(
+        all_stories, prev_retell, rnn_state=seq_report.get("state"),
+        rnn_training_urls=rnn_training_urls,
+        ever_trained_collections=rnn_ever_trained_cols, cycle=cycle)
 
     # a free-generation retelling of the book just read, conditioned ONLY on the
     # event representation Noise formed (no gold text, no LLM rephrasing)
@@ -410,26 +422,33 @@ def run_once(runtime: Path) -> dict:
         "comprehension": {k: comp_report.get(k) for k in
                           ("status", "comprehension_score", "consequence",
                            "consequence_baseline", "consequence_z", "beats_baseline",
-                           "capability_confirmed", "capability_pending_reason",
-                           "comprehension_trend", "test_stories", "eval_regime",
-                           "regime_reset_from", "snapshot_migrated",
+                           "capability_confirmed", "capability_confirmed_ever",
+                           "capability_confirmed_current_model", "capability_pending_reason",
+                           "confirmed_checkpoints", "comprehension_trend", "test_stories",
+                           "eval_regime", "regime_reset_from", "snapshot_migrated",
                            "selection_stories", "selection_fingerprint", "selection_measurements",
-                           "selection_significant_streak", "reserve_stories",
-                           "final_status", "final_opened_count", "final_query_budget",
-                           "final_result", "final_stale_for_current_model",
-                           "tier_collection_counts", "collection_disjointness",
-                           "collections_disjoint")},
+                           "selection_significant_streak", "selection_next_streak_train",
+                           "reserve_stories", "final_status", "final_opened_count",
+                           "final_query_budget", "final_result",
+                           "tier_collection_counts", "tier_collections_ever_trained",
+                           "topup_short_tiers", "selection_insufficient_reason",
+                           "collection_disjointness", "collections_disjoint")},
         "retelling": {k: retell_report.get(k) for k in
                       ("status", "roundtrip_fidelity", "order_gain", "gain_z",
                        "rnn_pairwise_accuracy", "position_baseline_accuracy",
-                       "beats_baseline", "capability_confirmed", "capability_pending_reason",
-                       "retelling_trend", "test_stories", "eval_regime", "regime_reset_from",
-                       "snapshot_migrated", "recomputed",
+                       "beats_baseline", "capability_confirmed", "capability_confirmed_ever",
+                       "capability_confirmed_current_model", "capability_pending_reason",
+                       "confirmed_checkpoints", "retelling_trend", "test_stories", "eval_regime",
+                       "regime_reset_from", "snapshot_migrated", "recomputed",
                        "selection_stories", "selection_fingerprint", "selection_measurements",
-                       "selection_significant_streak", "reserve_stories",
-                       "final_status", "final_opened_count", "final_query_budget",
-                       "final_result", "final_stale_for_current_model",
-                       "tier_collection_counts", "collection_disjointness", "collections_disjoint",
+                       "selection_significant_streak", "selection_next_streak_train",
+                       "reserve_stories", "final_status", "final_opened_count",
+                       "final_query_budget", "final_result",
+                       "tier_collection_counts", "tier_collections_ever_trained",
+                       "collection_disjointness", "collections_disjoint",
+                       "baseline_corpus_matches_rnn", "baseline_source_fingerprint",
+                       "baseline_source_count", "rnn_training_url_count",
+                       "rnn_training_urls_missing_from_corpus",
                        "rnn_fingerprint", "rnn_training_regime", "rnn_steps_at_eval",
                        "rnn_steps_now", "rnn_model_changed", "next_reeval")},
         "self_vs_aided": {
@@ -441,16 +460,20 @@ def run_once(runtime: Path) -> dict:
                             if isinstance(reading, dict) else None,
             "note": "aided は証拠スコア0（卒業・レベル・語彙・固定検証に不算入）"},
         "sequence": {k: seq_report.get(k) for k in
-                     ("status", "held_out_bits_per_char", "baseline_bits_per_char",
-                      "improvement_bits", "improvement_z", "beats_char_baseline",
-                      "perplexity_trend", "steps_trained", "model_fingerprint",
-                      "training_regime", "contamination_status", "reset_reason",
-                      "started_clean_at", "parent_model_fingerprint",
-                      "training_source_count", "significant_streak")},
-        "sequence_training_fingerprint":
-            (seq_report.get("training_data_fingerprint") or {}).get("training_set_fingerprint"),
+                     ("status", "capability_status", "held_out_bits_per_char",
+                      "baseline_bits_per_char", "improvement_bits", "improvement_z",
+                      "improvement_significant_now", "perplexity_trend", "steps_trained",
+                      "model_fingerprint", "training_regime", "split_policy_version",
+                      "contamination_status", "reset_reason", "reset_collisions",
+                      "boundary_migrated", "started_clean_at", "parent_model_fingerprint",
+                      "ever_trained_source_count", "sources_added_this_cycle",
+                      "dropped_trained_sources", "significant_streak")},
+        "sequence_ever_trained_fingerprint":
+            (seq_report.get("training_data_fingerprint") or {}).get("ever_trained_set_fingerprint"),
         "sequence_boundary_fingerprint":
             (seq_report.get("training_data_fingerprint") or {}).get("boundary_fingerprint"),
+        "sequence_ever_trained_collections":
+            len((seq_report.get("training_data_fingerprint") or {}).get("ever_trained_collections") or []),
         "sequence_retirement_log": seq_report.get("retirement_log", []),
         "sequence_sample": (seq_report.get("samples") or [""])[0],
         "caregiver": caregiver.summary(care_state),

@@ -38,10 +38,11 @@ MIN_TEST_STORIES = 8
 MIN_TRAIN_STORIES = 20
 
 
-EVAL_REGIME = "tiered_frozen_v1"     # selection + one-shot final (re-audit #4)
+EVAL_REGIME = "tiered_frozen_v2"     # v2: anchor streak + candidate checkpoints (re-audit #6)
 SCORING_VERSION = 2
 BASELINE_DEFINITION = "per_story_frequency_next_verb"
 BENCH_SALT = "comprehension:tiered:v1"
+MODEL_CONFIG = "verb_next+prior2+position+first_verb_protagonist"
 SIGNIFICANT_TRAIN_GROWTH = 1.4       # selection must stay significant across this
                                     # much train growth before a final may open
 
@@ -61,13 +62,15 @@ def _held_out(url: str) -> bool:
     return int(hashlib.sha256(f"comprehension:{jb.collection(url)}".encode()).hexdigest(), 16) % 5 == 0
 
 
-def forbidden_training_collections(previous: dict | None, stories: list | None = None) -> set:
+def forbidden_training_collections(previous: dict | None, stories: list | None = None,
+                                   ever_trained_collections=None, cycle: int = 0) -> set:
     """Collections that must stay OUT of any model / RNN training for this
     benchmark: everything the tiering puts in a non-train tier, plus every frozen
     selection / final / reserve collection."""
     previous = previous or {}
     prev = previous if previous.get("eval_regime") == EVAL_REGIME else {}
-    t = jb.Tiers(stories or [], BENCH_SALT, prev)
+    t = jb.Tiers(stories or [], BENCH_SALT, prev,
+                 ever_trained_collections=ever_trained_collections, cycle=cycle)
     return set(t.forbidden_train_collections)
 
 
@@ -264,14 +267,35 @@ def build_cooccurrence(stories: list[dict]) -> "dict[str, Counter]":
 
 
 # --- tiered frozen-benchmark capability measurement --------------------
-def _comprehension_model_fingerprint(train_stories: list[dict]) -> str:
+def comprehension_training_fingerprint(train_stories: list[dict]) -> dict:
+    """Full, auditable identity of the ComprehensionModel's training data:
+    URL *and canonical event content* of every train story, plus parser /
+    scoring / baseline / model config.  Detects parser changes, event-content
+    changes and training-source changes -- not just a changed URL list."""
     from japanese_event_v1 import PARSER_VERSION
-    payload = json.dumps({
-        "regime": EVAL_REGIME, "scoring": SCORING_VERSION, "parser": PARSER_VERSION,
-        "baseline": BASELINE_DEFINITION,
-        "train_urls": sorted(s["url"] for s in train_stories),
-    }, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+    srcs = sorted(({"url": s["url"], "events": _canon(s["events"])} for s in train_stories),
+                  key=lambda s: s["url"])
+    src_payload = json.dumps(srcs, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    identity = {
+        "regime": EVAL_REGIME, "scoring_version": SCORING_VERSION,
+        "parser_version": PARSER_VERSION, "baseline_definition": BASELINE_DEFINITION,
+        "model_config": MODEL_CONFIG,
+    }
+    return {
+        "identity": identity,
+        "identity_fingerprint": hashlib.sha256(
+            json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16],
+        "training_set_fingerprint": hashlib.sha256(src_payload.encode()).hexdigest()[:16],
+        "training_source_count": len(srcs),
+        "training_urls": [s["url"] for s in srcs],
+    }
+
+
+def _comprehension_model_fingerprint(train_stories: list[dict]) -> str:
+    tf = comprehension_training_fingerprint(train_stories)
+    return hashlib.sha256(
+        (tf["identity_fingerprint"] + ":" + tf["training_set_fingerprint"]).encode()
+    ).hexdigest()[:16]
 
 
 def _measure(test_stories: list[dict], model: "ComprehensionModel", known: set) -> dict | None:
@@ -298,26 +322,25 @@ def _measure(test_stories: list[dict], model: "ComprehensionModel", known: set) 
 
 
 def evaluate_comprehension(stories: list[dict], previous: dict | None = None,
-                           training_data_fingerprint: str | None = None) -> dict:
-    """Two-tier frozen benchmark.
+                           ever_trained_collections=None, cycle: int = 0) -> dict:
+    """Tiered frozen benchmark (re-audit #6).
 
-    SELECTION (frozen once, measured every cycle): learning curve + the milestone
-    that lets a final open.  Beating the baseline here is never a capability
-    claim.  FINAL (collection-disjoint from train AND selection, opened at most
-    FINAL_QUERY_BUDGET times, each open on a never-opened snapshot): the model /
-    regime / scoring / baseline / threshold are frozen from the selection side
-    first; capability = selection-significant AND an unopened final that also
-    clears the pre-registered threshold.
+    SELECTION: frozen once, measured every cycle -- diagnostic learning curve +
+    an ANCHOR-based streak (P1-3).  FINAL: a candidate checkpoint is registered
+    only at streak 2 with meaningful new training (P1-4); its one-shot final runs
+    once against that frozen checkpoint; a pass becomes a permanent
+    `confirmed_checkpoint`.  Ordinary continued training never burns the reserve.
     """
     previous = previous or {}
     regime_ok = previous.get("eval_regime") == EVAL_REGIME
     prev = previous if regime_ok else {}
     from japanese_event_v1 import PARSER_VERSION
 
-    tiers = jb.Tiers(stories, BENCH_SALT, prev)
+    tiers = jb.Tiers(stories, BENCH_SALT, prev,
+                     ever_trained_collections=ever_trained_collections, cycle=cycle)
     train_stories = tiers.train_stories
     train_events = [s["events"] for s in train_stories]
-    base = {"version": 3, "eval_regime": EVAL_REGIME,
+    base = {"version": 4, "eval_regime": EVAL_REGIME,
             "regime_reset_from": previous.get("eval_regime") if (previous and not regime_ok) else None,
             "snapshot_migrated": tiers.selection_migrated or (bool(previous) and not regime_ok),
             **tiers.report_fields(),
@@ -326,68 +349,71 @@ def evaluate_comprehension(stories: list[dict], previous: dict | None = None,
             "learning_curve": list(prev.get("learning_curve", []))}
 
     if not tiers.selection_frozen or len(train_events) < MIN_TRAIN_STORIES:
-        return {**base, "status": "insufficient_stories", "beats_baseline": False,
-                "comprehension_score": None, "train_stories": len(train_events)}
+        return {**base, "status": "insufficient_selection_stories", "beats_baseline": False,
+                "capability_confirmed": False, "comprehension_score": None,
+                "capability_pending_reason": tiers.selection_insufficient_reason or "not_enough_train",
+                "train_stories": len(train_events)}
 
     model = ComprehensionModel().fit(train_events)
     known = {w for events in train_events for e in events
              for w in (e.get("subject"), e.get("obj"), e.get("verb")) if w}
+    ctf = comprehension_training_fingerprint(train_stories)
     model_fp = _comprehension_model_fingerprint(train_stories)
 
     sel = _measure(tiers.selection_snapshot, model, known)
     if sel is None:
-        return {**base, "status": "insufficient_stories", "beats_baseline": False,
+        return {**base, "status": "insufficient_selection_stories", "beats_baseline": False,
                 "capability_confirmed": False, "comprehension_score": None,
                 "train_stories": len(train_events),
                 "capability_pending_reason": "no scorable selection stories"}
     sel_measurements = prev.get("selection_measurements", 0) + 1
-    last_sig_train = prev.get("selection_last_significant_train", 0)
-    grew = len(train_events) >= max(1, last_sig_train) * SIGNIFICANT_TRAIN_GROWTH
-    sel_sig_streak = ((prev.get("selection_significant_streak", 0) + 1)
-                      if (sel["significant"] and grew)
-                      else prev.get("selection_significant_streak", 0) if sel["significant"] else 0)
+    streak_state = jb.advance_selection_streak(prev.get("selection_streak"),
+                                               sel["significant"], len(train_events), model_fp)
+    sel_sig_streak = streak_state["streak"]
 
-    # ---- FINAL ----
-    final_history = list(prev.get("final_history", []))
-    prev_standing = final_history[-1] if final_history else None
-    standing_stale_or_failed = bool(prev_standing and (
-        prev_standing["preconditions"].get("model_fingerprint") != model_fp
-        or not (prev_standing["result"] or {}).get("significant")))
-    can_open = (sel["significant"] and sel_sig_streak >= 2 and tiers.disjoint
-                and len(final_history) < jb.FINAL_QUERY_BUDGET
-                and (not final_history or standing_stale_or_failed))
-    nxt = tiers.next_unopened_final() if can_open else None
-    if nxt:
-        pre = {"model_fingerprint": model_fp, "training_data_fingerprint": training_data_fingerprint,
-               "parser_version": PARSER_VERSION, "eval_regime": EVAL_REGIME,
-               "scoring_version": SCORING_VERSION, "baseline_definition": BASELINE_DEFINITION,
-               "significance_z": SIGNIFICANCE_Z, "selection_result": sel,
-               "selection_fingerprint": tiers.selection_fingerprint,
-               "final_snapshot_fingerprint": nxt["fingerprint"],
-               "final_snapshot_urls": nxt["urls"],
-               "final_query_index": len(final_history) + 1, "evaluated_at": time.time()}
-        fin = _measure(nxt["snapshot"], model, known)
-        final_history = final_history + [{"tier": nxt["tier"], "fingerprint": nxt["fingerprint"],
-                                          "result": fin, "preconditions": pre}]
-        tiers.record_final(nxt)
+    # ---- candidate checkpoint + one-shot final (P1-4) ----
+    candidates = [dict(c) for c in prev.get("candidate_checkpoints", [])]
+    if (jb.should_register_candidate(candidates, sel_sig_streak, len(train_events))
+            and tiers.disjoint):
+        nxt = tiers.next_unopened_final()
+        cand = {"registered_at_train": len(train_events), "registered_at_cycle": cycle,
+                "model_fingerprint": model_fp,
+                "comprehension_training_fingerprint": ctf,
+                "identity": ctf["identity"], "significance_z": SIGNIFICANCE_Z,
+                "selection_result": sel, "selection_fingerprint": tiers.selection_fingerprint,
+                "final_result": None}
+        if nxt:
+            fin = _measure(nxt["snapshot"], model, known)
+            cand.update(tier=nxt["tier"], final_snapshot_fingerprint=nxt["fingerprint"],
+                        final_snapshot_urls=nxt["urls"], final_result=fin,
+                        confirmed_at=(cycle if (fin or {}).get("significant") else None),
+                        evaluated_at=time.time())
+            tiers.record_final(nxt)
+        else:
+            cand.update(tier=None, final_result=None,
+                        note="no unopened final/reserve snapshot available")
+        candidates = candidates + [cand]
 
-    standing = final_history[-1] if final_history else None
-    final_stale = bool(standing and standing["preconditions"].get("model_fingerprint") != model_fp)
-    beats = bool(standing and standing["result"] and standing["result"]["significant"]
-                 and sel["significant"] and not final_stale and tiers.disjoint)
-    if standing:
-        final_status = "opened" if not final_stale else "stale_needs_fresh_final"
-    elif tiers.next_unopened_final():
-        final_status = "unopened"
+    cap = jb.capability_view(candidates, model_fp)
+    standing = candidates[-1] if candidates else None
+    if not candidates:
+        final_status = ("registerable_next_cycle" if sel_sig_streak >= 2
+                        else "awaiting_selection_streak_2")
+    elif standing and standing.get("final_result") is None:
+        final_status = "candidate_registered_final_snapshot_unavailable"
+    elif cap["confirmed_ever"]:
+        final_status = ("confirmed_current_model" if cap["confirmed_current_model"]
+                        else "confirmed_earlier_checkpoint_model_since_changed")
     else:
-        final_status = "insufficient_final_stories"
+        final_status = "final_below_threshold"
 
     curve = list(prev.get("learning_curve", []))
-    point = {"train_stories": len(train_events), "eval_regime": EVAL_REGIME,
-             "selection_measurement": sel_measurements,
+    point = {"train_stories": len(train_events), "eval_regime": EVAL_REGIME, "cycle": cycle,
+             "selection_measurement": sel_measurements, "model_fingerprint": model_fp,
              "comprehension_score": sel["comprehension_score"],
              "consequence": sel["consequence"], "consequence_baseline": sel["consequence_baseline"],
-             "consequence_z": sel["z"], "ordering": sel["ordering"]}
+             "consequence_z": sel["z"], "ordering": sel["ordering"],
+             "selection_significant": sel["significant"], "selection_streak": sel_sig_streak}
     if not curve or curve[-1]["train_stories"] != len(train_events):
         curve.append(point)
     curve = curve[-200:]
@@ -397,32 +423,42 @@ def evaluate_comprehension(stories: list[dict], previous: dict | None = None,
         older, newer = sum(tail[:len(tail)//2]) / (len(tail)//2), sum(tail[len(tail)//2:]) / (len(tail)-len(tail)//2)
         trend = "improving" if newer > older + 0.01 else "declining" if newer < older - 0.01 else "flat"
 
+    beats = cap["confirmed_ever"]
     return {
         **base, "status": "measured",
         "train_stories": len(train_events),
         "model_fingerprint": model_fp,
-        # selection (repeatable, NOT capability)
+        "comprehension_training_fingerprint": ctf,
+        # selection (diagnostic, NOT capability)
         "selection": sel,
         "selection_measurements": sel_measurements,
+        "selection_streak": streak_state,
         "selection_significant_streak": sel_sig_streak,
-        "selection_last_significant_train": len(train_events) if sel["significant"] else last_sig_train,
-        # final (one-shot capability gate)
-        "final_history": final_history,
-        "final_opened_count": len(final_history),
+        "selection_next_streak_train": streak_state.get("next_streak_train"),
+        # candidate checkpoints + one-shot finals
+        "candidate_checkpoints": candidates,
+        "final_opened_count": sum(1 for c in candidates if c.get("final_result") is not None),
         "final_query_budget": jb.FINAL_QUERY_BUDGET,
         "final_status": final_status,
-        "final_result": standing["result"] if standing else None,
-        "final_stale_for_current_model": final_stale,
-        "final_preconditions": standing["preconditions"] if standing else None,
+        "final_result": (standing or {}).get("final_result"),
+        "final_preconditions": ({k: standing[k] for k in
+                                 ("registered_at_train", "model_fingerprint", "identity",
+                                  "significance_z", "selection_fingerprint",
+                                  "final_snapshot_fingerprint")
+                                 if k in standing} if standing else None),
         # capability
         "capability_confirmed": beats,
-        "beats_baseline": beats,                     # kept for callers
+        "capability_confirmed_ever": cap["confirmed_ever"],
+        "capability_confirmed_current_model": cap["confirmed_current_model"],
+        "confirmed_checkpoints": cap["confirmed_checkpoints"],
+        "beats_baseline": beats,
         "capability_pending_reason": (None if beats else
-            "final not yet opened" if final_status in ("unopened", "insufficient_final_stories") else
-            "selection not significant" if not sel["significant"] else
-            "final below threshold" if standing and not standing["result"]["significant"] else
-            "final stale (model changed since it was opened)" if final_stale else "unknown"),
-        # compat fields used by status renderers / tests
+            "awaiting selection streak 2 (anchor-based)" if sel_sig_streak < 2 else
+            "candidate registered, no unopened final snapshot" if final_status ==
+                "candidate_registered_final_snapshot_unavailable" else
+            "final below threshold" if final_status == "final_below_threshold" else
+            "candidate registerable next cycle"),
+        # compat fields
         "comprehension_score": sel["comprehension_score"],
         "consequence": sel["consequence"], "consequence_baseline": sel["consequence_baseline"],
         "consequence_gain": sel["consequence_gain"], "consequence_z": sel["z"],
@@ -433,8 +469,9 @@ def evaluate_comprehension(stories: list[dict], previous: dict | None = None,
         "snapshot_stories": len(tiers.selection_snapshot),
         "significant_streak": sel_sig_streak,
         "learning_curve": curve, "comprehension_trend": trend,
-        "limitations": ["consequence prediction is next-verb within one story; "
-                        "SELECTION is diagnostic only; capability needs an UNOPENED "
-                        "collection-disjoint FINAL to also clear the pre-registered "
-                        "threshold (final_query_budget=%d)." % jb.FINAL_QUERY_BUDGET],
+        "limitations": ["SELECTION is diagnostic only.  Capability = a candidate "
+                        "checkpoint (registered at anchor-streak 2 with meaningful new "
+                        "training) passing its ONE-SHOT unopened final.  A confirmed "
+                        "checkpoint is permanent; the current model is separately "
+                        "reported as (not) itself re-confirmed."],
     }

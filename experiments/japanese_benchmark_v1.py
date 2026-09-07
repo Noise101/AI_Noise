@@ -30,14 +30,77 @@ from __future__ import annotations
 import hashlib
 import json
 
-BENCH_VERSION = 1
+BENCH_VERSION = 2
 FINAL_QUERY_BUDGET = 2
 MIN_SELECTION_STORIES = 8
 MIN_FINAL_STORIES = 8
 MIN_TRAIN_STORIES = 20
 SIGNIFICANCE_Z = 3.0
-SELECTION_GROWTH_FOR_FINAL = 1.4     # selection must have stayed significant across
-                                    # this much train growth before a final may open
+STREAK_GROWTH = 1.4          # train must grow this much between selection-streak steps
+CANDIDATE_GROWTH = 1.5       # ... and this much beyond the last candidate anchor to
+                            # register a NEW candidate checkpoint (opens a reserve final)
+
+
+def advance_selection_streak(prev: dict | None, significant: bool,
+                             train_n: int, model_fp: str) -> dict:
+    """Anchor-based selection streak (re-audit #6 P1-3).
+
+    The streak counts *independent* significant measurements: the first fixes an
+    anchor (train size + model fingerprint) and gives streak 1; each further step
+    needs the training set to have grown STREAK_GROWTH x since the anchor AND a
+    different model.  The anchor is NOT re-stamped otherwise, so ordinary gradual
+    growth (160->180->...->430) eventually reaches streak 2.  A non-significant
+    measurement resets streak and anchor to nothing.
+    """
+    if not significant:
+        return {"streak": 0, "anchor_train": None, "anchor_model": None,
+                "next_streak_train": None}
+    p = prev or {}
+    streak, at, am = p.get("streak", 0), p.get("anchor_train"), p.get("anchor_model")
+    if streak <= 0 or at is None:
+        return {"streak": 1, "anchor_train": train_n, "anchor_model": model_fp,
+                "next_streak_train": int(train_n * STREAK_GROWTH) + 1}
+    if train_n >= at * STREAK_GROWTH and model_fp != am:
+        return {"streak": streak + 1, "anchor_train": train_n, "anchor_model": model_fp,
+                "next_streak_train": int(train_n * STREAK_GROWTH) + 1}
+    return {"streak": streak, "anchor_train": at, "anchor_model": am,
+            "next_streak_train": int(at * STREAK_GROWTH) + 1}
+
+
+def should_register_candidate(candidates: list, streak: int, train_n: int) -> bool:
+    """A candidate checkpoint is registered (and its one-shot final opened) only
+    when selection has reached streak 2 and either nothing is registered yet or
+    the training set has grown CANDIDATE_GROWTH x beyond the last registered
+    candidate.  A one-book / few-step change never registers a new candidate, so
+    the reserve is never burned by ordinary continued training (P1-4)."""
+    if streak < 2 or len(candidates) >= FINAL_QUERY_BUDGET:
+        return False
+    if not candidates:
+        return True
+    return train_n >= candidates[-1].get("registered_at_train", 0) * CANDIDATE_GROWTH
+
+
+def capability_view(candidates: list, current_model_fp: str) -> dict:
+    """`confirmed_ever` = some candidate checkpoint passed its unopened final.
+    `confirmed_current_model` = the model that is running RIGHT NOW is itself a
+    confirmed checkpoint (rare for a continuously-training model -- shown so the
+    two are never conflated)."""
+    confirmed = [c for c in candidates if (c.get("final_result") or {}).get("significant")]
+    last = confirmed[-1] if confirmed else None
+    return {
+        "confirmed_ever": bool(confirmed),
+        "confirmed_current_model": bool(last and last.get("model_fingerprint") == current_model_fp),
+        "confirmed_checkpoints": [
+            {"registered_at_train": c.get("registered_at_train"),
+             "model_fingerprint": c.get("model_fingerprint"),
+             "final_snapshot_fingerprint": c.get("final_snapshot_fingerprint"),
+             "final_z": (c.get("final_result") or {}).get("z") or (c.get("final_result") or {}).get("gain_z"),
+             "confirmed_at": c.get("confirmed_at")}
+            for c in confirmed],
+        "last_confirmed_checkpoint": last,
+        "candidates_registered": len(candidates),
+        "candidate_budget": FINAL_QUERY_BUDGET,
+    }
 
 
 def collection(url: str) -> str:
@@ -67,6 +130,21 @@ def _tier_of(col: str, salt: str) -> str:
     return "train"
 
 
+def _normalise_ledger(raw) -> dict:
+    """Accept the old {col: 'tier'} form and the new {col: {...}} form."""
+    out: dict[str, dict] = {}
+    for col, v in (raw or {}).items():
+        if isinstance(v, str):
+            out[col] = {"tier": v, "assignment_reason": "legacy", "assigned_at": 0,
+                        "ever_trained": v == "train"}
+        elif isinstance(v, dict):
+            out[col] = {"tier": v.get("tier", "train"),
+                        "assignment_reason": v.get("assignment_reason", "legacy"),
+                        "assigned_at": v.get("assigned_at", 0),
+                        "ever_trained": bool(v.get("ever_trained"))}
+    return out
+
+
 def canonical_events(events: list) -> list:
     out = []
     for e in events:
@@ -94,45 +172,67 @@ class Tiers:
     benchmark, honouring any snapshot already frozen in `previous`."""
 
     def __init__(self, stories: list, salt: str, previous: dict | None = None,
-                 min_selection: int = MIN_SELECTION_STORIES, min_final: int = MIN_FINAL_STORIES):
+                 min_selection: int = MIN_SELECTION_STORIES, min_final: int = MIN_FINAL_STORIES,
+                 ever_trained_collections: "set | None" = None, cycle: int = 0):
         previous = previous or {}
         self.salt = salt
+        ever_trained = set(ever_trained_collections or ())
         by_col: dict[str, list] = {}
         for s in stories:
             if len(s.get("events", [])) >= 3:
                 by_col.setdefault(collection(s["url"]), []).append(
                     {"url": s["url"], "events": s["events"]})
 
-        # a collection's tier, once assigned, is STICKY (persisted) -- so a
-        # collection can never migrate from train into a held-out tier after the
-        # model has already trained on it.
-        sticky = dict(previous.get("tier_assignments") or {})
+        # --- FULL, persisted tier ledger (re-audit #6 P1-2) ---
+        # {col: {tier, assigned_at, assignment_reason, ever_trained}}.  EVERY
+        # collection is recorded, train included.  A collection that has ever been
+        # trained on -- or was previously assigned `train` -- is pinned to train
+        # and can NEVER move to a held-out tier.  Top-up only ever touches
+        # collections that are fresh (no prior assignment, never trained).
+        prev_ledger = _normalise_ledger(previous.get("tier_assignments"))
+        ledger: dict[str, dict] = {}
         tier_cols: dict[str, set] = {"train": set(), "selection": set(),
                                      "final": set(), "reserve": set()}
         for col in by_col:
-            tier_cols[sticky.get(col) or _tier_of(col, salt)].add(col)
+            prev = prev_ledger.get(col)
+            is_trained = col in ever_trained or (prev and prev.get("tier") == "train") \
+                or (prev and prev.get("ever_trained"))
+            if is_trained:
+                tier, reason = "train", ("ever_trained" if col in ever_trained else
+                                         (prev or {}).get("assignment_reason", "train_pinned"))
+            elif prev:
+                tier, reason = prev["tier"], prev.get("assignment_reason", "sticky")
+            else:
+                tier, reason = _tier_of(col, salt), "hash"
+            tier_cols[tier].add(col)
+            ledger[col] = {"tier": tier, "assignment_reason": reason,
+                           "assigned_at": (prev or {}).get("assigned_at", cycle),
+                           "ever_trained": bool(is_trained)}
 
-        # story-count top-up: the hash split is by collection count, but tiers
-        # need a minimum number of STORIES.  When the corpus is big enough overall
-        # but a held-out tier came up short, move the lowest-rank `train`
-        # collections into it, provided training keeps its own minimum.
+        # story-count top-up: a held-out tier below its story minimum pulls the
+        # lowest-rank FRESH (never-assigned, never-trained) train collections in.
         def _stories_in(cols):
             return sum(len(by_col[c]) for c in cols)
 
-        train_ranked = sorted(tier_cols["train"], key=lambda c: _tier_rank(c, salt))
+        fresh_train = sorted((c for c in tier_cols["train"]
+                              if not ledger[c]["ever_trained"] and c not in prev_ledger),
+                             key=lambda c: _tier_rank(c, salt))
+        self.topup_short = {}
         for tier, need in (("selection", min_selection), ("final", min_final),
                            ("reserve", min_final)):
-            i = 0
-            while (_stories_in(tier_cols[tier]) < need and i < len(train_ranked)
-                   and _stories_in(tier_cols["train"]) - len(by_col[train_ranked[i]]) >= MIN_TRAIN_STORIES):
-                c = train_ranked[i]; i += 1
-                if c in tier_cols["train"]:
-                    tier_cols["train"].discard(c)
-                    tier_cols[tier].add(c)
-                    sticky[c] = tier
-            train_ranked = [c for c in train_ranked if c in tier_cols["train"]]
-        self.tier_assignments = {c: t for t in ("selection", "final", "reserve")
-                                 for c in tier_cols[t]}
+            for c in list(fresh_train):
+                if _stories_in(tier_cols[tier]) >= need:
+                    break
+                if _stories_in(tier_cols["train"]) - len(by_col[c]) < MIN_TRAIN_STORIES:
+                    break
+                tier_cols["train"].discard(c)
+                tier_cols[tier].add(c)
+                fresh_train.remove(c)
+                ledger[c] = {"tier": tier, "assignment_reason": "topup_fresh_untrained",
+                             "assigned_at": cycle, "ever_trained": False}
+            if _stories_in(tier_cols[tier]) < need:
+                self.topup_short[tier] = _stories_in(tier_cols[tier])
+        self.tier_assignments = ledger
 
         # frozen snapshots -- once captured, reused verbatim
         self.selection_snapshot = list(previous.get("selection_snapshot") or [])
@@ -167,7 +267,11 @@ class Tiers:
             self._pending_primary_final = []
         self._primary_final_ready = bool(self._pending_primary_final)
 
+        self.min_selection, self.min_final = min_selection, min_final
         self.selection_frozen = len(self.selection_snapshot) >= min_selection
+        self.selection_insufficient_reason = (None if self.selection_frozen else
+            ("fresh_untrained_collections_short_for_selection"
+             if "selection" in self.topup_short else "not_enough_stories_yet"))
         sel_cols = {collection(s["url"]) for s in self.selection_snapshot}
         used_final_cols = {collection(u) for f in self.final_history
                            for u in f.get("preconditions", {}).get("final_snapshot_urls", [])}
@@ -211,12 +315,29 @@ class Tiers:
     def record_final(self, opened: dict) -> None:
         self._used_final_tiers = self._used_final_tiers | {opened["tier"]}
 
+    def next_final_ready(self) -> bool:
+        return self.next_unopened_final() is not None
+
+    def final_insufficient_reason(self) -> "str | None":
+        if self.next_unopened_final() is not None:
+            return None
+        if "final" in self.topup_short and "final" not in self._used_final_tiers:
+            return "fresh_untrained_collections_short_for_final"
+        if "reserve" in self.topup_short and "reserve" not in self._used_final_tiers:
+            return "fresh_untrained_collections_short_for_reserve"
+        return "all_final_and_reserve_snapshots_used"
+
     def report_fields(self) -> dict:
+        trained = sum(1 for v in self.tier_assignments.values() if v.get("ever_trained"))
         return {
             "bench_version": BENCH_VERSION,
             "tier_assignments": self.tier_assignments,
+            "tier_collections_ever_trained": trained,
+            "topup_short_tiers": self.topup_short,
             "selection_stories": len(self.selection_snapshot),
             "selection_fingerprint": self.selection_fingerprint,
+            "selection_frozen": self.selection_frozen,
+            "selection_insufficient_reason": self.selection_insufficient_reason,
             "selection_migrated_from_test_snapshot": self.selection_migrated,
             "reserve_stories": len(self.reserve_snapshot),
             "train_stories": len(self.train_stories),

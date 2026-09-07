@@ -287,7 +287,7 @@ def score_retelling(original_events: list[dict], retold_text: str) -> dict:
 # built from the same training corpus?  This removes the structural shortcut in
 # v1, where an outer loop generated each event and concatenated them in input
 # order (so "ordered" input always beat "shuffled" input regardless of the RNN).
-EVAL_REGIME = "narrative_order_recovery_v2"   # v2: tiered selection + one-shot final
+EVAL_REGIME = "narrative_order_recovery_v3"   # v3: anchor streak + candidate checkpoints (re-audit #6)
 SCORING_VERSION = 2
 BASELINE_DEFINITION = "verb_position_from_training_corpus"
 BENCH_SALT = "retell:nor:v2"
@@ -311,13 +311,16 @@ def _held_out(url: str) -> bool:
     return int(hashlib.sha256(f"retell:{jb.collection(url)}".encode()).hexdigest(), 16) % 5 == 0
 
 
-def forbidden_training_collections(previous: dict | None, stories: list | None = None) -> set:
+def forbidden_training_collections(previous: dict | None, stories: list | None = None,
+                                   ever_trained_collections=None, cycle: int = 0) -> set:
     """Collections that must stay OUT of the RNN's training text for the
     retelling benchmark: every non-train tier plus every frozen selection /
     final / reserve collection."""
     previous = previous or {}
     prev = previous if previous.get("eval_regime") == EVAL_REGIME else {}
-    return set(jb.Tiers(stories or [], BENCH_SALT, prev).forbidden_train_collections)
+    return set(jb.Tiers(stories or [], BENCH_SALT, prev,
+                        ever_trained_collections=ever_trained_collections,
+                        cycle=cycle).forbidden_train_collections)
 
 
 def _events_seed(events: list[dict]) -> int:
@@ -475,17 +478,24 @@ def _roundtrip_diag(test_stories: list[dict]) -> tuple[float, float]:
     return sum(diag) / n, sum(base) / n
 
 
-def evaluate_retelling(stories: list[dict], previous: dict | None = None,
-                       rnn_state: dict | None = None) -> dict:
-    """Tiered NARRATIVE ORDER RECOVERY benchmark.
+def _position_source_fingerprint(train_stories: list[dict]) -> str:
+    srcs = sorted(({"url": s["url"], "events": jb.canonical_events(s["events"])} for s in train_stories),
+                  key=lambda s: s["url"])
+    return hashlib.sha256(json.dumps(srcs, sort_keys=True, ensure_ascii=False,
+                                     separators=(",", ":")).encode()).hexdigest()[:16]
 
-    SELECTION (frozen once, measured when the RNN meaningfully changed):
-    diagnostic learning curve + the milestone that lets a FINAL open.  FINAL
-    (collection-disjoint from train AND selection, opened at most
-    FINAL_QUERY_BUDGET times on never-opened snapshots, model / regime / scoring
-    / baseline / threshold frozen from the selection side first): capability =
-    selection-significant AND an unopened final that also clears the threshold.
-    free_retell is display only; the template round trip is a diagnostic.
+
+def evaluate_retelling(stories: list[dict], previous: dict | None = None,
+                       rnn_state: dict | None = None,
+                       rnn_training_urls: "set | list | None" = None,
+                       ever_trained_collections=None, cycle: int = 0) -> dict:
+    """Tiered NARRATIVE ORDER RECOVERY benchmark (re-audit #6).
+
+    SELECTION is diagnostic; a CANDIDATE CHECKPOINT is registered only at
+    anchor-streak 2 with meaningful new training, and its ONE-SHOT final runs
+    once against that frozen checkpoint.  The position baseline is built from
+    EXACTLY the RNN's training sources (P1-6); a mismatch invalidates the
+    measurement.  free_retell is display only.
     """
     previous = previous or {}
     regime_ok = previous.get("eval_regime") == EVAL_REGIME
@@ -497,9 +507,10 @@ def evaluate_retelling(stories: list[dict], previous: dict | None = None,
     cur_steps = rnn_state.get("steps_trained", 0) if has_model else 0
     cur_train_regime = rnn_state.get("training_regime") if has_model else None
 
-    tiers = jb.Tiers(stories, BENCH_SALT, prev)
+    tiers = jb.Tiers(stories, BENCH_SALT, prev,
+                     ever_trained_collections=ever_trained_collections, cycle=cycle)
     train = tiers.train_stories
-    base = {"version": 5, "eval_regime": EVAL_REGIME,
+    base = {"version": 6, "eval_regime": EVAL_REGIME,
             "regime_reset_from": previous.get("eval_regime") if (previous and not regime_ok) else None,
             "snapshot_migrated": tiers.selection_migrated or (bool(previous) and not regime_ok),
             **tiers.report_fields(),
@@ -510,21 +521,32 @@ def evaluate_retelling(stories: list[dict], previous: dict | None = None,
             "learning_curve": list(prev.get("learning_curve", []))}
 
     if not tiers.selection_frozen or len(train) < MIN_TRAIN_STORIES:
-        return {**base, "status": "insufficient_stories", "beats_baseline": False,
-                "order_gain": None, "roundtrip_fidelity": None, "recomputed": True,
-                "train_stories": len(train)}
+        return {**base, "status": "insufficient_selection_stories", "beats_baseline": False,
+                "capability_confirmed": False, "order_gain": None, "roundtrip_fidelity": None,
+                "recomputed": True, "train_stories": len(train),
+                "capability_pending_reason": tiers.selection_insufficient_reason or "not_enough_train"}
 
-    mean_pos = _position_model([{"events": s["events"]} for s in train])
+    # --- P1-6: the position baseline uses EXACTLY the RNN's training sources ---
+    rnn_urls = set(rnn_training_urls or ()) if rnn_training_urls is not None else None
+    if rnn_urls is not None:
+        baseline_stories = [s for s in stories if s["url"] in rnn_urls and len(s.get("events", [])) >= 3]
+        baseline_urls = {s["url"] for s in baseline_stories}
+        rnn_urls_missing = sorted(rnn_urls - baseline_urls)
+        corpus_matches_rnn = not rnn_urls_missing
+    else:
+        baseline_stories = [{"events": s["events"], "url": s["url"]} for s in train]
+        baseline_urls = {s["url"] for s in baseline_stories}
+        rnn_urls_missing = []
+        corpus_matches_rnn = None
+    mean_pos = _position_model([{"events": s["events"]} for s in baseline_stories])
+    baseline_source_fp = _position_source_fingerprint(baseline_stories)
 
-    # ---- SELECTION (repeatable, NOT capability) ----
-    # carry the (minutes-long) pairwise pass forward unless the snapshot changed,
-    # the training size changed, or the RNN both moved fingerprint AND crossed a
-    # re-eval threshold (>=15% new steps / 6h / new training stories).
+    # ---- SELECTION (diagnostic; the pairwise pass is minutes -> carry forward) ----
     sel_prev = prev.get("selection")
-    sel_key = [cur_fp, tiers.selection_fingerprint, len(train)]
     reusable = (sel_prev is not None
                 and prev.get("selection_fingerprint_at_eval") == tiers.selection_fingerprint
                 and prev.get("selection_train_stories") == len(train)
+                and prev.get("selection_baseline_source_fp") == baseline_source_fp
                 and not _due_for_reeval(
                     {"rnn_fingerprint": prev.get("selection_rnn_fingerprint"),
                      "rnn_steps_at_eval": prev.get("selection_rnn_steps_at_eval", 0),
@@ -544,59 +566,70 @@ def evaluate_retelling(stories: list[dict], previous: dict | None = None,
         sel_evaluated_at = time.time()
         rt_fid, rt_shuf = _roundtrip_diag(tiers.selection_snapshot)
         sel = (_measure_order_recovery(tiers.selection_snapshot, _rnn_scorer(rnn_state), mean_pos)
-               if has_model else None)
+               if (has_model and corpus_matches_rnn is not False) else None)
 
-    sel_significant = bool(sel and sel["significant"])
+    baseline_invalid = corpus_matches_rnn is False
+    sel_significant = bool(sel and sel["significant"] and not baseline_invalid)
     sel_measurements = prev.get("selection_measurements", 0) + (1 if sel_recomputed else 0)
-    last_sig_train = prev.get("selection_last_significant_train", 0)
-    grew = len(train) >= max(1, last_sig_train) * SIGNIFICANT_TRAIN_GROWTH
-    sel_sig_streak = ((prev.get("selection_significant_streak", 0) + 1)
-                      if (sel_significant and grew and sel_recomputed)
-                      else prev.get("selection_significant_streak", 0) if sel_significant else 0)
+    model_fp = "|".join(str(x) for x in (cur_fp, cur_train_regime, PARSER_VERSION,
+                                         SCORING_VERSION, EVAL_REGIME))
+    streak_state = jb.advance_selection_streak(prev.get("selection_streak"),
+                                               sel_significant and sel_recomputed,
+                                               len(train), model_fp)
+    # a carried-forward significant selection keeps the streak it had
+    if sel_significant and not sel_recomputed:
+        streak_state = dict(prev.get("selection_streak") or streak_state)
+    sel_sig_streak = streak_state.get("streak", 0)
 
-    # ---- FINAL (one-shot capability gate) ----
-    model_fp = "|".join(str(x) for x in (cur_fp, PARSER_VERSION, SCORING_VERSION, EVAL_REGIME))
-    final_history = list(prev.get("final_history", []))
-    prev_standing = final_history[-1] if final_history else None
-    standing_stale_or_failed = bool(prev_standing and (
-        prev_standing["preconditions"].get("model_fingerprint") != model_fp
-        or not (prev_standing["result"] or {}).get("significant")))
-    can_open = (has_model and sel_significant and sel_sig_streak >= 2 and tiers.disjoint
-                and len(final_history) < jb.FINAL_QUERY_BUDGET
-                and (not final_history or standing_stale_or_failed))
-    nxt = tiers.next_unopened_final() if can_open else None
-    if nxt:
-        pre = {"model_fingerprint": model_fp, "rnn_fingerprint": cur_fp,
-               "rnn_steps_at_open": cur_steps, "rnn_training_regime": cur_train_regime,
-               "parser_version": PARSER_VERSION, "eval_regime": EVAL_REGIME,
-               "scoring_version": SCORING_VERSION, "baseline_definition": BASELINE_DEFINITION,
-               "significance_z": SIGNIFICANCE_Z, "selection_result": sel,
-               "selection_fingerprint": tiers.selection_fingerprint,
-               "final_snapshot_fingerprint": nxt["fingerprint"],
-               "final_snapshot_urls": nxt["urls"],
-               "final_query_index": len(final_history) + 1, "evaluated_at": time.time()}
-        fin = _measure_order_recovery(nxt["snapshot"], _rnn_scorer(rnn_state), mean_pos)
-        final_history = final_history + [{"tier": nxt["tier"], "fingerprint": nxt["fingerprint"],
-                                          "result": fin, "preconditions": pre}]
-        tiers.record_final(nxt)
+    # ---- candidate checkpoint + one-shot final (P1-4) ----
+    candidates = [dict(c) for c in prev.get("candidate_checkpoints", [])]
+    if (has_model and jb.should_register_candidate(candidates, sel_sig_streak, len(train))
+            and tiers.disjoint and not baseline_invalid):
+        nxt = tiers.next_unopened_final()
+        cand = {"registered_at_train": len(train), "registered_at_cycle": cycle,
+                "model_fingerprint": model_fp, "rnn_fingerprint": cur_fp,
+                "rnn_steps_at_checkpoint": cur_steps, "rnn_training_regime": cur_train_regime,
+                "parser_version": PARSER_VERSION, "scoring_version": SCORING_VERSION,
+                "eval_regime": EVAL_REGIME, "baseline_definition": BASELINE_DEFINITION,
+                "baseline_source_fingerprint": baseline_source_fp,
+                "significance_z": SIGNIFICANCE_Z,
+                "selection_result": sel, "selection_fingerprint": tiers.selection_fingerprint,
+                "final_result": None}
+        if nxt:
+            fin = _measure_order_recovery(nxt["snapshot"], _rnn_scorer(rnn_state), mean_pos)
+            cand.update(tier=nxt["tier"], final_snapshot_fingerprint=nxt["fingerprint"],
+                        final_snapshot_urls=nxt["urls"], final_result=fin,
+                        confirmed_at=(cycle if (fin or {}).get("significant") else None),
+                        evaluated_at=time.time())
+            tiers.record_final(nxt)
+        else:
+            cand.update(tier=None, note="no unopened final/reserve snapshot available")
+        candidates = candidates + [cand]
 
-    standing = final_history[-1] if final_history else None
-    final_stale = bool(standing and standing["preconditions"].get("model_fingerprint") != model_fp)
-    beats = bool(standing and standing["result"] and standing["result"]["significant"]
-                 and sel_significant and not final_stale and tiers.disjoint)
-    if standing:
-        final_status = "opened" if not final_stale else "stale_needs_fresh_final"
+    cap = jb.capability_view(candidates, model_fp)
+    standing = candidates[-1] if candidates else None
+    beats = cap["confirmed_ever"]
+
+    if baseline_invalid:
+        final_status = "measurement_invalid_baseline_corpus_mismatch"
     elif not has_model:
         final_status = "no_generation_model"
-    elif tiers.next_unopened_final():
-        final_status = "unopened"
+    elif not candidates:
+        final_status = ("registerable_next_cycle" if sel_sig_streak >= 2
+                        else "awaiting_selection_streak_2")
+    elif standing and standing.get("final_result") is None:
+        final_status = "candidate_registered_final_snapshot_unavailable"
+    elif cap["confirmed_ever"]:
+        final_status = ("confirmed_current_model" if cap["confirmed_current_model"]
+                        else "confirmed_earlier_checkpoint_model_since_changed")
     else:
-        final_status = "insufficient_final_stories"
+        final_status = "final_below_threshold"
 
-    status = "measured" if has_model else "no_generation_model"
+    status = "measurement_invalid" if baseline_invalid else ("measured" if has_model else "no_generation_model")
     curve = list(prev.get("learning_curve", []))
-    point = {"train_stories": len(train), "eval_regime": EVAL_REGIME,
+    point = {"train_stories": len(train), "eval_regime": EVAL_REGIME, "cycle": cycle,
              "selection_measurement": sel_measurements, "rnn_steps": cur_steps,
+             "model_fingerprint": model_fp, "selection_streak": sel_sig_streak,
              "roundtrip_fidelity": round(rt_fid, 3) if rt_fid is not None else None,
              "order_gain": (sel or {}).get("order_gain"),
              "gain_z": (sel or {}).get("gain_z")}
@@ -612,16 +645,22 @@ def evaluate_retelling(stories: list[dict], previous: dict | None = None,
 
     return {
         **base, "status": status, "recomputed": sel_recomputed,
-        "train_stories": len(train),
-        "model_fingerprint": model_fp,
+        "train_stories": len(train), "model_fingerprint": model_fp,
         "rnn_model_changed": cur_fp != prev.get("rnn_fingerprint"),
+        # P1-6 baseline / RNN corpus agreement
+        "baseline_source_fingerprint": baseline_source_fp,
+        "baseline_source_count": len(baseline_stories),
+        "rnn_training_url_count": (len(rnn_urls) if rnn_urls is not None else None),
+        "baseline_corpus_matches_rnn": corpus_matches_rnn,
+        "rnn_training_urls_missing_from_corpus": rnn_urls_missing[:20],
         # selection (diagnostic)
         "selection": sel,
-        "selection_key": sel_key,
         "selection_fingerprint_at_eval": tiers.selection_fingerprint,
+        "selection_baseline_source_fp": baseline_source_fp,
         "selection_measurements": sel_measurements,
+        "selection_streak": streak_state,
         "selection_significant_streak": sel_sig_streak,
-        "selection_last_significant_train": len(train) if sel_significant else last_sig_train,
+        "selection_next_streak_train": streak_state.get("next_streak_train"),
         "selection_rnn_fingerprint": cur_fp,
         "selection_rnn_steps_at_eval": sel_steps_at_eval,
         "selection_evaluated_at": sel_evaluated_at,
@@ -630,7 +669,7 @@ def evaluate_retelling(stories: list[dict], previous: dict | None = None,
         "next_reeval": _next_reeval_hint({"rnn_steps_at_eval": sel_steps_at_eval}, cur_steps),
         "roundtrip_fidelity": round(rt_fid, 3) if rt_fid is not None else None,
         "roundtrip_template_shuffled": round(rt_shuf, 3) if rt_shuf is not None else None,
-        # compat fields for status renderers / tests
+        # compat fields
         "order_gain": (sel or {}).get("order_gain"),
         "rnn_pairwise_accuracy": (sel or {}).get("rnn_pairwise_accuracy"),
         "position_baseline_accuracy": (sel or {}).get("position_baseline_accuracy"),
@@ -640,27 +679,35 @@ def evaluate_retelling(stories: list[dict], previous: dict | None = None,
         "snapshot_fingerprint": tiers.selection_fingerprint,
         "snapshot_stories": len(tiers.selection_snapshot),
         "significant_streak": sel_sig_streak,
-        # final (one-shot capability)
-        "final_history": final_history,
-        "final_opened_count": len(final_history),
+        # candidate checkpoints + one-shot finals
+        "candidate_checkpoints": candidates,
+        "final_opened_count": sum(1 for c in candidates if c.get("final_result") is not None),
         "final_query_budget": jb.FINAL_QUERY_BUDGET,
         "final_status": final_status,
-        "final_result": standing["result"] if standing else None,
-        "final_stale_for_current_model": final_stale,
-        "final_preconditions": standing["preconditions"] if standing else None,
+        "final_result": (standing or {}).get("final_result"),
+        "final_preconditions": ({k: standing[k] for k in
+                                 ("registered_at_train", "model_fingerprint", "rnn_fingerprint",
+                                  "significance_z", "selection_fingerprint",
+                                  "final_snapshot_fingerprint", "baseline_source_fingerprint")
+                                 if k in standing} if standing else None),
         "capability_confirmed": beats,
+        "capability_confirmed_ever": cap["confirmed_ever"],
+        "capability_confirmed_current_model": cap["confirmed_current_model"],
+        "confirmed_checkpoints": cap["confirmed_checkpoints"],
         "beats_baseline": beats,
         "capability_pending_reason": (None if beats else
-            "final not yet opened" if final_status in ("unopened", "no_generation_model", "insufficient_final_stories") else
-            "selection not significant" if not sel_significant else
-            "final below threshold" if standing and not standing["result"]["significant"] else
-            "final stale (model changed since it was opened)" if final_stale else "unknown"),
+            "measurement invalid: baseline corpus != RNN training corpus" if baseline_invalid else
+            "no generation model" if not has_model else
+            "awaiting selection streak 2 (anchor-based)" if sel_sig_streak < 2 else
+            "candidate registered, no unopened final snapshot" if final_status ==
+                "candidate_registered_final_snapshot_unavailable" else
+            "final below threshold"),
         "learning_curve": curve, "retelling_trend": trend,
-        "limitations": ["capability = RNN-as-likelihood-model recovering gold event ORDER "
-                        "(pairwise, symmetric) better than a verb-position baseline, on an "
-                        "UNOPENED collection-disjoint FINAL, with model/regime/threshold "
-                        "pre-registered from the SELECTION side. free_retell is display only; "
-                        "an untrained RNN scores ~0.5 and cannot pass."],
+        "limitations": ["SELECTION is diagnostic.  Capability = a candidate checkpoint "
+                        "(anchor-streak 2 + meaningful new training) passing its ONE-SHOT "
+                        "unopened final; a pass is a permanent confirmed_checkpoint.  The "
+                        "position baseline is built from EXACTLY the RNN's training "
+                        "sources; a mismatch invalidates the measurement."],
     }
 
 
