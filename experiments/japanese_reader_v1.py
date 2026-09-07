@@ -197,6 +197,17 @@ def run_once(runtime: Path) -> dict:
     if migration.get("migrated"):
         cur["events_parser_version"] = PARSER_VERSION
 
+    # invariant, enforced every cycle: the shared events store holds ONLY the
+    # heuristic parse of books Noise has actually read.  A fetched-but-unread
+    # book, or one whose read markers were cleared, is dropped -- it can never be
+    # training data, RNN text, a frozen-benchmark story, or vocabulary evidence.
+    _read_now = {bid for bid, b in cur["shelf"].items() if curriculum.book_was_read(b)}
+    _pruned = [bid for bid in events_store if bid not in _read_now]
+    for bid in _pruned:
+        events_store.pop(bid, None)
+    if _pruned or migration.get("migrated"):
+        _write_events(events_store)
+
     in_rotation = sum(1 for b in cur["shelf"].values() if b["status"] == "in_rotation")
     reachable = in_rotation + sum(1 for b in cur["shelf"].values()
                                  if b["status"] in ("shelved_above_level", "shelved_stuck"))
@@ -206,7 +217,9 @@ def run_once(runtime: Path) -> dict:
     if (in_rotation < SHELF_LOW_WATER and cooled) or reachable == 0:
         fetched = _fetch_more_books(cur, cycle)
         cur["last_fetch_cycle"] = cycle
-        events_store = _read_events()
+        # NB: _fetch_more_books no longer writes events (unread books stay out of
+        # the store), so do NOT reload events_store here -- that would discard the
+        # in-memory changes migrate_reading_state just made this cycle.
 
     book_id = curriculum.retention_check_due(cur, cycle) or curriculum.select_next_book(cur)
     reading = {"status": "no_book"}
