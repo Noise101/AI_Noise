@@ -5,3 +5,4 @@ report*.json
 controller-state.json
 .local/
 scratch-reading-backup/
+.local.backup-*/

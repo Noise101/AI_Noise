@@ -27,7 +27,6 @@ from __future__ import annotations
 import hashlib
 import math
 import random
-import re
 from collections import Counter, defaultdict
 
 SIGNIFICANCE_Z = 3.0
@@ -35,12 +34,37 @@ MIN_TEST_STORIES = 8
 MIN_TRAIN_STORIES = 20
 
 
+EVAL_REGIME = "frozen_snapshot_v1"
+SIGNIFICANT_TRAIN_GROWTH = 1.4       # training must grow this much for another
+                                    # "independent" significant measurement to count
+
+
 def _story_key(url: str) -> str:
     return hashlib.sha256(url.encode()).hexdigest()[:12]
 
 
+def _collection(url: str) -> str:
+    """Group a multi-part source (「イソップ童話集/きつねとつる」) so its parts do
+    not straddle train and test; a standalone work is its own collection."""
+    base = url.split("#")[0].split("?")[0].rstrip("/")
+    parent, _, leaf = base.rpartition("/")
+    # only treat the parent as a collection when the URL genuinely nests
+    # (a wiki subpage title, not just scheme "//")
+    return parent if leaf and parent.count("/") >= 3 else base
+
+
 def _held_out(url: str) -> bool:
-    return int(hashlib.sha256(f"comprehension:{url}".encode()).hexdigest(), 16) % 5 == 0
+    """Hold out whole COLLECTIONS, not individual URLs: an Aozora author's works
+    share a collection, so a per-URL split would leak almost every author across
+    train and test (and starve training).  A standalone work is its own
+    collection, so this stays a ~1/5 split there."""
+    key = _collection(url)
+    return int(hashlib.sha256(f"comprehension:{key}".encode()).hexdigest(), 16) % 5 == 0
+
+
+def _fingerprint(snapshot: list) -> str:
+    payload = "\n".join(sorted(s["url"] for s in snapshot))
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 # --- model -----------------------------------------------------------------
@@ -162,40 +186,54 @@ def book_comprehension(events: list[dict], model: ComprehensionModel,
 
 
 # --- vocabulary use-test -------------------------------------------------
-def vocabulary_use_test(word: str, sentences: list[str], distractors: list[str],
+def _shuffled(options: list[str], salt: str) -> list[str]:
+    """Deterministic order from a per-question salt -- the answer is not first."""
+    return sorted(options, key=lambda w: hashlib.sha256(f"{salt}|{w}".encode()).hexdigest())
+
+
+def vocabulary_use_test(word: str, events: list[dict], distractors: list[str],
                         model: ComprehensionModel,
-                        cooccurrence: "dict[str, Counter] | None" = None) -> dict:
-    """Cloze (pick the real word for a BLANKED slot) + wrong-use rejection, over
-    held-out sentences.  The target is masked before scoring -- otherwise "is the
-    candidate literally in the sentence" trivially picks it.  Scoring uses a
-    word x context-word co-occurrence table learned from other reading."""
-    if not sentences or len(distractors) < 2 or not cooccurrence:
-        return {"tested": False}
+                        cooccurrence: "dict[str, Counter] | None" = None,
+                        url: str = "") -> dict:
+    """Cloze + wrong-use rejection over held-out EVENTS.
+
+    `events` are heuristic (subject, obj, verb, sentence) events in which `word`
+    is one of the three slots.  The slot is BLANKED, the other two slots are the
+    context, and each candidate is scored by its co-occurrence with that context
+    -- context tokens and the co-occurrence table are the SAME event-token unit.
+    The candidate order is a deterministic shuffle; the target must score
+    STRICTLY above the best distractor AND have positive context evidence.
+    """
+    slots = ("subject", "obj", "verb")
+    trials = [e for e in events if word in (e.get(s) for s in slots)]
+    if len(trials) < 2 or len(distractors) < 2 or not cooccurrence:
+        return {"tested": False, "reason": "need >=2 events, >=2 distractors, a co-occurrence table"}
+    candidates = [word] + [d for d in distractors[:3] if d != word]
     cloze_hits = reject_hits = 0
-    for sentence in sentences:
-        if word not in sentence:
-            continue
-        context = [t for t in _content_tokens(sentence.replace(word, "〇")) if t != "〇"]
-        options = [word] + distractors[:3]
-        scored = sorted(options, key=lambda w: -_context_fit(w, context, cooccurrence))
-        cloze_hits += scored[0] == word
-        wrong = distractors[0]
-        reject_hits += (_context_fit(word, context, cooccurrence)
-                        >= _context_fit(wrong, context, cooccurrence))
-    n = sum(1 for s in sentences if word in s)
-    if not n:
-        return {"tested": False}
-    cloze_rate, reject_rate = cloze_hits / n, reject_hits / n
-    return {"tested": True, "sentences": n,
+    for e in trials:
+        target_slot = next(s for s in slots if e.get(s) == word)
+        context = [e.get(s) for s in slots if s != target_slot and e.get(s)]
+        salt = f"{url}|{e.get('sentence', '')}|{word}"
+        ordered = _shuffled(candidates, salt)
+        scores = {c: _context_fit(c, context, cooccurrence) for c in ordered}
+        best_distractor = max((scores[c] for c in ordered if c != word), default=0.0)
+        won = scores[word] > best_distractor and scores[word] > 0
+        cloze_hits += won
+        # wrong-use rejection: score the target against a FOREIGN context (the
+        # context of a different trial).  A word whose fit is real context
+        # sensitivity -- not raw frequency -- should NOT also win there.
+        foreign = trials[(trials.index(e) + 1) % len(trials)]
+        fslot = next((s for s in slots if foreign.get(s) == word), None)
+        fcontext = [foreign.get(s) for s in slots if s != fslot and foreign.get(s)]
+        fscores = {c: _context_fit(c, fcontext, cooccurrence) for c in ordered}
+        fbest = max((fscores[c] for c in ordered if c != word), default=0.0)
+        reject_hits += won and not (fscores[word] > fbest and fscores[word] > 0)
+    n = len(trials)
+    cloze_rate = cloze_hits / n
+    reject_rate = reject_hits / n
+    return {"tested": True, "trials": n,
             "cloze_rate": round(cloze_rate, 3), "reject_rate": round(reject_rate, 3),
             "passes_used": cloze_rate >= 0.6 and reject_rate >= 0.6}
-
-
-_CONTENT = re.compile(r"[぀-ヿ㐀-鿿]{2,}")
-
-
-def _content_tokens(text: str) -> list[str]:
-    return _CONTENT.findall(text)
 
 
 def _context_fit(word: str, context: list[str], cooccurrence: "dict[str, Counter]") -> float:
@@ -221,14 +259,43 @@ def build_cooccurrence(stories: list[dict]) -> "dict[str, Counter]":
 
 # --- frozen-benchmark capability measurement ----------------------------
 def evaluate_comprehension(stories: list[dict], previous: dict | None = None) -> dict:
-    """stories: [{url, events}].  Train on non-held-out, measure on held-out."""
+    """stories: [{url, events}].  The held-out test set is a SNAPSHOT frozen the
+    first time it is large enough -- new books only ever grow the training side.
+    """
     previous = previous or {}
-    train = [s["events"] for s in stories if not _held_out(s["url"]) and len(s["events"]) >= 3]
-    test = [s for s in stories if _held_out(s["url"]) and len(s["events"]) >= 3]
-    if len(train) < MIN_TRAIN_STORIES or len(test) < MIN_TEST_STORIES:
-        return {"version": 1, "status": "insufficient_stories",
+    snap = previous.get("test_snapshot")
+    # sticky: once the frozen snapshot replaced a legacy (non-frozen) evaluation
+    # it stays flagged, so status keeps showing that the migration happened
+    migrated = bool(previous.get("snapshot_migrated"))
+
+    train = [s["events"] for s in stories
+             if not _held_out(s["url"]) and len(s["events"]) >= 3]
+
+    if snap and previous.get("eval_regime") == EVAL_REGIME:
+        test = [{"url": s["url"], "events": [tuple(e) if isinstance(e, list) else e
+                                             for e in s["events"]]} for s in snap]
+    else:
+        candidate_test = [s for s in stories if _held_out(s["url"]) and len(s["events"]) >= 3]
+        if len(train) < MIN_TRAIN_STORIES or len(candidate_test) < MIN_TEST_STORIES:
+            return {"version": 2, "status": "insufficient_stories", "eval_regime": EVAL_REGIME,
+                    "train_stories": len(train), "test_stories": len(candidate_test),
+                    "comprehension_score": None, "beats_baseline": False,
+                    "learning_curve": list(previous.get("learning_curve", []))}
+        test = candidate_test           # freeze it now
+        snap = [{"url": s["url"], "events": s["events"]} for s in test]
+        migrated = migrated or bool(previous)   # replaced a legacy evaluation
+
+    held_urls = {s["url"] for s in snap}
+    held_cols = {_collection(u) for u in held_urls}
+    # a book that is now on the held-out list must never be in training either
+    train = [s["events"] for s in stories
+             if s["url"] not in held_urls and _collection(s["url"]) not in held_cols
+             and len(s["events"]) >= 3]
+    if len(train) < MIN_TRAIN_STORIES:
+        return {"version": 2, "status": "insufficient_stories", "eval_regime": EVAL_REGIME,
                 "train_stories": len(train), "test_stories": len(test),
                 "comprehension_score": None, "beats_baseline": False,
+                "test_snapshot": snap,
                 "learning_curve": list(previous.get("learning_curve", []))}
 
     model = ComprehensionModel().fit(train)
@@ -254,7 +321,13 @@ def evaluate_comprehension(stories: list[dict], previous: dict | None = None) ->
                                 + 0.2 * mean_protagonist, 3)
     significant = z >= SIGNIFICANCE_Z and n >= MIN_TEST_STORIES
     prior_sig = previous.get("beats_baseline_significant", False)
-    streak = previous.get("significant_streak", 0) + 1 if significant else 0
+    # re-measuring the SAME frozen snapshot is not an independent replication --
+    # the streak only advances when training has meaningfully grown since the
+    # last significant measurement
+    last_sig_train = previous.get("last_significant_train", 0)
+    grew = len(train) >= last_sig_train * SIGNIFICANT_TRAIN_GROWTH
+    streak = (previous.get("significant_streak", 0) + 1) if (significant and grew) \
+        else (previous.get("significant_streak", 0) if significant else 0)
 
     curve = list(previous.get("learning_curve", []))
     point = {"train_stories": len(train), "comprehension_score": comprehension_score,
@@ -270,9 +343,13 @@ def evaluate_comprehension(stories: list[dict], previous: dict | None = None) ->
         older, newer = sum(tail[:len(tail)//2]) / (len(tail)//2), sum(tail[len(tail)//2:]) / (len(tail)-len(tail)//2)
         trend = "improving" if newer > older + 0.01 else "declining" if newer < older - 0.01 else "flat"
 
+    beats = significant and (prior_sig or previous.get("significant_streak", 0) >= 1) and streak >= 2
     return {
-        "version": 1, "status": "measured",
+        "version": 2, "status": "measured", "eval_regime": EVAL_REGIME,
+        "snapshot_migrated": migrated,
         "train_stories": len(train), "test_stories": n,
+        "snapshot_stories": len(snap), "snapshot_fingerprint": _fingerprint(snap),
+        "test_snapshot": snap,
         "comprehension_score": comprehension_score,
         "consequence": round(mean_consequence, 3),
         "consequence_baseline": round(mean_consequence_base, 3),
@@ -280,10 +357,11 @@ def evaluate_comprehension(stories: list[dict], previous: dict | None = None) ->
         "consequence_z": round(z, 2), "consequence_p_one_sided": p,
         "ordering": round(mean_ordering, 3), "protagonist": round(mean_protagonist, 3),
         "beats_baseline_significant": significant,
-        "beats_baseline": significant and (prior_sig or previous.get("significant_streak", 0) >= 1),
+        "beats_baseline": beats,
         "significant_streak": streak,
+        "last_significant_train": len(train) if significant else last_sig_train,
         "learning_curve": curve, "comprehension_trend": trend,
         "limitations": ["consequence prediction is next-verb within one story; "
-                        "comprehension credit only when it beats the frequency "
-                        "baseline on held-out stories, twice"],
+                        "credit only when it beats the frequency baseline on the "
+                        "FROZEN held-out snapshot, at two different training sizes"],
     }

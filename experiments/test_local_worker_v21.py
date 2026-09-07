@@ -758,6 +758,34 @@ class LocalWorkerTest(unittest.TestCase):
         self.assertIn("reading loop is broken", status.get("error") or "")
         self.assertEqual(status["japanese_reading"]["error"][:12], "RuntimeError")
 
+    @patch("local_worker_v21.japanese_reader.run_once", return_value={})
+    @patch("local_worker_v21.wait_for_retry", side_effect=[False])
+    @patch("local_worker_v21.work", return_value={"phase": "capability_plateau", "seed": "one"})
+    def test_supervise_retracts_a_stale_event_level_confirmation_on_startup(
+            self, _work, _wait, _run_once):
+        prev = os.environ.pop("AI_NOISE_SKIP_JAPANESE_READING", None)
+        with tempfile.TemporaryDirectory() as directory:
+            d = Path(directory)
+            (d / "event-structure.json").write_text(json.dumps({
+                "eval_regime": "collection_sign_v1",
+                "selected_model_id": "event_plausibility:smoothed_argument",
+                "selected": {"task": "event_plausibility", "final": {"lift": 19}},
+                "final_attempt_history": [{"task": "event_plausibility",
+                                           "evaluation": {"lift": 19}}],
+            }))
+            (d / "capability-report.json").write_text(json.dumps(
+                {"headline": "confirmed on frozen final split: event_plausibility"}))
+            try:
+                supervise("one", d, 0, 0, 1, 1, 1, local_conversation=False)
+            finally:
+                if prev is not None:
+                    os.environ["AI_NOISE_SKIP_JAPANESE_READING"] = prev
+            es = json.loads((d / "event-structure.json").read_text())
+            cr = json.loads((d / "capability-report.json").read_text())
+        self.assertIsNone(es["selected"])
+        self.assertEqual(es["selected_model_id"], "frequency_baseline")
+        self.assertNotIn("confirmed on frozen final split", cr.get("headline", ""))
+
     @patch("local_worker_v21.work", return_value={"phase": "round_budget_exhausted"})
     def test_supervisor_respects_explicit_round_limit(self, work_loop):
         with tempfile.TemporaryDirectory() as directory:

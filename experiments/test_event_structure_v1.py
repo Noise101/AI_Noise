@@ -199,6 +199,32 @@ class EventStructureTest(unittest.TestCase):
         again = train_and_evaluate(verified(learnable_sequences(60)), first)
         self.assertEqual(len(again["learning_curve"]), 1)
 
+    def test_pre_v2_confirmation_is_retracted_without_retraining(self):
+        # an old event-level "confirmed gain" (no evaluated_collections anywhere)
+        stale = {
+            "eval_regime": "collection_sign_v1",
+            "selected_model_id": "event_plausibility:smoothed_argument",
+            "selected": {"task": "event_plausibility", "model_id": "smoothed_argument",
+                         "final": {"lift": 19, "one_sided_sign_p": 0.0017}},
+            "final_attempt_history": [{"task": "event_plausibility", "training_events": 900,
+                                      "evaluation": {"lift": 19, "one_sided_sign_p": 0.0017}}],
+            "final_queries_used": 1,
+            "benchmark": {"locked": True, "selection_event_snapshot": [["a", "b", "c", "u"]],
+                          "final_event_snapshot": [["d", "e", "f", "v"]]},
+        }
+        migrated, event = es.retract_pre_v2_confirmation(stale)
+        self.assertIsNotNone(event)
+        self.assertIsNone(migrated["selected"])
+        self.assertEqual(migrated["selected_model_id"], "frequency_baseline")
+        self.assertEqual(migrated["final_attempt_history"], [])   # stale entry dropped
+        self.assertEqual(migrated["final_queries_used"], 0)       # budget re-initialised
+        self.assertEqual(migrated["eval_regime"], es.EVAL_REGIME)
+        # the frozen snapshot is preserved, not re-extracted
+        self.assertEqual(migrated["benchmark"]["selection_event_snapshot"], [["a", "b", "c", "u"]])
+        # idempotent
+        again, event2 = es.retract_pre_v2_confirmation(migrated)
+        self.assertIsNone(event2)
+
 
 if __name__ == "__main__":
     unittest.main()

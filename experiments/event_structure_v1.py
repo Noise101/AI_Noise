@@ -41,6 +41,13 @@ VERSION = 1
 # --- frozen-benchmark constants -------------------------------------------------
 BENCHMARK_REGIME = "collection_disjoint_within_event_v1"
 BENCHMARK_SALT = "event-structure-benchmark:v1"
+# The scoring method a `selected` / `final_attempt` was produced under.  v2 =
+# significance is a sign test over COLLECTIONS (not events) on a frozen event
+# SNAPSHOT.  Any `selected` or `final_attempt_history` entry without
+# `evaluated_collections` is a v1 (event-level, non-snapshot) result and is
+# invalidated on load -- selection and the final confirmation restart from
+# scratch on the unchanged snapshot, and the final-query budget is re-initialised.
+EVAL_REGIME = "collection_sign_v2"
 MIN_BENCHMARK_COLLECTIONS = 20
 MINIMUM_EVALUATION_TOTAL = 15           # per selection / final split
 MINIMUM_TRAIN_EVENTS = 200
@@ -382,14 +389,94 @@ def _empty_selected(task: str = "none") -> dict:
             "baseline_correct": 0, "total": 0, "coverage": 0.0, "lift": 0}
 
 
+def _valid_v2_final(entry: dict) -> bool:
+    """A final-attempt entry is v2 only if its evaluation carries the
+    collection-level fields."""
+    ev = (entry or {}).get("evaluation", {})
+    return "evaluated_collections" in ev and "collection_wins" in ev
+
+
+def retract_pre_v2_confirmation(previous: dict | None) -> tuple[dict, dict | None]:
+    """One-time, standalone invalidation of a pre-snapshot / pre-collection-sign
+    'confirmed gain'.
+
+    `train_and_evaluate` already does this when it next runs, but the English
+    pipeline can be parked (capability_plateau) for a long time, leaving a stale
+    event-level "確定" on disk.  This applies only the *retraction* half: it does
+    NOT retrain, does NOT re-extract or re-serialise the frozen event snapshot,
+    and does NOT spend a final-holdout query.  It just clears the stale selection
+    so the number on disk stops claiming a gain that was never confirmed under
+    the current regime.  Idempotent: a report already at EVAL_REGIME is untouched.
+
+    Returns (possibly-updated report, migration-event | None).
+    """
+    previous = dict(previous or {})
+    if not previous or previous.get("eval_regime") == EVAL_REGIME:
+        return previous, None
+    history = list(previous.get("final_attempt_history", []))
+    stale = [h for h in history if not _valid_v2_final(h)]
+    selected_stale = (previous.get("selected")
+                      and "evaluated_collections" not in previous.get("selected", {}).get("final", {}))
+    if not stale and not selected_stale:
+        # nothing confirmed under the old regime; just stamp the regime
+        previous["eval_regime"] = EVAL_REGIME
+        return previous, None
+    event = {
+        "event_type": "eval_regime_migrated",
+        "before": {"eval_regime": previous.get("eval_regime", "collection_sign_v1"),
+                   "selected_model_id": previous.get("selected_model_id"),
+                   "invalidated_final_attempts": len(stale)},
+        "after": {"eval_regime": EVAL_REGIME, "selected_model_id": "frequency_baseline"},
+        "reason": "pre-v2 confirmation used an event-level sign test on a non-frozen "
+                  "set; retracted on load. Re-confirmation happens on the unchanged "
+                  "snapshot with a collection-level test when training next grows."}
+    previous["final_attempt_history"] = [h for h in history if _valid_v2_final(h)]
+    previous["selected"] = None
+    previous["selected_evaluation"] = _empty_selected()
+    previous["selected_model_id"] = "frequency_baseline"
+    previous["selection_status"] = "pre_v2_confirmation_retracted_awaiting_re_evaluation"
+    previous["eval_regime"] = EVAL_REGIME
+    previous["eval_regime_migrated"] = True
+    previous["final_queries_used"] = len(previous["final_attempt_history"])
+    previous.pop("final_attempt", None)
+    previous.setdefault("emitted_events", []).append(event)
+    return previous, event
+
+
 def train_and_evaluate(verified_experience: dict, previous: dict | None = None) -> dict:
     previous = previous or {}
     events = iter_events(verified_experience)
     benchmark = choose_benchmark(events, previous)
     emitted_events: list[dict] = []
 
+    # invalidate any pre-v2 (event-level, pre-snapshot) confirmation: its p-value
+    # over-counted correlated events on a set that was still growing
+    regime_migrated = False
+    prior_history = list(previous.get("final_attempt_history", []))
+    if previous.get("eval_regime") != EVAL_REGIME and (prior_history or previous.get("selected")):
+        stale_v1 = [h for h in prior_history if not _valid_v2_final(h)]
+        if stale_v1 or (previous.get("selected") and "evaluated_collections"
+                        not in previous.get("selected", {}).get("final", {})):
+            regime_migrated = True
+            emitted_events.append({
+                "event_type": "eval_regime_migrated",
+                "before": {"eval_regime": previous.get("eval_regime", "collection_sign_v1"),
+                           "selected_model_id": previous.get("selected_model_id"),
+                           "invalidated_final_attempts": len(stale_v1)},
+                "after": {"eval_regime": EVAL_REGIME},
+                "reason": "v1 final evaluations used an event-level sign test on a "
+                          "non-frozen set; selection and confirmation restart on the "
+                          "unchanged snapshot with a collection-level test"})
+            previous = dict(previous)
+            previous["final_attempt_history"] = [h for h in prior_history if _valid_v2_final(h)]
+            previous["selected"] = None
+            previous["selected_model_id"] = "frequency_baseline"
+            previous.pop("selected_evaluation", None)
+
     if not benchmark["ready"]:
-        return _postponed_report(events, benchmark, previous)
+        report = _postponed_report(events, benchmark, previous)
+        report["eval_regime"] = EVAL_REGIME
+        return report
 
     if not previous.get("benchmark", {}).get("locked"):
         emitted_events.append({
@@ -517,19 +604,29 @@ def train_and_evaluate(verified_experience: dict, previous: dict | None = None) 
     else:
         selection_status = "no_model_beats_corrected_selection_baseline"
 
+    # keep the snapshot BYTE-STABLE once captured (never re-extract / re-serialise
+    # from the current run's ordering)
+    prior_bench = previous.get("benchmark", {})
+    sel_snapshot = (prior_bench.get("selection_event_snapshot")
+                    or [list(e) for e in selection_events])
+    fin_snapshot = (prior_bench.get("final_event_snapshot")
+                    or [list(e) for e in final_events])
+
     return {
         "version": VERSION,
+        "eval_regime": EVAL_REGIME,
+        "eval_regime_migrated": regime_migrated,
         "benchmark": {"locked": True, "status": "ready", "selection_regime": BENCHMARK_REGIME,
                       "benchmark_collections": benchmark["benchmark_collections"],
                       "selection_collections": benchmark["selection_collections"],
                       "eligible_collection_count": benchmark["eligible_collection_count"],
                       "collection_count": len(benchmark["benchmark_collections"]),
-                      "source_count": len({e[3] for e in selection_events + final_events}),
-                      "selection_events": len(selection_events),
-                      "final_events": len(final_events),
+                      "source_count": len({tuple(e)[3] for e in sel_snapshot + fin_snapshot}),
+                      "selection_events": len(sel_snapshot),
+                      "final_events": len(fin_snapshot),
                       # the frozen evaluation events themselves (captured once)
-                      "selection_event_snapshot": [list(e) for e in selection_events],
-                      "final_event_snapshot": [list(e) for e in final_events],
+                      "selection_event_snapshot": sel_snapshot,
+                      "final_event_snapshot": fin_snapshot,
                       "fingerprint": plaus_seed},
         "training": {"events": len(train_events),
                      "source_count": len({e[3] for e in train_events}),

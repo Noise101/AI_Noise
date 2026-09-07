@@ -1,3 +1,4 @@
+import json
 import re
 import unittest
 
@@ -105,6 +106,56 @@ class ReadingCurriculumTest(unittest.TestCase):
         # without events the whole run is one unknown "word" -> 0
         self.assertEqual(rc.text_difficulty("きつねがぶどうを見つけました。", 1, known)
                          ["known_word_coverage"], 0.0)
+
+    def test_schema_migration_is_idempotent_and_audits_aided_graduates(self):
+        cur = rc.empty_curriculum()
+        rc.register_books(cur, [book("A", "a", SIMPLE), book("B", "b", MID),
+                                book("S", "s", "むかし。")], cycle=1)
+        a, b, s = rc._book_id("a", "A"), rc._book_id("b", "B"), rc._book_id("s", "S")
+        cur["shelf"][a].update(status="graduated", comprehension_history=[0.8])
+        cur["shelf"][s].update(status="graduated", scaffolded=True,
+                               comprehension_history=[0.9])
+        # legacy inflated known_words -- one real, one that no re-parse recovers
+        cur["known_words"] = {"きつね": {"books": 47, "first_cycle": 1},
+                              "ぶどう": {"books": 12, "used": True, "use_tested": True},
+                              "ようせい": {"books": 8, "first_cycle": 2}}
+        store = {}
+        events = {a: [{"subject": "きつね", "verb": "みつける", "obj": "ぶどう"}] * 4,
+                  b: [{"subject": "おじいさん", "verb": "行く", "obj": ""}] * 4}
+
+        def fake_extract(text):
+            if "きつね" in text or text == SIMPLE:
+                return events[a]
+            if text == MID:
+                return events[b]
+            return []                                  # "むかし。" -> unparsable
+
+        m1 = rc.migrate_reading_state(cur, store, fake_extract)
+        self.assertTrue(m1["migrated"])
+        # a scaffold-graduated book is returned for re-evaluation, history kept
+        self.assertEqual(cur["shelf"][s]["status"], "in_rotation")
+        self.assertTrue(cur["shelf"][s]["graduated_via_aid"])
+        self.assertEqual(cur["shelf"][s]["comprehension_history"], [0.9])
+        # a heuristically-graduated book stays graduated
+        self.assertEqual(cur["shelf"][a]["status"], "graduated")
+        # known_words rebuilt: distinct-book counts, tiers preserved
+        self.assertEqual(cur["known_words"]["きつね"]["books"], 1)
+        self.assertEqual(cur["known_words"]["きつね"]["book_ids"], [a])
+        self.assertIn("ぶどう", cur["known_words"])
+        self.assertTrue(cur["known_words"]["ぶどう"].get("used"))
+        # a legacy word no re-parse recovers is quarantined, not trusted at its
+        # inflated count
+        self.assertEqual(cur["known_words"]["ようせい"]["books"], 0)
+        self.assertTrue(cur["known_words"]["ようせい"]["books_unverified"])
+        self.assertEqual(m1["known_words_quarantined"], 1)
+        # the re-parse never MINTS vocabulary: no key that was not already known
+        self.assertEqual(set(cur["known_words"]), {"きつね", "ぶどう", "ようせい"})
+        self.assertNotIn("みつける", cur["known_words"])
+        # a second run changes nothing
+        snapshot = json.loads(json.dumps(cur))
+        m2 = rc.migrate_reading_state(cur, store, fake_extract)
+        self.assertFalse(m2["migrated"])
+        self.assertEqual(json.loads(json.dumps(cur)), snapshot)
 
     def test_a_stuck_book_is_shelved_but_retried_as_a_last_resort(self):
         cur = rc.empty_curriculum()

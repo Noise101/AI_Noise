@@ -34,6 +34,7 @@ from active_curriculum_v1 import active_learning_targets, deprioritise_syntactic
 from capability_report_v1 import build_capability_report
 from sequence_model_v1 import train_and_evaluate as train_sequence_model
 from event_structure_v1 import (SELECTION_ALPHA, classify_trend, passes_gain_gate,
+                                retract_pre_v2_confirmation,
                                 train_and_evaluate as train_event_structure)
 from causal_lab_v30 import run_lab
 from developmental_curriculum_v32 import assess_source_quality
@@ -275,15 +276,37 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
         f"直近の読書     : {reading.get('title', '-')} → {reading.get('status', '-')} "
         f"（理解 {reading.get('comprehension')}）",
     ]
+    sva = reading_status.get("self_vs_aided", {}) or {}
+    if sva.get("self_comprehension") is not None or sva.get("aided_comprehension") is not None:
+        aided_txt = (f"／補助あり {sva.get('aided_comprehension')}"
+                     f"（{sva.get('aided_source')}・証拠0）" if sva.get("aided_comprehension") is not None
+                     else "／補助なし")
+        lines.append(f"直近の理解度    : 自力 {sva.get('self_comprehension')}{aided_txt}")
     if comp.get("comprehension_score") is not None:
         lines.append(f"理解（固定検証）: {comp.get('comprehension_score')}"
-                     f"（基準超え {comp.get('beats_baseline')}、傾向 "
+                     f"（基準超え {comp.get('beats_baseline')}、連続 {comp.get('significant_streak', 0)}、傾向 "
                      f"{TREND_JA.get(comp.get('comprehension_trend'), 'データ不足')}）")
+    elif comp.get("status"):
+        lines.append(f"理解（固定検証）: {comp.get('status')}")
     if ret.get("status") == "measured":
         lines.append(f"再話（固定検証）: 生成利得 {ret.get('generation_gain')}"
-                     f"（基準超え {ret.get('beats_baseline')}）")
+                     f"（基準超え {ret.get('beats_baseline')}、連続 {ret.get('significant_streak', 0)}）")
     elif ret.get("status"):
         lines.append(f"再話（固定検証）: {ret.get('status')}（RNN生成モデル待ち）")
+    fp = comp.get("snapshot_fingerprint") or ret.get("snapshot_fingerprint")
+    if fp:
+        lines.append(f"固定スナップショット: 理解 {comp.get('snapshot_stories')}話/{comp.get('snapshot_fingerprint')}"
+                     f"、再話 {ret.get('snapshot_stories')}話/{ret.get('snapshot_fingerprint')}"
+                     f"（方式 {comp.get('eval_regime')}、移行 "
+                     f"{bool(comp.get('snapshot_migrated') or ret.get('snapshot_migrated'))}）")
+    mig = reading_status.get("schema_migration", {}) or {}
+    if mig.get("migrated"):
+        lines.append(f"カリキュラム移行: 難易度再計算 {mig.get('books_reparsed')}冊"
+                     f"（保留 {mig.get('books_difficulty_stale')}）、"
+                     f"語彙 {mig.get('known_words_before')}→隔離 {mig.get('known_words_quarantined')}、"
+                     f"補助卒業の再評価差戻し {mig.get('graduated_returned_for_re_eval')}冊")
+    elif mig.get("schema_version"):
+        lines.append(f"カリキュラム移行: 完了済み（schema v{mig.get('schema_version')}）")
     if seq.get("held_out_bits_per_char") is not None:
         lines.append(f"日本語文字RNN  : {seq.get('held_out_bits_per_char')} bits/char"
                      f"（基準 {seq.get('baseline_bits_per_char')}、基準超え {seq.get('beats_char_baseline')}）")
@@ -1359,7 +1382,8 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "japanese_reading": report.get("japanese_reading") or {
             key: read_json(runtime / "reading-status.json").get(key) for key in
             ("cycle", "reading", "curriculum", "comprehension", "retelling", "sequence",
-             "caregiver", "caregiver_questions", "llm_scaffold_totals")},
+             "caregiver", "caregiver_questions", "llm_scaffold_totals",
+             "aided_reading", "schema_migration", "self_vs_aided")},
         "storage": read_json(runtime / "storage-status.json"),
         "global_memory": report.get("global_memory") or read_json(
             runtime / "global-language-memory.json").get("totals", {}),
@@ -1719,7 +1743,8 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                 report["japanese_reading"] = {k: reading_status.get(k) for k in
                                               ("cycle", "books_fetched", "reading", "level_advance",
                                                "curriculum", "comprehension", "retelling", "sequence",
-                                               "caregiver", "caregiver_questions", "llm_scaffold_totals")}
+                                               "caregiver", "caregiver_questions", "llm_scaffold_totals",
+                                               "aided_reading", "schema_migration", "self_vs_aided")}
             except Exception as reading_error:  # isolate the parallel loop
                 report["japanese_reading"] = {"error": f"{type(reading_error).__name__}: {reading_error}"}
         if report.get("autonomy", {}).get("mode") == "capability_plateau":
@@ -1873,6 +1898,28 @@ def supervise(seed: str, runtime: Path, max_rounds: int, interval: float,
     """Keep autonomous work alive unless STOP is explicitly requested."""
     stop_path = runtime / "STOP"
     retry_count = 0
+
+    # one-time: retract any pre-snapshot / pre-collection-sign "confirmed gain"
+    # left on disk (the English pipeline can be parked for a long time, so this
+    # cannot wait for the next train_and_evaluate). Idempotent.
+    esp = runtime / "event-structure.json"
+    _es_prev = read_json(esp)
+    if _es_prev:
+        _es_migrated, _es_event = retract_pre_v2_confirmation(_es_prev)
+        if _es_event:
+            write_json(esp, _es_migrated)
+            # the derived capability dashboard still shows the retracted "確定" --
+            # rebuild it from the retracted event_structure so no stale
+            # confirmed_on_final_split survives on disk.
+            _crp = runtime / "capability-report.json"
+            _cr_prev = read_json(_crp)
+            if _cr_prev:
+                write_json(_crp, build_capability_report(
+                    _es_migrated,
+                    read_json(runtime / "verified-experience.json").get("summary", {}),
+                    read_json(runtime / "experience-revision.json"),
+                    _cr_prev,
+                    read_json(runtime / "sequence-model.json")))
     while True:
         try:
             result = work(seed, runtime, max_rounds, interval, steps, seconds, network,

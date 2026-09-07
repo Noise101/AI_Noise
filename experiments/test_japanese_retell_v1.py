@@ -112,15 +112,54 @@ class RetellTest(unittest.TestCase):
         self.assertIsNone(report["roundtrip_fidelity"])
         self.assertFalse(report["beats_baseline"])
 
-    def test_free_retell_is_a_noop_without_a_trained_rnn_state(self):
-        self.assertEqual(jr.free_retell(None, "むかしむかし"), "")
-        self.assertEqual(jr.free_retell({}, "むかしむかし"), "")
+    def test_the_held_out_test_set_is_a_frozen_snapshot(self):
+        first = jr.evaluate_retelling(folktale_stories(140), {})
+        fp = first["snapshot_fingerprint"]
+        n_test = first["test_stories"]
+        grown = folktale_stories(140) + folktale_stories(120, seed=7)
+        second = jr.evaluate_retelling(grown, first)
+        self.assertEqual(second["snapshot_fingerprint"], fp)     # unchanged
+        self.assertEqual(second["test_stories"], n_test)          # did not grow
+        self.assertGreater(second["train_stories"], first["train_stories"])  # training grew
 
-    def test_free_retell_generates_japanese_from_a_state(self):
+    def test_retelling_capability_baseline_has_the_same_information(self):
+        # the baseline is the SAME generator on a SHUFFLED event representation --
+        # identical (subject, verb, object) info, ordering removed
         import japanese_sequence_v1 as js
-        model = js.TinyRNN(sorted("むかしあおじいさんやまへ行きました。犬が"))
-        text = jr.free_retell(model.state(), "むかし", length=30)
-        self.assertEqual(len(text), 30)
+        stories = folktale_stories(140)
+        state = js.TinyRNN(sorted("むかしきつねうさぎぶどうをみつけるとるたべるなく。")).state()
+        report = jr.evaluate_retelling(stories, {}, rnn_state=state)
+        self.assertEqual(report["status"], "measured")
+        self.assertIn("generation_gain", report)
+        self.assertFalse(report["beats_baseline"])      # untrained RNN -> honest fail
+
+    def test_re_measuring_the_same_snapshot_twice_is_not_a_replication(self):
+        import japanese_sequence_v1 as js
+        stories = folktale_stories(140)
+        state = js.TinyRNN(sorted("むかしきつねうさぎぶどうみつけるたべる。" * 3)).state()
+        r1 = jr.evaluate_retelling(stories, {}, rnn_state=state)
+        r2 = jr.evaluate_retelling(stories, r1, rnn_state=state)   # same data
+        self.assertLessEqual(r2["significant_streak"], max(1, r1["significant_streak"]))
+
+    _EVENTS = [{"subject": "きつね", "verb": "みつける", "obj": "ぶどう"},
+               {"subject": "きつね", "verb": "たべる", "obj": ""}]
+
+    def test_free_retell_is_a_noop_without_a_trained_rnn_state_or_events(self):
+        import japanese_sequence_v1 as js
+        self.assertEqual(jr.free_retell(None, self._EVENTS), "")
+        self.assertEqual(jr.free_retell({}, self._EVENTS), "")
+        state = js.TinyRNN(sorted("むかしきつねぶどうをみつけるたべる。")).state()
+        self.assertEqual(jr.free_retell(state, []), "")
+
+    def test_free_retell_is_conditioned_on_events_not_the_gold_text(self):
+        import japanese_sequence_v1 as js
+        state = js.TinyRNN(sorted("むかしきつねぶどうをみつけるたべるなく。")).state()
+        text = jr.free_retell(state, self._EVENTS)
+        self.assertTrue(text)
+        # the generator only ever sees subject/verb/object -- not any sentence
+        self.assertNotIn("gold", str(self._EVENTS))
+        # deterministic for the same event sequence
+        self.assertEqual(text, jr.free_retell(state, self._EVENTS))
 
     def test_held_out_split_is_deterministic_and_disjoint(self):
         stories = folktale_stories()

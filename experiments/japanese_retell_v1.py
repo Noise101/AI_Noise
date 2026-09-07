@@ -277,94 +277,141 @@ def score_retelling(original_events: list[dict], retold_text: str) -> dict:
 
 
 # --- frozen-benchmark capability measurement ---------------------------
+EVAL_REGIME = "event_conditioned_generation_v1"
+SIGNIFICANT_TRAIN_GROWTH = 1.4
+
+
+def _collection(url: str) -> str:
+    base = url.split("#")[0].split("?")[0].rstrip("/")
+    parent, _, leaf = base.rpartition("/")
+    return parent if leaf and parent.count("/") >= 3 else base
+
+
 def _held_out(url: str) -> bool:
-    return int(hashlib.sha256(f"retell:{url}".encode()).hexdigest(), 16) % 5 == 0
+    """Hold out whole COLLECTIONS (an Aozora author's works share one) so a
+    source never straddles train and test.  A standalone work is its own
+    collection."""
+    return int(hashlib.sha256(f"retell:{_collection(url)}".encode()).hexdigest(), 16) % 5 == 0
+
+
+def _fingerprint(snapshot: list) -> str:
+    return hashlib.sha256("\n".join(sorted(s["url"] for s in snapshot)).encode()).hexdigest()[:16]
+
+
+def _events_seed(events: list[dict]) -> int:
+    key = "|".join(f"{e.get('subject', '')}>{e.get('verb', '')}" for e in events)
+    return int(hashlib.sha256(key.encode()).hexdigest(), 16) % (2 ** 32)
+
+
+def free_retell(rnn_state: dict | None, events: list[dict], length_per_event: int = 34) -> str:
+    """Generate a Japanese retelling conditioned ONLY on Noise's own extracted
+    event sequence.  Each event primes the character RNN with `subject が (object
+    を) verb-stem`; the RNN produces the inflection and connective tissue itself.
+    The gold sentences and any LLM rephrasing NEVER enter the prime -- only
+    (subject, verb, object, order) does."""
+    if not rnn_state or not rnn_state.get("vocab") or not events:
+        return ""
+    from japanese_sequence_v1 import TinyRNN, generate
+    model = TinyRNN(rnn_state["vocab"], rnn_state)
+    rng = random.Random(_events_seed(events))
+    out = []
+    for e in events[:12]:
+        subj = (e.get("subject") or "")[:6]
+        obj = (e.get("obj") or "")[:6]
+        stem = (e.get("verb") or "")
+        stem = stem[:-1] if len(stem) > 2 and stem[-1] in "るう" else stem
+        prime = f"{subj}が" + (f"{obj}を" if obj else "") + stem
+        out.append(generate(model, prime, length=length_per_event, rng=rng))
+    return "".join(out)
+
+
+def _event_repr(events: list[dict]) -> list[dict]:
+    """The compressed representation the generator is conditioned on: subject,
+    verb, object, order.  No sentence text."""
+    return [{"subject": e.get("subject", ""), "verb": e.get("verb", ""),
+             "obj": e.get("obj", ""), "roles": {}} for e in events]
 
 
 def evaluate_retelling(stories: list[dict], previous: dict | None = None,
                        rnn_state: dict | None = None) -> dict:
-    """stories: [{url, events}].
+    """Retelling capability = generating Japanese from Noise's own event
+    representation that, re-parsed, preserves the story's events BETTER THAN the
+    same generator given the events in a random order (the same information minus
+    ordering).  The template `retell()` round-trip is a diagnostic only.
 
-    A *retelling capability* is generating a text from what was understood that,
-    re-parsed, preserves the story's events better than chance.  `retell()` is a
-    template baseline -- serialising the very triples the re-parser then recovers
-    is a round-trip identity, not a capability, so the in-order-vs-shuffled
-    template comparison NO LONGER counts as `beats_baseline` (it was measuring
-    "can I serialise a list in order").
-
-    The real signal is `free_retell` -- a generation from the character RNN --
-    beating the shuffled-template baseline on held-out stories.  Until the RNN
-    can do that this returns `beats_baseline: False` with a documented status.
+    The held-out test set is a SNAPSHOT frozen the first time it is large enough;
+    new stories only grow training.
     """
     previous = previous or {}
-    train = [s for s in stories if not _held_out(s["url"]) and len(s.get("events", [])) >= 3]
-    test = [s for s in stories if _held_out(s["url"]) and len(s.get("events", [])) >= 3]
-    if len(train) < MIN_TRAIN_STORIES or len(test) < MIN_TEST_STORIES:
-        return {"version": 2, "status": "insufficient_stories",
-                "train_stories": len(train), "test_stories": len(test),
-                "roundtrip_fidelity": None, "generation_gain": None, "beats_baseline": False,
-                "significant_streak": 0,
-                "learning_curve": list(previous.get("learning_curve", []))}
+    snap = previous.get("test_snapshot") if previous.get("eval_regime") == EVAL_REGIME else None
+    migrated = bool(previous.get("snapshot_migrated"))   # sticky once migrated
 
-    # generation capability: the RNN retelling vs the shuffled-template baseline
-    gen_scores, base_scores = [], []
-    if rnn_state and rnn_state.get("vocab"):
-        for story in test:
-            events = story["events"]
-            opening = (events[0].get("sentence") or "むかしむかし")[:12]
-            free = free_retell(rnn_state, opening)
-            rng = random.Random(int(hashlib.sha256(story["url"].encode()).hexdigest(), 16) % (2 ** 32))
-            shuffled = events[:]
-            rng.shuffle(shuffled)
-            gen_scores.append(score_retelling(events, free)["fidelity"] if free else 0.0)
-            base_scores.append(score_retelling(events, retell(shuffled))["fidelity"])
-    gen_gain = (sum(gen_scores) / len(gen_scores) - sum(base_scores) / len(base_scores)
-                if gen_scores else None)
-
-    gains, ordered_scores, shuffled_scores = [], [], []
-    for story in test:
-        events = story["events"]
-        rng = random.Random(int(hashlib.sha256(story["url"].encode()).hexdigest(), 16) % (2 ** 32))
-        shuffled = events[:]
-        rng.shuffle(shuffled)
-        ordered = score_retelling(events, retell(events))["fidelity"]
-        scrambled = score_retelling(events, retell(shuffled))["fidelity"]
-        ordered_scores.append(ordered)
-        shuffled_scores.append(scrambled)
-        gains.append(ordered - scrambled)
-
-    # round-trip diagnostic (NOT a capability): can retell() serialise its own
-    # triples in order?  Kept for the learning curve / trend display only.
-    diag = [score_retelling(s["events"], retell(s["events"]))["fidelity"] for s in test]
-    base = []
-    for story in test:
-        rng = random.Random(int(hashlib.sha256(story["url"].encode()).hexdigest(), 16) % (2 ** 32))
-        shuf = story["events"][:]
-        rng.shuffle(shuf)
-        base.append(score_retelling(story["events"], retell(shuf))["fidelity"])
-    n = len(diag)
-    mean_ordered, mean_shuffled = sum(diag) / n, sum(base) / n
-
-    # the actual capability: RNN generation beats the shuffled-template baseline
-    if gen_gain is None:
-        status, beats, streak = "no_generation_model", False, 0
-        z = 0.0
+    if snap:
+        test = [{"url": s["url"], "events": s["events"]} for s in snap]
     else:
-        gains = [g - b for g, b in zip(gen_scores, base_scores)]
-        mean_gain = sum(gains) / len(gains)
-        var = sum((g - mean_gain) ** 2 for g in gains) / max(1, len(gains) - 1)
-        se = math.sqrt(var / len(gains)) if var > 0 else 0.0
-        z = mean_gain / se if se > 0 else (99.0 if mean_gain > 0 else 0.0)
-        significant = z >= SIGNIFICANCE_Z and len(gains) >= MIN_TEST_STORIES
-        streak = previous.get("significant_streak", 0) + 1 if significant else 0
-        beats = significant and (previous.get("beats_baseline_significant")
-                                 or previous.get("significant_streak", 0) >= 1)
-        status = "measured"
+        train0 = [s for s in stories if not _held_out(s["url"]) and len(s.get("events", [])) >= 3]
+        cand = [s for s in stories if _held_out(s["url"]) and len(s.get("events", [])) >= 3]
+        if len(train0) < MIN_TRAIN_STORIES or len(cand) < MIN_TEST_STORIES:
+            return {"version": 3, "status": "insufficient_stories", "eval_regime": EVAL_REGIME,
+                    "train_stories": len(train0), "test_stories": len(cand),
+                    "roundtrip_fidelity": None, "generation_gain": None, "beats_baseline": False,
+                    "significant_streak": 0,
+                    "learning_curve": list(previous.get("learning_curve", []))}
+        test = [{"url": s["url"], "events": s["events"]} for s in cand]
+        snap = test
+        migrated = migrated or bool(previous)
+
+    held_cols = {_collection(s["url"]) for s in snap}
+    train = [s for s in stories if _collection(s["url"]) not in held_cols
+             and len(s.get("events", [])) >= 3]
+    n = len(test)
+
+    # round-trip diagnostic (NOT a capability)
+    diag, tmpl_base = [], []
+    for s in test:
+        ev = s["events"]
+        rng = random.Random(_events_seed(ev))
+        shuf = ev[:]
+        rng.shuffle(shuf)
+        diag.append(score_retelling(ev, retell(ev))["fidelity"])
+        tmpl_base.append(score_retelling(ev, retell(shuf))["fidelity"])
+    mean_ordered = sum(diag) / n
+    mean_tmpl_shuffled = sum(tmpl_base) / n
+
+    # the capability: the generator conditioned on the ORDERED event repr vs the
+    # SAME generator conditioned on a shuffled repr (identical information content)
+    gen_gain = z = None
+    gen_scores, gen_base = [], []
+    if rnn_state and rnn_state.get("vocab"):
+        for s in test:
+            repr_ = _event_repr(s["events"])
+            rng = random.Random(_events_seed(s["events"]))
+            shuffled_repr = repr_[:]
+            rng.shuffle(shuffled_repr)
+            ordered_text = free_retell(rnn_state, repr_)
+            shuffled_text = free_retell(rnn_state, shuffled_repr)
+            gen_scores.append(score_retelling(s["events"], ordered_text)["fidelity"] if ordered_text else 0.0)
+            gen_base.append(score_retelling(s["events"], shuffled_text)["fidelity"] if shuffled_text else 0.0)
+        gains = [a - b for a, b in zip(gen_scores, gen_base)]
+        gen_gain = sum(gains) / n
+        var = sum((g - gen_gain) ** 2 for g in gains) / max(1, n - 1)
+        se = math.sqrt(var / n) if var > 0 else 0.0
+        z = gen_gain / se if se > 0 else (99.0 if gen_gain > 0 else 0.0)
+
+    if z is None:
+        status, significant = "no_generation_model", False
+    else:
+        status, significant = "measured", (z >= SIGNIFICANCE_Z and n >= MIN_TEST_STORIES)
+    last_sig_train = previous.get("last_significant_train", 0)
+    grew = len(train) >= last_sig_train * SIGNIFICANT_TRAIN_GROWTH
+    streak = ((previous.get("significant_streak", 0) + 1) if (significant and grew)
+              else previous.get("significant_streak", 0) if significant else 0)
+    beats = significant and streak >= 2
 
     curve = list(previous.get("learning_curve", []))
     point = {"train_stories": len(train), "roundtrip_fidelity": round(mean_ordered, 3),
              "generation_gain": None if gen_gain is None else round(gen_gain, 3),
-             "gain_z": round(z, 2)}
+             "gain_z": None if z is None else round(z, 2)}
     if not curve or curve[-1]["train_stories"] != len(train):
         curve.append(point)
     curve = curve[-200:]
@@ -376,33 +423,25 @@ def evaluate_retelling(stories: list[dict], previous: dict | None = None,
         trend = "improving" if newer > older + 0.01 else "declining" if newer < older - 0.01 else "flat"
 
     return {
-        "version": 2, "status": status,
+        "version": 3, "status": status, "eval_regime": EVAL_REGIME,
+        "snapshot_migrated": migrated,
         "train_stories": len(train), "test_stories": n,
+        "snapshot_stories": len(snap), "snapshot_fingerprint": _fingerprint(snap),
+        "test_snapshot": snap,
         "roundtrip_fidelity": round(mean_ordered, 3),          # diagnostic, not capability
-        "roundtrip_shuffled": round(mean_shuffled, 3),
+        "roundtrip_template_shuffled": round(mean_tmpl_shuffled, 3),
         "generation_gain": None if gen_gain is None else round(gen_gain, 3),
-        "gain_z": round(z, 2),
-        "beats_baseline_significant": status == "measured" and streak > 0,
+        "gain_z": None if z is None else round(z, 2),
+        "beats_baseline_significant": significant,
         "beats_baseline": beats,
         "significant_streak": streak,
+        "last_significant_train": len(train) if significant else last_sig_train,
         "learning_curve": curve, "retelling_trend": trend,
-        "limitations": ["the in-order-vs-shuffled TEMPLATE comparison is a round-trip "
-                        "identity, not a capability, and no longer earns credit.  Credit "
-                        "requires a free-generation retelling (RNN) to beat the shuffled "
-                        "template on held-out stories, twice."],
+        "limitations": ["capability = the event-conditioned generator beating the "
+                        "SAME generator on a shuffled event representation, on the "
+                        "FROZEN snapshot, at two different training sizes.  The "
+                        "template round-trip is a diagnostic and earns nothing."],
     }
-
-
-def free_retell(rnn_state: dict | None, opening: str, length: int = 180) -> str:
-    """A free-generation retelling from the Japanese character RNN
-    (japanese_sequence_v1), primed on the story's opening.  Scored with the
-    same score_retelling; for a long time this will preserve almost no events
-    -- that is the point (generate badly, be corrected)."""
-    if not rnn_state or not rnn_state.get("vocab"):
-        return ""
-    from japanese_sequence_v1 import TinyRNN, generate
-    model = TinyRNN(rnn_state["vocab"], rnn_state)
-    return generate(model, opening or "むかしむかし", length=length)
 
 
 def main() -> None:

@@ -239,6 +239,104 @@ def register_books(curriculum: dict, books: list[dict], cycle: int) -> int:
     return added
 
 
+CURRICULUM_SCHEMA_VERSION = 2
+
+
+def migrate_reading_state(curriculum: dict, events_store: dict, extract) -> dict:
+    """Idempotent migration to the evidence-isolated schema:
+
+    * every shelf book's `difficulty` is recomputed from its HEURISTIC events
+      (coverage over event tokens, not particle-glued WORD runs); a book whose
+      text will not parse is marked `difficulty_stale`.
+    * `known_words` is rebuilt from those events -- `book_ids` are the DISTINCT
+      books a token was seen in, `books = len(book_ids)`; use/explained tiers and
+      first_cycle are preserved.  Legacy `books` values inflated by re-reads are
+      discarded.
+    * a `graduated` book that was read with an evidence-0 aid (LLM scaffold, or a
+      heuristic parse now too thin to have scored it) goes back to `in_rotation`
+      as `graduated_via_aid` / `re_eval_pending` -- history kept, level untouched.
+
+    Running it twice is a no-op.
+    """
+    if curriculum.get("curriculum_schema_version", 0) >= CURRICULUM_SCHEMA_VERSION:
+        return {"migrated": False}
+
+    # --- 1. re-extract every book's heuristic events ---
+    reparsed = difficulty_stale = 0
+    per_book_tokens: dict[str, set] = {}
+    per_book_events: dict[str, list] = {}
+    for bid, b in curriculum["shelf"].items():
+        text = b.get("text") or ""
+        evs = extract(text) if text else []
+        per_book_events[bid] = evs
+        if len(evs) >= 3:
+            events_store[bid] = evs
+        per_book_tokens[bid] = {t for e in evs
+                                for t in (e.get("subject"), e.get("obj"), e.get("verb")) if t}
+
+    # --- 2. rebuild known_words: keep the EXISTING vocabulary, fix its inflated
+    # book counts.  For every word already claimed as known, book_ids become the
+    # DISTINCT re-parsed books it actually appears in; a word found in no book is
+    # quarantined (books=0, books_unverified) rather than trusted at its legacy
+    # count.  The re-parse never MINTS new vocabulary -- that only happens through
+    # record_reading's coverage/repeat gate. ---
+    old = curriculum.get("known_words", {})
+    token_books: dict[str, list] = {}
+    for bid, toks in per_book_tokens.items():
+        for tok in toks:
+            token_books.setdefault(tok, []).append(bid)
+    fresh: dict = {}
+    quarantined = 0
+    for tok, prev in old.items():
+        book_ids = sorted(set(token_books.get(tok, [])))
+        entry = {k: prev[k] for k in ("use_tested", "used", "explained",
+                                      "used_cycle", "explained_cycle", "first_cycle")
+                 if k in prev}
+        entry["book_ids"] = book_ids
+        entry["books"] = len(book_ids)
+        if not book_ids:
+            entry["books_unverified"] = True
+            quarantined += 1
+        fresh[tok] = entry
+    words_before, words_after = len(old), len(fresh)
+    curriculum["known_words"] = fresh
+    known = _known_set(curriculum)
+
+    # --- 3. recompute difficulty from those events, against the fresh known set ---
+    for bid, b in curriculum["shelf"].items():
+        evs = per_book_events[bid]
+        b["difficulty"] = text_difficulty(b.get("text") or "", len(evs), known,
+                                          events=evs or None)
+        b["estimated_level"] = b["difficulty"]["estimated_level"]
+        if not evs:
+            b["difficulty_stale"] = True
+            difficulty_stale += 1
+        else:
+            b.pop("difficulty_stale", None)
+            reparsed += 1
+
+    # --- 4. audit graduated books ---
+    re_eval = 0
+    for bid, b in curriculum["shelf"].items():
+        if b.get("status") != "graduated":
+            continue
+        aided = b.get("scaffolded") or len([e for e in events_store.get(bid, [])
+                                            if e.get("verb")]) < 3
+        if aided:
+            b["status"] = "in_rotation"
+            b["graduated_via_aid"] = True
+            b["re_eval_pending"] = True
+            b.setdefault("shelved_at_level", None)
+            re_eval += 1
+
+    curriculum["curriculum_schema_version"] = CURRICULUM_SCHEMA_VERSION
+    return {"migrated": True, "books_reparsed": reparsed,
+            "books_difficulty_stale": difficulty_stale,
+            "known_words_before": words_before, "known_words_after": words_after,
+            "known_words_quarantined": quarantined,
+            "graduated_returned_for_re_eval": re_eval}
+
+
 def reevaluate_stale_parses(curriculum: dict) -> list[str]:
     """A book set aside as unparsable / shelved_stuck under an older extractor
     (`select_next_book` only ever un-shelves `shelved_above_level`).  When the
@@ -381,7 +479,10 @@ def record_reading(curriculum: dict, book_id: str, events: list[dict],
     if score >= GRADUATE_COMPREHENSION:
         book["status"] = "graduated"
         book["graduated_cycle"] = cycle
-        curriculum["graduated_since_advance"] = curriculum.get("graduated_since_advance", 0) + 1
+        if book.pop("re_eval_pending", None):
+            book.pop("graduated_via_aid", None)      # re-confirmed on heuristic events
+        else:
+            curriculum["graduated_since_advance"] = curriculum.get("graduated_since_advance", 0) + 1
         outcome = "graduated"
     elif book["times_read"] >= MAX_REREADS and (
             len(history) < 3 or history[-1] <= max(history[:-1]) + 0.02):

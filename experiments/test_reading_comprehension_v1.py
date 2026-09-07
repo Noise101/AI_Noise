@@ -1,5 +1,6 @@
 import random
 import unittest
+from collections import Counter
 
 import reading_comprehension_v1 as rcp
 
@@ -33,16 +34,24 @@ def unstructured_stories(n=120, seed=2):
 
 class ReadingComprehensionTest(unittest.TestCase):
     def test_structured_stories_beat_the_frequency_baseline_significantly(self):
-        report = rcp.evaluate_comprehension(structured_stories(), {})
+        report = rcp.evaluate_comprehension(structured_stories(n=120), {})
         self.assertEqual(report["status"], "measured")
         self.assertGreater(report["consequence"], report["consequence_baseline"])
         self.assertGreater(report["consequence_z"], rcp.SIGNIFICANCE_Z)
         self.assertTrue(report["beats_baseline_significant"])
-        # "beats_baseline" needs it to hold for two consecutive measurements
         self.assertFalse(report["beats_baseline"])
-        second = rcp.evaluate_comprehension(structured_stories(), report)
+        fp1 = report["snapshot_fingerprint"]
+        # re-measuring the SAME frozen snapshot with no training growth is NOT
+        # an independent replication -- the streak does not advance
+        same = rcp.evaluate_comprehension(structured_stories(n=120), report)
+        self.assertEqual(same["snapshot_fingerprint"], fp1)   # snapshot frozen
+        self.assertFalse(same["beats_baseline"])
+        # a second measurement at a LARGER training size does count
+        grown = structured_stories(n=120) + structured_stories(n=80, seed=9)
+        second = rcp.evaluate_comprehension(grown, same)
+        self.assertEqual(second["snapshot_fingerprint"], fp1)   # still frozen
         self.assertTrue(second["beats_baseline"])
-        self.assertEqual(second["significant_streak"], 2)
+        self.assertGreaterEqual(second["significant_streak"], 2)
 
     def test_unstructured_stories_do_not_beat_the_baseline(self):
         report = rcp.evaluate_comprehension(unstructured_stories(), {})
@@ -92,19 +101,56 @@ class ReadingComprehensionTest(unittest.TestCase):
         result = rcp.book_comprehension(events, model, set())
         self.assertGreaterEqual(result["tests"]["ordering"], 0.75)
 
-    def test_vocabulary_use_test_masks_the_target_and_needs_a_cooccurrence_table(self):
+    def _vocab_setup(self):
         stories = structured_stories(n=40)
         model = rcp.ComprehensionModel().fit([s["events"] for s in stories])
         cooc = rcp.build_cooccurrence(stories)
-        sentences = ["きつねはぶどうをみつけました。", "きつねはぶどうがほしくなりました。"]
-        # no table -> not tested (the leaky "word in sentence" scorer is gone)
-        self.assertFalse(rcp.vocabulary_use_test("ぶどう", sentences,
-                                                 ["いし", "くも", "かぜ"], model)["tested"])
-        result = rcp.vocabulary_use_test("ぶどう", sentences, ["いし", "くも", "かぜ"],
-                                         model, cooccurrence=cooc)
-        self.assertTrue(result["tested"])
-        # ぶどう co-occurs with きつね / みつける in training, the distractors do not
-        self.assertGreaterEqual(result["cloze_rate"], 0.5)
+        target_events = [{"subject": "きつね", "obj": "ぶどう", "verb": "みつける",
+                          "sentence": "きつねがぶどうをみつけました。"},
+                         {"subject": "きつね", "obj": "ぶどう", "verb": "ほしくなる",
+                          "sentence": "きつねはぶどうがほしくなりました。"}]
+        return model, cooc, target_events
+
+    def test_vocabulary_use_test_passes_only_with_positive_context_evidence(self):
+        model, cooc, events = self._vocab_setup()
+        good = rcp.vocabulary_use_test("ぶどう", events, ["いし", "くも", "かぜ"], model,
+                                       cooccurrence=cooc, url="u")
+        self.assertTrue(good["tested"])
+        self.assertGreaterEqual(good["cloze_rate"], 0.5)
+
+    def test_vocabulary_use_test_fails_when_all_candidates_have_no_evidence(self):
+        model, cooc, events = self._vocab_setup()
+        # a target the co-occurrence table has never seen -> no positive evidence
+        blind = rcp.vocabulary_use_test("たからばこ",
+            [{"subject": "たからばこ", "obj": "ぶどう", "verb": "みつける",
+              "sentence": "たからばこがぶどうをみつけました。"}] * 3,
+            ["いし", "くも"], model, cooccurrence=cooc, url="u")
+        self.assertEqual(blind["cloze_rate"], 0.0)
+
+    def test_vocabulary_use_test_is_order_independent(self):
+        model, cooc, events = self._vocab_setup()
+        a = rcp.vocabulary_use_test("ぶどう", events, ["いし", "くも", "かぜ"], model,
+                                    cooccurrence=cooc, url="u")
+        b = rcp.vocabulary_use_test("ぶどう", events, ["かぜ", "くも", "いし"], model,
+                                    cooccurrence=cooc, url="u")
+        self.assertEqual(a["cloze_rate"], b["cloze_rate"])
+
+    def test_vocabulary_use_test_target_in_sentence_alone_is_not_a_pass(self):
+        model, _cooc, _ = self._vocab_setup()
+        empty_cooc = {}
+        r = rcp.vocabulary_use_test("ぶどう",
+            [{"subject": "きつね", "obj": "ぶどう", "verb": "みつける",
+              "sentence": "きつねがぶどうをみつけました。"}] * 3,
+            ["いし", "くも"], model, cooccurrence=empty_cooc, url="u")
+        self.assertFalse(r["tested"])
+
+    def test_vocabulary_use_test_fails_on_a_tie_with_a_distractor(self):
+        model, _c, events = self._vocab_setup()
+        # a table where the target and a distractor co-occur equally with context
+        tie = {"ぶどう": Counter({"きつね": 1}), "いし": Counter({"きつね": 1})}
+        r = rcp.vocabulary_use_test("ぶどう", events, ["いし", "くも"], model,
+                                    cooccurrence=tie, url="u")
+        self.assertEqual(r["cloze_rate"], 0.0)   # strict > required
 
     def test_cooccurrence_is_word_by_context_word_from_events(self):
         stories = [{"url": "u", "events": [{"subject": "きつね", "obj": "ぶどう",
