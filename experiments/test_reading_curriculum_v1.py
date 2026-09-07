@@ -18,8 +18,14 @@ HARDER = ("これは私が小さいときに村の茂平というおじいさん
           "むかしは私たちの村のちかくの中山というところに小さなお城があって、"
           "中山さまというおとのさまがおられたそうです。")
 
-GOOD_EVENTS = [{"subject": "きつね", "verb": v, "obj": "", "confidence": 0.9}
+GOOD_EVENTS = [{"subject": "きつね", "verb": v, "obj": "", "confidence": 0.9,
+                "provenance": "heuristic_self"}
                for v in ("見つける", "とびあがる", "言う", "帰る")]
+
+
+def _self(events):
+    """Stamp a list of test events as Noise's own heuristic parse."""
+    return [{**e, "provenance": "heuristic_self"} for e in events]
 
 
 class ReadingCurriculumTest(unittest.TestCase):
@@ -43,22 +49,34 @@ class ReadingCurriculumTest(unittest.TestCase):
         self.assertEqual(out["status"], "graduated")
         self.assertEqual(cur["shelf"][bid]["status"], "graduated")
 
-    def test_record_reading_ignores_non_heuristic_events(self):
-        # a teacher / LLM event that somehow reaches record_reading must not
-        # become vocabulary or schema -- only heuristic_self events count
+    def test_record_reading_is_fail_closed_on_provenance(self):
+        # only events EXPLICITLY stamped heuristic_self become vocabulary / schema:
+        # a teacher event AND an unstamped (unknown-provenance) event are both dropped
         cur = rc.empty_curriculum()
         rc.register_books(cur, [book("A", "a", SIMPLE)], cycle=1)
         bid = rc.select_next_book(cur)
         mixed = ([{"subject": "きつね", "verb": v, "obj": "ぶどう",
                    "provenance": "heuristic_self"} for v in ("みつける", "とる", "たべる")]
                  + [{"subject": "ようせい", "verb": "たすける", "obj": "きつね",
-                     "provenance": "morphological_teacher"}])
+                     "provenance": "morphological_teacher"},
+                    {"subject": "だれか", "verb": "あるく", "obj": ""}])   # NO provenance
         rc.record_reading(cur, bid, mixed, cycle=2, comprehension=0.5)
         self.assertIn("きつね", cur["known_words"])
         self.assertIn("ぶどう", cur["known_words"])
-        self.assertNotIn("ようせい", cur["known_words"])     # teacher-only token: not learned
+        self.assertNotIn("ようせい", cur["known_words"])     # teacher token
         self.assertNotIn("たすける", cur["known_words"])
-        self.assertNotIn("たすける", cur["shelf"][bid].get("schema", []))
+        self.assertNotIn("だれか", cur["known_words"])        # unstamped -> not promoted
+        self.assertNotIn("あるく", cur["known_words"])
+        self.assertEqual(set(cur["shelf"][bid].get("schema", [])), {"みつける", "とる", "たべる"})
+
+    def test_all_unstamped_events_do_not_graduate_a_book(self):
+        cur = rc.empty_curriculum()
+        rc.register_books(cur, [book("A", "a", SIMPLE)], cycle=1)
+        bid = rc.select_next_book(cur)
+        unstamped = [{"subject": "きつね", "verb": v, "obj": ""} for v in ("みつける", "とる", "たべる", "なく")]
+        out = rc.record_reading(cur, bid, unstamped, cycle=2, comprehension=0.95)
+        self.assertEqual(out["status"], "unparsable")           # < 3 heuristic_self events
+        self.assertNotEqual(cur["shelf"][bid]["status"], "graduated")
 
     def test_cold_start_proxy_rewards_a_coherent_parse(self):
         clean = [{"subject": "きつね", "verb": v, "obj": "", "confidence": 0.9}
@@ -137,8 +155,8 @@ class ReadingCurriculumTest(unittest.TestCase):
                               "ぶどう": {"books": 12, "used": True, "use_tested": True},
                               "ようせい": {"books": 8, "first_cycle": 2}}
         store = {}
-        events = {a: [{"subject": "きつね", "verb": "みつける", "obj": "ぶどう"}] * 4,
-                  b: [{"subject": "おじいさん", "verb": "行く", "obj": ""}] * 4}
+        events = {a: _self([{"subject": "きつね", "verb": "みつける", "obj": "ぶどう"}] * 4),
+                  b: _self([{"subject": "おじいさん", "verb": "行く", "obj": ""}] * 4)}
 
         def fake_extract(text):
             if "きつね" in text or text == SIMPLE:
@@ -189,14 +207,14 @@ class ReadingCurriculumTest(unittest.TestCase):
             "きつね": {"books": 2, "book_ids": [rid, uid], "first_cycle": 1},  # some unread support
             "ようせい": {"books": 1, "book_ids": [uid], "first_cycle": 1},      # ONLY unread support
         }
-        store = {rid: [{"subject": "きつね", "verb": "みつける", "obj": ""}],
-                 uid: [{"subject": "ようせい", "verb": "でる", "obj": ""}]}
+        store = {rid: _self([{"subject": "きつね", "verb": "みつける", "obj": ""}]),
+                 uid: _self([{"subject": "ようせい", "verb": "でる", "obj": ""}])}
 
         def fake_extract(text):
             if text == SIMPLE:
-                return [{"subject": "きつね", "verb": "みつける", "obj": ""}] * 4
-            return [{"subject": "きつね", "verb": "にげる", "obj": ""},
-                    {"subject": "ようせい", "verb": "あらわれる", "obj": ""}] * 2
+                return _self([{"subject": "きつね", "verb": "みつける", "obj": ""}] * 4)
+            return _self([{"subject": "きつね", "verb": "にげる", "obj": ""},
+                          {"subject": "ようせい", "verb": "あらわれる", "obj": ""}] * 2)
 
         self.assertTrue(rc.book_was_read(cur["shelf"][rid]))
         self.assertFalse(rc.book_was_read(cur["shelf"][uid]))

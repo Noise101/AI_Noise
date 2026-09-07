@@ -239,7 +239,21 @@ def register_books(curriculum: dict, books: list[dict], cycle: int) -> int:
     return added
 
 
-CURRICULUM_SCHEMA_VERSION = 3
+CURRICULUM_SCHEMA_VERSION = 4
+
+# fail-closed provenance: an event is Noise's own experience ONLY if it carries
+# an explicit `heuristic_self` stamp.  A missing / unknown / teacher / LLM /
+# caregiver provenance is never promoted to a learning signal.
+HEURISTIC_SELF = "heuristic_self"
+PROVENANCE_POLICY = "fail_closed_heuristic_self_v1"
+
+
+def heuristic_self_only(events: list) -> list:
+    return [e for e in events if isinstance(e, dict) and e.get("provenance") == HEURISTIC_SELF]
+
+
+def non_self_events(events: list) -> list:
+    return [e for e in events if not (isinstance(e, dict) and e.get("provenance") == HEURISTIC_SELF)]
 
 
 def book_was_read(b: dict) -> bool:
@@ -293,21 +307,30 @@ def migrate_reading_state(curriculum: dict, events_store: dict, extract) -> dict
         read_ids = {bid for bid, b in shelf.items() if book_was_read(b)}
     unread_ids = set(shelf) - read_ids
 
-    # --- 1. re-extract every book (difficulty needs it) but only READ books feed
-    # the shared events store and the vocabulary evidence. ---
+    # --- 1. RE-DERIVE every read book's events with Noise's own heuristic parser
+    # (v4: fail-closed provenance).  The shared store keeps ONLY events that come
+    # back explicitly stamped `heuristic_self`; a book whose text cannot be
+    # re-parsed to >= 3 such events is quarantined out of the store entirely.
+    # By-value-unknown legacy entries are NOT rewritten to heuristic_self -- they
+    # are regenerated from the source text or dropped. ---
     reparsed = difficulty_stale = 0
+    provenance_quarantined_books = provenance_quarantined_events = 0
     per_book_tokens: dict[str, set] = {}
     per_book_events: dict[str, list] = {}
     for bid, b in shelf.items():
         text = b.get("text") or ""
-        evs = extract(text) if text else []
-        per_book_events[bid] = evs
-        if bid in read_ids and len(evs) >= 3:
-            events_store[bid] = evs
-            per_book_tokens[bid] = {t for e in evs
+        evs = extract(text) if text else []                 # extract() stamps heuristic_self
+        self_evs = heuristic_self_only(evs)
+        provenance_quarantined_events += len(evs) - len(self_evs)
+        per_book_events[bid] = self_evs
+        if bid in read_ids and len(self_evs) >= 3:
+            events_store[bid] = self_evs
+            per_book_tokens[bid] = {t for e in self_evs
                                     for t in (e.get("subject"), e.get("obj"), e.get("verb")) if t}
         else:
-            events_store.pop(bid, None)          # an unread book leaves the shared store
+            if bid in read_ids and events_store.get(bid):
+                provenance_quarantined_books += 1
+            events_store.pop(bid, None)          # unread, or un-reparseable as heuristic_self
 
     # --- 2. rebuild known_words from READ books only.  Keep the existing
     # vocabulary; never mint new words here.  book_ids = distinct READ books the
@@ -340,12 +363,14 @@ def migrate_reading_state(curriculum: dict, events_store: dict, extract) -> dict
     curriculum["known_words"] = fresh
     known = _known_set(curriculum)
 
-    # --- 3. recompute difficulty from those events, against the fresh known set ---
+    # --- 3. recompute difficulty AND schema from the re-derived heuristic_self
+    # events (an old `schema` may have been built from teacher verbs). ---
     for bid, b in shelf.items():
         evs = per_book_events[bid]
         b["difficulty"] = text_difficulty(b.get("text") or "", len(evs), known,
                                           events=evs or None)
         b["estimated_level"] = b["difficulty"]["estimated_level"]
+        b["schema"] = _schema_signature([e.get("verb", "") for e in evs]) if evs else []
         if not evs:
             b["difficulty_stale"] = True
             difficulty_stale += 1
@@ -368,15 +393,22 @@ def migrate_reading_state(curriculum: dict, events_store: dict, extract) -> dict
             re_eval += 1
 
     curriculum["curriculum_schema_version"] = CURRICULUM_SCHEMA_VERSION
-    return {"migrated": True, "from_schema": have,
-            "books_read": len(read_ids), "books_unread": len(unread_ids),
-            "books_reparsed": reparsed, "books_difficulty_stale": difficulty_stale,
-            "known_words_before": words_before, "known_words_after": words_after,
-            "known_words_quarantined": quarantined,
-            "unread_book_ids_removed": book_ids_removed,
-            "known_words_zeroed_by_v3": words_zeroed,
-            "known_words_retained": words_retained,
-            "graduated_returned_for_re_eval": re_eval}
+    curriculum["provenance_policy"] = PROVENANCE_POLICY
+    audit = curriculum.setdefault("migration_audit", [])
+    result = {"migrated": True, "from_schema": have, "to_schema": CURRICULUM_SCHEMA_VERSION,
+              "provenance_policy": PROVENANCE_POLICY,
+              "books_read": len(read_ids), "books_unread": len(unread_ids),
+              "books_reparsed": reparsed, "books_difficulty_stale": difficulty_stale,
+              "provenance_quarantined_books": provenance_quarantined_books,
+              "provenance_quarantined_events": provenance_quarantined_events,
+              "known_words_before": words_before, "known_words_after": words_after,
+              "known_words_quarantined": quarantined,
+              "unread_book_ids_removed": book_ids_removed,
+              "known_words_zeroed_by_v3": words_zeroed,
+              "known_words_retained": words_retained,
+              "graduated_returned_for_re_eval": re_eval}
+    audit.append(result)
+    return result
 
 
 def reevaluate_stale_parses(curriculum: dict) -> list[str]:
@@ -477,14 +509,11 @@ def record_reading(curriculum: dict, book_id: str, events: list[dict],
     book = curriculum["shelf"].get(book_id)
     if not book:
         return {"status": "unknown_book"}
-    # defence in depth: only Noise's own heuristic events drive this record.  A
-    # teacher / LLM event that somehow reached here is dropped, not learned from.
-    events = [e for e in events if e.get("provenance", "heuristic_self") == "heuristic_self"]
-    if vocab_events is None:
-        vocab_events = events
-    else:
-        vocab_events = [e for e in vocab_events
-                        if e.get("provenance", "heuristic_self") == "heuristic_self"]
+    # fail-closed: only events with an explicit `heuristic_self` stamp drive this
+    # record.  Missing / unknown / teacher / LLM provenance is dropped, not
+    # promoted -- a future analyser that forgets to stamp cannot leak in.
+    events = heuristic_self_only(events)
+    vocab_events = heuristic_self_only(vocab_events) if vocab_events is not None else events
     from japanese_event_v1 import PARSER_VERSION
     book["parser_version"] = PARSER_VERSION       # which extractor produced this reading
     scorable = [e for e in events if e.get("verb")]

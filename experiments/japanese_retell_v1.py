@@ -34,6 +34,7 @@ import random
 import time
 from collections import Counter, defaultdict
 
+import japanese_benchmark_v1 as jb
 import japanese_event_v1 as jevent
 
 SIGNIFICANCE_Z = 3.0
@@ -286,54 +287,37 @@ def score_retelling(original_events: list[dict], retold_text: str) -> dict:
 # built from the same training corpus?  This removes the structural shortcut in
 # v1, where an outer loop generated each event and concatenated them in input
 # order (so "ordered" input always beat "shuffled" input regardless of the RNN).
-EVAL_REGIME = "narrative_order_recovery_v1"
+EVAL_REGIME = "narrative_order_recovery_v2"   # v2: tiered selection + one-shot final
+SCORING_VERSION = 2
+BASELINE_DEFINITION = "verb_position_from_training_corpus"
+BENCH_SALT = "retell:nor:v2"
 SIGNIFICANT_TRAIN_GROWTH = 1.4
-RETELL_REEVAL_MIN_STEP_GROWTH = 1.15   # RNN steps must grow this much, or ...
+RETELL_REEVAL_MIN_STEP_GROWTH = 1.15   # RNN steps must grow this much (or ...
+RETELL_REEVAL_MIN_STEP_ABS = 50_000    # ... this many absolute steps, whichever
+                                       # is larger -- a fresh RNN is not re-scored
+                                       # every 700 steps), or ...
 RETELL_REEVAL_MIN_SECONDS = 6 * 3600   # ... this long must pass, or new training
 MAX_ORDER_PAIRS = 15                   # event pairs scored per held-out story
 
 
-def _collection(url: str) -> str:
-    """Same grouping as reading_comprehension_v1._collection: a source's parts
-    (an Aozora author's files dir, a wiki collection's subpages) never straddle
-    train and test; a bare /wiki/Title page is its own collection."""
-    base = url.split("#")[0].split("?")[0].rstrip("/")
-    parts = base.split("/")
-    if len(parts[3:]) >= 3:
-        return "/".join(parts[:-1])
-    return base
+_collection = jb.collection
+_canonical_events = jb.canonical_events
+_fingerprint = jb.fingerprint
 
 
 def _held_out(url: str) -> bool:
-    """Hold out whole COLLECTIONS (an Aozora author's works share one) so a
-    source never straddles train and test.  A standalone work is its own
-    collection."""
-    return int(hashlib.sha256(f"retell:{_collection(url)}".encode()).hexdigest(), 16) % 5 == 0
+    """Legacy per-collection ~1/5 split -- the tiered benchmark uses jb.Tiers now;
+    kept for callers / tests that still reason about a single held-out set."""
+    return int(hashlib.sha256(f"retell:{jb.collection(url)}".encode()).hexdigest(), 16) % 5 == 0
 
 
-def _canonical_events(events: list) -> list:
-    """Order- and key-stable view of one story's events for fingerprinting."""
-    out = []
-    for e in events:
-        if isinstance(e, dict):
-            out.append({"subject": e.get("subject", ""), "verb": e.get("verb", ""),
-                        "obj": e.get("obj", "")})
-        else:                                    # tuple/list (subject, verb, obj, ...)
-            out.append({"subject": e[0] if len(e) > 0 else "",
-                        "verb": e[1] if len(e) > 1 else "",
-                        "obj": e[2] if len(e) > 2 else ""})
-    return out
-
-
-def _fingerprint(snapshot: list) -> str:
-    """Hash the URL *and the event content* of every snapshot story, via
-    canonical JSON -- so a snapshot whose events were changed or corrupted no
-    longer hashes the same even when the URL list is untouched."""
-    payload = json.dumps(
-        sorted(({"url": s["url"], "events": _canonical_events(s["events"])} for s in snapshot),
-               key=lambda s: s["url"]),
-        sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+def forbidden_training_collections(previous: dict | None, stories: list | None = None) -> set:
+    """Collections that must stay OUT of the RNN's training text for the
+    retelling benchmark: every non-train tier plus every frozen selection /
+    final / reserve collection."""
+    previous = previous or {}
+    prev = previous if previous.get("eval_regime") == EVAL_REGIME else {}
+    return set(jb.Tiers(stories or [], BENCH_SALT, prev).forbidden_train_collections)
 
 
 def _events_seed(events: list[dict]) -> int:
@@ -444,7 +428,8 @@ def _due_for_reeval(previous: dict, rnn_state: dict | None, train_n: int) -> boo
         cur_steps = (rnn_state or {}).get("steps_trained", 0)
         if train_n != previous.get("train_stories"):
             return True
-        if prev_steps and cur_steps >= prev_steps * RETELL_REEVAL_MIN_STEP_GROWTH:
+        step_gate = max(prev_steps * (RETELL_REEVAL_MIN_STEP_GROWTH - 1.0), RETELL_REEVAL_MIN_STEP_ABS)
+        if prev_steps and cur_steps - prev_steps >= step_gate:
             return True
         if time.time() - previous.get("evaluated_at", 0) >= RETELL_REEVAL_MIN_SECONDS:
             return True
@@ -454,113 +439,167 @@ def _due_for_reeval(previous: dict, rnn_state: dict | None, train_n: int) -> boo
     return False
 
 
-def evaluate_retelling(stories: list[dict], previous: dict | None = None,
-                       rnn_state: dict | None = None) -> dict:
-    """Capability = NARRATIVE ORDER RECOVERY on a frozen, source-disjoint
-    snapshot: the RNN-as-likelihood-model prefers the gold ordering of event
-    pairs more often than a verb-position baseline built from the same training
-    corpus.  Credited only after two independent significant measurements at
-    growing training sizes.  The template round trip is a diagnostic.
-    """
-    previous = previous or {}
-    regime_ok = previous.get("eval_regime") == EVAL_REGIME
-    # eval-regime change: DO NOT inherit the old regime's streak / confirmation
-    streak_prev = previous if regime_ok else {}
-    snap = previous.get("test_snapshot") if regime_ok else None
-    migrated = bool(previous.get("snapshot_migrated")) or (bool(previous) and not regime_ok)
+def _measure_order_recovery(test_stories: list[dict], scorer, mean_pos: dict) -> dict | None:
+    per, r_accs, b_accs = [], [], []
+    for s in test_stories:
+        got = _order_recovery(s["events"], scorer, mean_pos)
+        if got is None:
+            continue
+        r, b, _m = got
+        r_accs.append(r)
+        b_accs.append(b)
+        per.append(r - b)
+    if len(per) < MIN_TEST_STORIES:
+        return None
+    n = len(per)
+    gain = sum(per) / n
+    var = sum((g - gain) ** 2 for g in per) / max(1, n - 1)
+    se = math.sqrt(var / n) if var > 0 else 0.0
+    z = gain / se if se > 0 else (99.0 if gain > 0 else 0.0)
+    return {"n": n, "order_gain": round(gain, 4),
+            "rnn_pairwise_accuracy": round(sum(r_accs) / n, 3),
+            "position_baseline_accuracy": round(sum(b_accs) / n, 3),
+            "gain_z": round(z, 2), "significant": z >= SIGNIFICANCE_Z}
 
-    if snap:
-        test = [{"url": s["url"], "events": s["events"]} for s in snap]
-    else:
-        train0 = [s for s in stories if not _held_out(s["url"]) and len(s.get("events", [])) >= 3]
-        cand = [s for s in stories if _held_out(s["url"]) and len(s.get("events", [])) >= 3]
-        if len(train0) < MIN_TRAIN_STORIES or len(cand) < MIN_TEST_STORIES:
-            return {"version": 4, "status": "insufficient_stories", "eval_regime": EVAL_REGIME,
-                    "train_stories": len(train0), "test_stories": len(cand),
-                    "roundtrip_fidelity": None, "order_gain": None, "beats_baseline": False,
-                    "significant_streak": 0, "recomputed": True,
-                    "learning_curve": list(previous.get("learning_curve", [])) if regime_ok else []}
-        test = [{"url": s["url"], "events": s["events"]} for s in cand]
-        snap = test
-        migrated = migrated or bool(previous)
 
-    held_cols = {_collection(s["url"]) for s in snap}
-    train = [s for s in stories if _collection(s["url"]) not in held_cols
-             and len(s.get("events", [])) >= 3]
-    n = len(test)
-    fingerprint = _fingerprint(snap)
-    has_model = bool(rnn_state and rnn_state.get("vocab"))
-    cur_fp = (rnn_state or {}).get("model_fingerprint") if has_model else None
-    cur_steps = (rnn_state or {}).get("steps_trained", 0) if has_model else 0
-
-    # carry the last result forward unless the snapshot changed, the training
-    # size changed, or the RNN both changed fingerprint AND crossed a re-eval
-    # threshold.  "skipped" and "model unchanged" are reported separately.
-    same_inputs = (regime_ok and previous.get("status") in ("measured", "no_generation_model")
-                   and previous.get("train_stories") == len(train)
-                   and previous.get("snapshot_fingerprint") == fingerprint
-                   and bool(previous.get("order_gain") is not None) == has_model)
-    if same_inputs and not _due_for_reeval(previous, rnn_state, len(train)):
-        carried = dict(previous)
-        carried["snapshot_migrated"] = migrated or bool(previous.get("snapshot_migrated"))
-        carried["recomputed"] = False
-        carried["rnn_model_changed"] = cur_fp != previous.get("rnn_fingerprint")
-        carried["rnn_steps_now"] = cur_steps
-        carried["next_reeval"] = _next_reeval_hint(previous, cur_steps)
-        return carried
-
-    # round-trip diagnostic (NOT a capability): template serialisation survives
-    # its own generate -> re-parse round trip; shuffled loses the order signal.
-    diag, tmpl_base = [], []
-    for s in test:
+def _roundtrip_diag(test_stories: list[dict]) -> tuple[float, float]:
+    diag, base = [], []
+    for s in test_stories:
         ev = s["events"]
         rng = random.Random(_events_seed(ev))
         shuf = ev[:]
         rng.shuffle(shuf)
         diag.append(score_retelling(ev, retell(ev))["fidelity"])
-        tmpl_base.append(score_retelling(ev, retell(shuf))["fidelity"])
-    mean_ordered = sum(diag) / n
-    mean_tmpl_shuffled = sum(tmpl_base) / n
+        base.append(score_retelling(ev, retell(shuf))["fidelity"])
+    n = max(1, len(test_stories))
+    return sum(diag) / n, sum(base) / n
 
-    # the capability: narrative order recovery, RNN vs verb-position baseline
-    mean_pos = _position_model(train)
-    order_gain = z = rnn_acc = base_acc = None
-    if has_model:
-        scorer = _rnn_scorer(rnn_state)
-        per_story = []
-        r_accs, b_accs = [], []
-        for s in test:
-            got = _order_recovery(s["events"], scorer, mean_pos)
-            if got is None:
-                continue
-            r, b, _m = got
-            r_accs.append(r)
-            b_accs.append(b)
-            per_story.append(r - b)
-        if len(per_story) >= MIN_TEST_STORIES:
-            rnn_acc = sum(r_accs) / len(r_accs)
-            base_acc = sum(b_accs) / len(b_accs)
-            order_gain = sum(per_story) / len(per_story)
-            var = sum((g - order_gain) ** 2 for g in per_story) / max(1, len(per_story) - 1)
-            se = math.sqrt(var / len(per_story)) if var > 0 else 0.0
-            z = order_gain / se if se > 0 else (99.0 if order_gain > 0 else 0.0)
 
-    if z is None:
-        status, significant = ("no_generation_model" if not has_model else "insufficient_scorable_stories"), False
+def evaluate_retelling(stories: list[dict], previous: dict | None = None,
+                       rnn_state: dict | None = None) -> dict:
+    """Tiered NARRATIVE ORDER RECOVERY benchmark.
+
+    SELECTION (frozen once, measured when the RNN meaningfully changed):
+    diagnostic learning curve + the milestone that lets a FINAL open.  FINAL
+    (collection-disjoint from train AND selection, opened at most
+    FINAL_QUERY_BUDGET times on never-opened snapshots, model / regime / scoring
+    / baseline / threshold frozen from the selection side first): capability =
+    selection-significant AND an unopened final that also clears the threshold.
+    free_retell is display only; the template round trip is a diagnostic.
+    """
+    previous = previous or {}
+    regime_ok = previous.get("eval_regime") == EVAL_REGIME
+    prev = previous if regime_ok else {}
+    from japanese_event_v1 import PARSER_VERSION
+
+    has_model = bool(rnn_state and rnn_state.get("vocab"))
+    cur_fp = rnn_state.get("model_fingerprint") if has_model else None
+    cur_steps = rnn_state.get("steps_trained", 0) if has_model else 0
+    cur_train_regime = rnn_state.get("training_regime") if has_model else None
+
+    tiers = jb.Tiers(stories, BENCH_SALT, prev)
+    train = tiers.train_stories
+    base = {"version": 5, "eval_regime": EVAL_REGIME,
+            "regime_reset_from": previous.get("eval_regime") if (previous and not regime_ok) else None,
+            "snapshot_migrated": tiers.selection_migrated or (bool(previous) and not regime_ok),
+            **tiers.report_fields(),
+            "selection_snapshot": tiers.selection_snapshot,
+            "reserve_snapshot": tiers.reserve_snapshot,
+            "rnn_fingerprint": cur_fp, "rnn_training_regime": cur_train_regime,
+            "rnn_steps_now": cur_steps,
+            "learning_curve": list(prev.get("learning_curve", []))}
+
+    if not tiers.selection_frozen or len(train) < MIN_TRAIN_STORIES:
+        return {**base, "status": "insufficient_stories", "beats_baseline": False,
+                "order_gain": None, "roundtrip_fidelity": None, "recomputed": True,
+                "train_stories": len(train)}
+
+    mean_pos = _position_model([{"events": s["events"]} for s in train])
+
+    # ---- SELECTION (repeatable, NOT capability) ----
+    # carry the (minutes-long) pairwise pass forward unless the snapshot changed,
+    # the training size changed, or the RNN both moved fingerprint AND crossed a
+    # re-eval threshold (>=15% new steps / 6h / new training stories).
+    sel_prev = prev.get("selection")
+    sel_key = [cur_fp, tiers.selection_fingerprint, len(train)]
+    reusable = (sel_prev is not None
+                and prev.get("selection_fingerprint_at_eval") == tiers.selection_fingerprint
+                and prev.get("selection_train_stories") == len(train)
+                and not _due_for_reeval(
+                    {"rnn_fingerprint": prev.get("selection_rnn_fingerprint"),
+                     "rnn_steps_at_eval": prev.get("selection_rnn_steps_at_eval", 0),
+                     "evaluated_at": prev.get("selection_evaluated_at", 0),
+                     "train_stories": prev.get("selection_train_stories")},
+                    rnn_state, len(train)))
+    if reusable:
+        sel = sel_prev
+        sel_recomputed = False
+        sel_steps_at_eval = prev.get("selection_rnn_steps_at_eval", cur_steps)
+        sel_evaluated_at = prev.get("selection_evaluated_at", time.time())
+        rt_fid = prev.get("roundtrip_fidelity")
+        rt_shuf = prev.get("roundtrip_template_shuffled")
     else:
-        status, significant = "measured", (z >= SIGNIFICANCE_Z)
-    last_sig_train = streak_prev.get("last_significant_train", 0)
-    grew = len(train) >= last_sig_train * SIGNIFICANT_TRAIN_GROWTH
-    streak = ((streak_prev.get("significant_streak", 0) + 1) if (significant and grew)
-              else streak_prev.get("significant_streak", 0) if significant else 0)
-    beats = significant and streak >= 2
+        sel_recomputed = True
+        sel_steps_at_eval = cur_steps
+        sel_evaluated_at = time.time()
+        rt_fid, rt_shuf = _roundtrip_diag(tiers.selection_snapshot)
+        sel = (_measure_order_recovery(tiers.selection_snapshot, _rnn_scorer(rnn_state), mean_pos)
+               if has_model else None)
 
-    curve = list(streak_prev.get("learning_curve", []))
+    sel_significant = bool(sel and sel["significant"])
+    sel_measurements = prev.get("selection_measurements", 0) + (1 if sel_recomputed else 0)
+    last_sig_train = prev.get("selection_last_significant_train", 0)
+    grew = len(train) >= max(1, last_sig_train) * SIGNIFICANT_TRAIN_GROWTH
+    sel_sig_streak = ((prev.get("selection_significant_streak", 0) + 1)
+                      if (sel_significant and grew and sel_recomputed)
+                      else prev.get("selection_significant_streak", 0) if sel_significant else 0)
+
+    # ---- FINAL (one-shot capability gate) ----
+    model_fp = "|".join(str(x) for x in (cur_fp, PARSER_VERSION, SCORING_VERSION, EVAL_REGIME))
+    final_history = list(prev.get("final_history", []))
+    prev_standing = final_history[-1] if final_history else None
+    standing_stale_or_failed = bool(prev_standing and (
+        prev_standing["preconditions"].get("model_fingerprint") != model_fp
+        or not (prev_standing["result"] or {}).get("significant")))
+    can_open = (has_model and sel_significant and sel_sig_streak >= 2 and tiers.disjoint
+                and len(final_history) < jb.FINAL_QUERY_BUDGET
+                and (not final_history or standing_stale_or_failed))
+    nxt = tiers.next_unopened_final() if can_open else None
+    if nxt:
+        pre = {"model_fingerprint": model_fp, "rnn_fingerprint": cur_fp,
+               "rnn_steps_at_open": cur_steps, "rnn_training_regime": cur_train_regime,
+               "parser_version": PARSER_VERSION, "eval_regime": EVAL_REGIME,
+               "scoring_version": SCORING_VERSION, "baseline_definition": BASELINE_DEFINITION,
+               "significance_z": SIGNIFICANCE_Z, "selection_result": sel,
+               "selection_fingerprint": tiers.selection_fingerprint,
+               "final_snapshot_fingerprint": nxt["fingerprint"],
+               "final_snapshot_urls": nxt["urls"],
+               "final_query_index": len(final_history) + 1, "evaluated_at": time.time()}
+        fin = _measure_order_recovery(nxt["snapshot"], _rnn_scorer(rnn_state), mean_pos)
+        final_history = final_history + [{"tier": nxt["tier"], "fingerprint": nxt["fingerprint"],
+                                          "result": fin, "preconditions": pre}]
+        tiers.record_final(nxt)
+
+    standing = final_history[-1] if final_history else None
+    final_stale = bool(standing and standing["preconditions"].get("model_fingerprint") != model_fp)
+    beats = bool(standing and standing["result"] and standing["result"]["significant"]
+                 and sel_significant and not final_stale and tiers.disjoint)
+    if standing:
+        final_status = "opened" if not final_stale else "stale_needs_fresh_final"
+    elif not has_model:
+        final_status = "no_generation_model"
+    elif tiers.next_unopened_final():
+        final_status = "unopened"
+    else:
+        final_status = "insufficient_final_stories"
+
+    status = "measured" if has_model else "no_generation_model"
+    curve = list(prev.get("learning_curve", []))
     point = {"train_stories": len(train), "eval_regime": EVAL_REGIME,
-             "roundtrip_fidelity": round(mean_ordered, 3),
-             "order_gain": None if order_gain is None else round(order_gain, 4),
-             "gain_z": None if z is None else round(z, 2),
-             "rnn_steps": cur_steps}
+             "selection_measurement": sel_measurements, "rnn_steps": cur_steps,
+             "roundtrip_fidelity": round(rt_fid, 3) if rt_fid is not None else None,
+             "order_gain": (sel or {}).get("order_gain"),
+             "gain_z": (sel or {}).get("gain_z")}
     if not curve or curve[-1].get("train_stories") != len(train) or curve[-1].get("rnn_steps") != cur_steps:
         curve.append(point)
     curve = curve[-200:]
@@ -571,42 +610,64 @@ def evaluate_retelling(stories: list[dict], previous: dict | None = None,
         newer = sum(tail[len(tail) // 2:]) / (len(tail) - len(tail) // 2)
         trend = "improving" if newer > older + 0.005 else "declining" if newer < older - 0.005 else "flat"
 
-    now = time.time()
     return {
-        "version": 4, "status": status, "eval_regime": EVAL_REGIME,
-        "snapshot_migrated": migrated, "recomputed": True,
-        "regime_reset_from": previous.get("eval_regime") if (previous and not regime_ok) else None,
-        "train_stories": len(train), "test_stories": n,
-        "snapshot_stories": len(snap), "snapshot_fingerprint": fingerprint,
-        "test_snapshot": snap,
-        "roundtrip_fidelity": round(mean_ordered, 3),          # diagnostic, not capability
-        "roundtrip_template_shuffled": round(mean_tmpl_shuffled, 3),
-        "order_gain": None if order_gain is None else round(order_gain, 4),
-        "rnn_pairwise_accuracy": None if rnn_acc is None else round(rnn_acc, 3),
-        "position_baseline_accuracy": None if base_acc is None else round(base_acc, 3),
-        "gain_z": None if z is None else round(z, 2),
-        "beats_baseline_significant": significant,
+        **base, "status": status, "recomputed": sel_recomputed,
+        "train_stories": len(train),
+        "model_fingerprint": model_fp,
+        "rnn_model_changed": cur_fp != prev.get("rnn_fingerprint"),
+        # selection (diagnostic)
+        "selection": sel,
+        "selection_key": sel_key,
+        "selection_fingerprint_at_eval": tiers.selection_fingerprint,
+        "selection_measurements": sel_measurements,
+        "selection_significant_streak": sel_sig_streak,
+        "selection_last_significant_train": len(train) if sel_significant else last_sig_train,
+        "selection_rnn_fingerprint": cur_fp,
+        "selection_rnn_steps_at_eval": sel_steps_at_eval,
+        "selection_evaluated_at": sel_evaluated_at,
+        "selection_train_stories": len(train),
+        "rnn_steps_at_eval": sel_steps_at_eval,
+        "next_reeval": _next_reeval_hint({"rnn_steps_at_eval": sel_steps_at_eval}, cur_steps),
+        "roundtrip_fidelity": round(rt_fid, 3) if rt_fid is not None else None,
+        "roundtrip_template_shuffled": round(rt_shuf, 3) if rt_shuf is not None else None,
+        # compat fields for status renderers / tests
+        "order_gain": (sel or {}).get("order_gain"),
+        "rnn_pairwise_accuracy": (sel or {}).get("rnn_pairwise_accuracy"),
+        "position_baseline_accuracy": (sel or {}).get("position_baseline_accuracy"),
+        "gain_z": (sel or {}).get("gain_z"),
+        "beats_baseline_significant": sel_significant,
+        "test_stories": (sel or {}).get("n"),
+        "snapshot_fingerprint": tiers.selection_fingerprint,
+        "snapshot_stories": len(tiers.selection_snapshot),
+        "significant_streak": sel_sig_streak,
+        # final (one-shot capability)
+        "final_history": final_history,
+        "final_opened_count": len(final_history),
+        "final_query_budget": jb.FINAL_QUERY_BUDGET,
+        "final_status": final_status,
+        "final_result": standing["result"] if standing else None,
+        "final_stale_for_current_model": final_stale,
+        "final_preconditions": standing["preconditions"] if standing else None,
+        "capability_confirmed": beats,
         "beats_baseline": beats,
-        "significant_streak": streak,
-        "last_significant_train": len(train) if significant else last_sig_train,
-        "rnn_fingerprint": cur_fp,
-        "rnn_steps_at_eval": cur_steps,
-        "rnn_steps_now": cur_steps,
-        "rnn_model_changed": cur_fp != previous.get("rnn_fingerprint"),
-        "evaluated_at": now,
-        "next_reeval": _next_reeval_hint({"rnn_steps_at_eval": cur_steps, "evaluated_at": now}, cur_steps),
+        "capability_pending_reason": (None if beats else
+            "final not yet opened" if final_status in ("unopened", "no_generation_model", "insufficient_final_stories") else
+            "selection not significant" if not sel_significant else
+            "final below threshold" if standing and not standing["result"]["significant"] else
+            "final stale (model changed since it was opened)" if final_stale else "unknown"),
         "learning_curve": curve, "retelling_trend": trend,
-        "limitations": ["capability = the RNN-as-likelihood-model recovering gold "
-                        "event ORDER (pairwise) better than a verb-position baseline "
-                        "on the FROZEN snapshot, at two growing training sizes. "
-                        "free_retell is display only; the template round trip earns "
-                        "nothing; an untrained RNN scores ~0.5 and cannot pass."],
+        "limitations": ["capability = RNN-as-likelihood-model recovering gold event ORDER "
+                        "(pairwise, symmetric) better than a verb-position baseline, on an "
+                        "UNOPENED collection-disjoint FINAL, with model/regime/threshold "
+                        "pre-registered from the SELECTION side. free_retell is display only; "
+                        "an untrained RNN scores ~0.5 and cannot pass."],
     }
 
 
 def _next_reeval_hint(previous: dict, cur_steps: int) -> str:
-    target_steps = int(max(1, previous.get("rnn_steps_at_eval", cur_steps)) * RETELL_REEVAL_MIN_STEP_GROWTH)
-    return (f"RNN steps >= {target_steps} (now {cur_steps}), "
+    at = max(0, previous.get("rnn_steps_at_eval", cur_steps))
+    target = at + int(max(at * (RETELL_REEVAL_MIN_STEP_GROWTH - 1.0), RETELL_REEVAL_MIN_STEP_ABS))
+    return (f"RNN steps >= {target} (now {cur_steps}), "
             f"or {RETELL_REEVAL_MIN_SECONDS // 3600}h elapsed, or new training stories")
 
 

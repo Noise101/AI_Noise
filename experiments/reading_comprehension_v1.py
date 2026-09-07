@@ -28,70 +28,47 @@ import hashlib
 import json
 import math
 import random
+import time
 from collections import Counter, defaultdict
+
+import japanese_benchmark_v1 as jb
 
 SIGNIFICANCE_Z = 3.0
 MIN_TEST_STORIES = 8
 MIN_TRAIN_STORIES = 20
 
 
-EVAL_REGIME = "frozen_snapshot_v1"
-SIGNIFICANT_TRAIN_GROWTH = 1.4       # training must grow this much for another
-                                    # "independent" significant measurement to count
+EVAL_REGIME = "tiered_frozen_v1"     # selection + one-shot final (re-audit #4)
+SCORING_VERSION = 2
+BASELINE_DEFINITION = "per_story_frequency_next_verb"
+BENCH_SALT = "comprehension:tiered:v1"
+SIGNIFICANT_TRAIN_GROWTH = 1.4       # selection must stay significant across this
+                                    # much train growth before a final may open
 
 
 def _story_key(url: str) -> str:
     return hashlib.sha256(url.encode()).hexdigest()[:12]
 
 
-def _collection(url: str) -> str:
-    """Group a multi-part source (「イソップ童話集/きつねとつる」, an Aozora author's
-    files directory) so its parts never straddle train and test.  A standalone
-    work -- including a bare wiki page like /wiki/桃太郎, where the parent is only
-    the generic /wiki mount -- is its own collection.
-
-    parts == ['https:', '', host, seg1, seg2, ...]; real path segments start at
-    index 3.  A collection needs >= 2 directory segments above the leaf, so
-    /wiki/Title (one dir: "wiki") stays standalone while /wiki/Collection/Title
-    and /cards/NNN/files/xxx.html group on their parent.
-    """
-    base = url.split("#")[0].split("?")[0].rstrip("/")
-    parts = base.split("/")
-    if len(parts[3:]) >= 3:
-        return "/".join(parts[:-1])
-    return base
+_collection = jb.collection
+_canon = jb.canonical_events
+_fingerprint = jb.fingerprint
 
 
 def _held_out(url: str) -> bool:
-    """Hold out whole COLLECTIONS, not individual URLs: an Aozora author's works
-    share a collection, so a per-URL split would leak almost every author across
-    train and test (and starve training).  A standalone work is its own
-    collection, so this stays a ~1/5 split there."""
-    key = _collection(url)
-    return int(hashlib.sha256(f"comprehension:{key}".encode()).hexdigest(), 16) % 5 == 0
+    """Legacy per-collection ~1/5 split -- the tiered benchmark uses jb.Tiers now;
+    kept for callers / tests that still reason about a single held-out set."""
+    return int(hashlib.sha256(f"comprehension:{jb.collection(url)}".encode()).hexdigest(), 16) % 5 == 0
 
 
-def _canon(events: list) -> list:
-    out = []
-    for e in events:
-        if isinstance(e, dict):
-            out.append({"subject": e.get("subject", ""), "verb": e.get("verb", ""),
-                        "obj": e.get("obj", "")})
-        else:
-            out.append({"subject": e[0] if len(e) > 0 else "",
-                        "verb": e[1] if len(e) > 1 else "",
-                        "obj": e[2] if len(e) > 2 else ""})
-    return out
-
-
-def _fingerprint(snapshot: list) -> str:
-    """Hash URL *and event content* (canonical JSON): a snapshot whose events
-    were altered no longer matches even if the URL set is unchanged."""
-    payload = json.dumps(
-        sorted(({"url": s["url"], "events": _canon(s["events"])} for s in snapshot),
-               key=lambda s: s["url"]),
-        sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+def forbidden_training_collections(previous: dict | None, stories: list | None = None) -> set:
+    """Collections that must stay OUT of any model / RNN training for this
+    benchmark: everything the tiering puts in a non-train tier, plus every frozen
+    selection / final / reserve collection."""
+    previous = previous or {}
+    prev = previous if previous.get("eval_regime") == EVAL_REGIME else {}
+    t = jb.Tiers(stories or [], BENCH_SALT, prev)
+    return set(t.forbidden_train_collections)
 
 
 # --- model -----------------------------------------------------------------
@@ -286,89 +263,127 @@ def build_cooccurrence(stories: list[dict]) -> "dict[str, Counter]":
     return dict(table)
 
 
-# --- frozen-benchmark capability measurement ----------------------------
-def evaluate_comprehension(stories: list[dict], previous: dict | None = None) -> dict:
-    """stories: [{url, events}].  The held-out test set is a SNAPSHOT frozen the
-    first time it is large enough -- new books only ever grow the training side.
+# --- tiered frozen-benchmark capability measurement --------------------
+def _comprehension_model_fingerprint(train_stories: list[dict]) -> str:
+    from japanese_event_v1 import PARSER_VERSION
+    payload = json.dumps({
+        "regime": EVAL_REGIME, "scoring": SCORING_VERSION, "parser": PARSER_VERSION,
+        "baseline": BASELINE_DEFINITION,
+        "train_urls": sorted(s["url"] for s in train_stories),
+    }, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def _measure(test_stories: list[dict], model: "ComprehensionModel", known: set) -> dict | None:
+    per = [book_comprehension(s["events"], model, known)["tests"] for s in test_stories]
+    per = [t for t in per if t]
+    n = len(per)
+    if not n:
+        return None
+    mc = sum(t["consequence"] for t in per) / n
+    mcb = sum(t["consequence_baseline"] for t in per) / n
+    mo = sum(t["ordering"] for t in per) / n
+    mp = sum(t["protagonist"] for t in per) / n
+    gains = [t["consequence"] - t["consequence_baseline"] for t in per]
+    mg = sum(gains) / n
+    var = sum((g - mg) ** 2 for g in gains) / max(1, n - 1)
+    se = math.sqrt(var / n) if var > 0 else 0.0
+    z = mg / se if se > 0 else (99.0 if mg > 0 else 0.0)
+    p = round(0.5 * math.erfc(z / math.sqrt(2)), 6) if z > 0 else 1.0
+    return {"n": n, "consequence": round(mc, 3), "consequence_baseline": round(mcb, 3),
+            "consequence_gain": round(mg, 4), "z": round(z, 2), "p_one_sided": p,
+            "ordering": round(mo, 3), "protagonist": round(mp, 3),
+            "comprehension_score": round(0.5 * mc + 0.3 * mo + 0.2 * mp, 3),
+            "significant": z >= SIGNIFICANCE_Z and n >= MIN_TEST_STORIES}
+
+
+def evaluate_comprehension(stories: list[dict], previous: dict | None = None,
+                           training_data_fingerprint: str | None = None) -> dict:
+    """Two-tier frozen benchmark.
+
+    SELECTION (frozen once, measured every cycle): learning curve + the milestone
+    that lets a final open.  Beating the baseline here is never a capability
+    claim.  FINAL (collection-disjoint from train AND selection, opened at most
+    FINAL_QUERY_BUDGET times, each open on a never-opened snapshot): the model /
+    regime / scoring / baseline / threshold are frozen from the selection side
+    first; capability = selection-significant AND an unopened final that also
+    clears the pre-registered threshold.
     """
     previous = previous or {}
     regime_ok = previous.get("eval_regime") == EVAL_REGIME
-    # an eval-regime change never inherits the old regime's streak / confirmation
-    # / last-significant-train: the new method's first measurement starts fresh.
-    streak_prev = previous if regime_ok else {}
-    snap = previous.get("test_snapshot") if regime_ok else None
-    # sticky: once the frozen snapshot replaced a legacy (non-frozen) evaluation
-    # it stays flagged, so status keeps showing that the migration happened
-    migrated = bool(previous.get("snapshot_migrated")) or (bool(previous) and not regime_ok)
+    prev = previous if regime_ok else {}
+    from japanese_event_v1 import PARSER_VERSION
 
-    train = [s["events"] for s in stories
-             if not _held_out(s["url"]) and len(s["events"]) >= 3]
+    tiers = jb.Tiers(stories, BENCH_SALT, prev)
+    train_stories = tiers.train_stories
+    train_events = [s["events"] for s in train_stories]
+    base = {"version": 3, "eval_regime": EVAL_REGIME,
+            "regime_reset_from": previous.get("eval_regime") if (previous and not regime_ok) else None,
+            "snapshot_migrated": tiers.selection_migrated or (bool(previous) and not regime_ok),
+            **tiers.report_fields(),
+            "selection_snapshot": tiers.selection_snapshot,
+            "reserve_snapshot": tiers.reserve_snapshot,
+            "learning_curve": list(prev.get("learning_curve", []))}
 
-    if snap and regime_ok:
-        test = [{"url": s["url"], "events": [tuple(e) if isinstance(e, list) else e
-                                             for e in s["events"]]} for s in snap]
-    else:
-        candidate_test = [s for s in stories if _held_out(s["url"]) and len(s["events"]) >= 3]
-        if len(train) < MIN_TRAIN_STORIES or len(candidate_test) < MIN_TEST_STORIES:
-            return {"version": 2, "status": "insufficient_stories", "eval_regime": EVAL_REGIME,
-                    "train_stories": len(train), "test_stories": len(candidate_test),
-                    "comprehension_score": None, "beats_baseline": False,
-                    "learning_curve": list(streak_prev.get("learning_curve", []))}
-        test = candidate_test           # freeze it now
-        snap = [{"url": s["url"], "events": s["events"]} for s in test]
-        migrated = migrated or bool(previous)   # replaced a legacy evaluation
+    if not tiers.selection_frozen or len(train_events) < MIN_TRAIN_STORIES:
+        return {**base, "status": "insufficient_stories", "beats_baseline": False,
+                "comprehension_score": None, "train_stories": len(train_events)}
 
-    held_urls = {s["url"] for s in snap}
-    held_cols = {_collection(u) for u in held_urls}
-    # a book that is now on the held-out list must never be in training either
-    train = [s["events"] for s in stories
-             if s["url"] not in held_urls and _collection(s["url"]) not in held_cols
-             and len(s["events"]) >= 3]
-    if len(train) < MIN_TRAIN_STORIES:
-        return {"version": 2, "status": "insufficient_stories", "eval_regime": EVAL_REGIME,
-                "train_stories": len(train), "test_stories": len(test),
-                "comprehension_score": None, "beats_baseline": False,
-                "test_snapshot": snap,
-                "learning_curve": list(streak_prev.get("learning_curve", []))}
-
-    model = ComprehensionModel().fit(train)
-    known = {w for events in train for e in events
+    model = ComprehensionModel().fit(train_events)
+    known = {w for events in train_events for e in events
              for w in (e.get("subject"), e.get("obj"), e.get("verb")) if w}
+    model_fp = _comprehension_model_fingerprint(train_stories)
 
-    per_story = [book_comprehension(s["events"], model, known)["tests"] for s in test]
-    per_story = [t for t in per_story if t]
-    n = len(per_story)
-    mean_consequence = sum(t["consequence"] for t in per_story) / n
-    mean_consequence_base = sum(t["consequence_baseline"] for t in per_story) / n
-    mean_ordering = sum(t["ordering"] for t in per_story) / n
-    mean_protagonist = sum(t["protagonist"] for t in per_story) / n
+    sel = _measure(tiers.selection_snapshot, model, known)
+    sel_measurements = prev.get("selection_measurements", 0) + 1
+    last_sig_train = prev.get("selection_last_significant_train", 0)
+    grew = len(train_events) >= max(1, last_sig_train) * SIGNIFICANT_TRAIN_GROWTH
+    sel_sig_streak = ((prev.get("selection_significant_streak", 0) + 1)
+                      if (sel["significant"] and grew)
+                      else prev.get("selection_significant_streak", 0) if sel["significant"] else 0)
 
-    gains = [t["consequence"] - t["consequence_baseline"] for t in per_story]
-    mean_gain = sum(gains) / n
-    var = sum((g - mean_gain) ** 2 for g in gains) / max(1, n - 1)
-    se = math.sqrt(var / n) if var > 0 else 0.0
-    z = mean_gain / se if se > 0 else (99.0 if mean_gain > 0 else 0.0)
-    p = round(0.5 * math.erfc(z / math.sqrt(2)), 6) if z > 0 else 1.0
+    # ---- FINAL ----
+    final_history = list(prev.get("final_history", []))
+    prev_standing = final_history[-1] if final_history else None
+    standing_stale_or_failed = bool(prev_standing and (
+        prev_standing["preconditions"].get("model_fingerprint") != model_fp
+        or not (prev_standing["result"] or {}).get("significant")))
+    can_open = (sel["significant"] and sel_sig_streak >= 2 and tiers.disjoint
+                and len(final_history) < jb.FINAL_QUERY_BUDGET
+                and (not final_history or standing_stale_or_failed))
+    nxt = tiers.next_unopened_final() if can_open else None
+    if nxt:
+        pre = {"model_fingerprint": model_fp, "training_data_fingerprint": training_data_fingerprint,
+               "parser_version": PARSER_VERSION, "eval_regime": EVAL_REGIME,
+               "scoring_version": SCORING_VERSION, "baseline_definition": BASELINE_DEFINITION,
+               "significance_z": SIGNIFICANCE_Z, "selection_result": sel,
+               "selection_fingerprint": tiers.selection_fingerprint,
+               "final_snapshot_fingerprint": nxt["fingerprint"],
+               "final_snapshot_urls": nxt["urls"],
+               "final_query_index": len(final_history) + 1, "evaluated_at": time.time()}
+        fin = _measure(nxt["snapshot"], model, known)
+        final_history = final_history + [{"tier": nxt["tier"], "fingerprint": nxt["fingerprint"],
+                                          "result": fin, "preconditions": pre}]
+        tiers.record_final(nxt)
 
-    comprehension_score = round(0.5 * mean_consequence + 0.3 * mean_ordering
-                                + 0.2 * mean_protagonist, 3)
-    significant = z >= SIGNIFICANCE_Z and n >= MIN_TEST_STORIES
-    prior_sig = streak_prev.get("beats_baseline_significant", False)
-    # re-measuring the SAME frozen snapshot is not an independent replication --
-    # the streak only advances when training has meaningfully grown since the
-    # last significant measurement
-    last_sig_train = streak_prev.get("last_significant_train", 0)
-    grew = len(train) >= last_sig_train * SIGNIFICANT_TRAIN_GROWTH
-    streak = (streak_prev.get("significant_streak", 0) + 1) if (significant and grew) \
-        else (streak_prev.get("significant_streak", 0) if significant else 0)
+    standing = final_history[-1] if final_history else None
+    final_stale = bool(standing and standing["preconditions"].get("model_fingerprint") != model_fp)
+    beats = bool(standing and standing["result"] and standing["result"]["significant"]
+                 and sel["significant"] and not final_stale and tiers.disjoint)
+    if standing:
+        final_status = "opened" if not final_stale else "stale_needs_fresh_final"
+    elif tiers.next_unopened_final():
+        final_status = "unopened"
+    else:
+        final_status = "insufficient_final_stories"
 
-    curve = list(streak_prev.get("learning_curve", []))
-    point = {"train_stories": len(train), "eval_regime": EVAL_REGIME,
-             "comprehension_score": comprehension_score,
-             "consequence": round(mean_consequence, 3),
-             "consequence_baseline": round(mean_consequence_base, 3),
-             "consequence_z": round(z, 2), "ordering": round(mean_ordering, 3)}
-    if not curve or curve[-1]["train_stories"] != len(train):
+    curve = list(prev.get("learning_curve", []))
+    point = {"train_stories": len(train_events), "eval_regime": EVAL_REGIME,
+             "selection_measurement": sel_measurements,
+             "comprehension_score": sel["comprehension_score"],
+             "consequence": sel["consequence"], "consequence_baseline": sel["consequence_baseline"],
+             "consequence_z": sel["z"], "ordering": sel["ordering"]}
+    if not curve or curve[-1]["train_stories"] != len(train_events):
         curve.append(point)
     curve = curve[-200:]
     tail = [c["comprehension_score"] for c in curve[-8:]]
@@ -377,26 +392,44 @@ def evaluate_comprehension(stories: list[dict], previous: dict | None = None) ->
         older, newer = sum(tail[:len(tail)//2]) / (len(tail)//2), sum(tail[len(tail)//2:]) / (len(tail)-len(tail)//2)
         trend = "improving" if newer > older + 0.01 else "declining" if newer < older - 0.01 else "flat"
 
-    beats = significant and (prior_sig or streak_prev.get("significant_streak", 0) >= 1) and streak >= 2
     return {
-        "version": 2, "status": "measured", "eval_regime": EVAL_REGIME,
-        "snapshot_migrated": migrated,
-        "regime_reset_from": previous.get("eval_regime") if (previous and not regime_ok) else None,
-        "train_stories": len(train), "test_stories": n,
-        "snapshot_stories": len(snap), "snapshot_fingerprint": _fingerprint(snap),
-        "test_snapshot": snap,
-        "comprehension_score": comprehension_score,
-        "consequence": round(mean_consequence, 3),
-        "consequence_baseline": round(mean_consequence_base, 3),
-        "consequence_gain": round(mean_gain, 3),
-        "consequence_z": round(z, 2), "consequence_p_one_sided": p,
-        "ordering": round(mean_ordering, 3), "protagonist": round(mean_protagonist, 3),
-        "beats_baseline_significant": significant,
-        "beats_baseline": beats,
-        "significant_streak": streak,
-        "last_significant_train": len(train) if significant else last_sig_train,
+        **base, "status": "measured",
+        "train_stories": len(train_events),
+        "model_fingerprint": model_fp,
+        # selection (repeatable, NOT capability)
+        "selection": sel,
+        "selection_measurements": sel_measurements,
+        "selection_significant_streak": sel_sig_streak,
+        "selection_last_significant_train": len(train_events) if sel["significant"] else last_sig_train,
+        # final (one-shot capability gate)
+        "final_history": final_history,
+        "final_opened_count": len(final_history),
+        "final_query_budget": jb.FINAL_QUERY_BUDGET,
+        "final_status": final_status,
+        "final_result": standing["result"] if standing else None,
+        "final_stale_for_current_model": final_stale,
+        "final_preconditions": standing["preconditions"] if standing else None,
+        # capability
+        "capability_confirmed": beats,
+        "beats_baseline": beats,                     # kept for callers
+        "capability_pending_reason": (None if beats else
+            "final not yet opened" if final_status in ("unopened", "insufficient_final_stories") else
+            "selection not significant" if not sel["significant"] else
+            "final below threshold" if standing and not standing["result"]["significant"] else
+            "final stale (model changed since it was opened)" if final_stale else "unknown"),
+        # compat fields used by status renderers / tests
+        "comprehension_score": sel["comprehension_score"],
+        "consequence": sel["consequence"], "consequence_baseline": sel["consequence_baseline"],
+        "consequence_gain": sel["consequence_gain"], "consequence_z": sel["z"],
+        "consequence_p_one_sided": sel["p_one_sided"],
+        "ordering": sel["ordering"], "protagonist": sel["protagonist"],
+        "beats_baseline_significant": sel["significant"],
+        "test_stories": sel["n"], "snapshot_fingerprint": tiers.selection_fingerprint,
+        "snapshot_stories": len(tiers.selection_snapshot),
+        "significant_streak": sel_sig_streak,
         "learning_curve": curve, "comprehension_trend": trend,
         "limitations": ["consequence prediction is next-verb within one story; "
-                        "credit only when it beats the frequency baseline on the "
-                        "FROZEN held-out snapshot, at two different training sizes"],
+                        "SELECTION is diagnostic only; capability needs an UNOPENED "
+                        "collection-disjoint FINAL to also clear the pre-registered "
+                        "threshold (final_query_budget=%d)." % jb.FINAL_QUERY_BUDGET],
     }

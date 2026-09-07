@@ -131,6 +131,29 @@ class JapaneseReaderTest(unittest.TestCase):
         self.assertTrue(flat)
         self.assertTrue(all(e.get("provenance") == "heuristic_self" for e in flat))
 
+    def test_write_events_is_fail_closed_on_provenance(self):
+        reader.run_once(self.runtime)
+        reader._events_path = self.runtime / reader.EVENTS_FILE
+        good = [{"subject": "き", "verb": v, "obj": "", "provenance": "heuristic_self"}
+                for v in ("みる", "とぶ", "なく")]
+        reader._write_events({
+            "keep": good,
+            "strip_teacher": good + [{"subject": "x", "verb": "y", "provenance": "morphological_teacher"}],
+            "drop_unstamped": [{"subject": "き", "verb": "みる", "obj": ""}] * 3,
+        })
+        back = reader._read(self.runtime / reader.EVENTS_FILE)
+        self.assertIn("keep", back)
+        self.assertNotIn("drop_unstamped", back)                 # no explicit stamp -> gone
+        self.assertEqual(len(back["strip_teacher"]), 3)          # teacher event stripped out
+        self.assertTrue(all(e["provenance"] == "heuristic_self" for e in back["strip_teacher"]))
+
+    def test_heuristic_only_is_fail_closed(self):
+        mixed = [{"verb": "a", "provenance": "heuristic_self"},
+                 {"verb": "b", "provenance": "morphological_teacher"},
+                 {"verb": "c"}, {"verb": "d", "provenance": "local_llm_scaffold"}]
+        kept = reader._heuristic_only(mixed)
+        self.assertEqual([e["verb"] for e in kept], ["a"])
+
     def test_caregiver_batch_does_not_crash_when_no_book_is_selectable(self):
         # regression: `model` is only bound inside `if book_id:`, but the
         # caregiver batch reads it -- no selectable book must not raise

@@ -23,6 +23,7 @@ import traceback
 from pathlib import Path
 
 from web_cache import WEB_CACHE
+import japanese_benchmark_v1 as jb
 import japanese_corpus_v1 as corpus
 import japanese_event_v1 as jevent
 import reading_curriculum_v1 as curriculum
@@ -82,7 +83,16 @@ def _events_of(text: str) -> list[dict]:
 
 
 def _heuristic_only(events: list[dict]) -> list[dict]:
-    return [e for e in events if e.get("provenance", HEURISTIC_SELF) == HEURISTIC_SELF]
+    """Fail-closed: only an EXPLICIT `heuristic_self` stamp is Noise's own
+    experience.  Missing / unknown / teacher / LLM / caregiver provenance is
+    dropped -- a future analyser that forgets to stamp cannot leak into learning.
+    """
+    return [e for e in events if isinstance(e, dict) and e.get("provenance") == HEURISTIC_SELF]
+
+
+def _quarantine_count(events_store: dict) -> int:
+    return sum(1 for evs in events_store.values() for e in evs
+              if not (isinstance(e, dict) and e.get("provenance") == HEURISTIC_SELF))
 
 
 def _scaffold_totals(scaffolded: dict) -> dict:
@@ -158,7 +168,14 @@ def _read_events() -> dict:
 
 
 def _write_events(value: dict) -> None:
-    _write(_events_path, value)
+    # fail-closed at the store boundary: a book keeps only its heuristic_self
+    # events, and a book left with < 3 of them is dropped entirely.
+    clean = {}
+    for bid, evs in value.items():
+        keep = [e for e in evs if isinstance(e, dict) and e.get("provenance") == HEURISTIC_SELF]
+        if len(keep) >= 3:
+            clean[bid] = keep
+    _write(_events_path, clean)
 
 
 def run_once(runtime: Path) -> dict:
@@ -293,33 +310,52 @@ def run_once(runtime: Path) -> dict:
     advance = curriculum.maybe_advance_level(cur, cycle)
 
     # frozen-benchmark capability measurements.  events_store holds only READ
-    # books' `heuristic_self` events (a fetched-but-unread book is never in it,
-    # and aided readings never enter it), so every story here is Noise's own
-    # experience.  Filter by provenance again as defence in depth.
+    # books' `heuristic_self` events; filter by provenance again (fail-closed:
+    # only an explicit `heuristic_self` stamp is Noise's own experience).
     real = set(events_store)
     heur_store = {bid: _heuristic_only(ev) for bid, ev in events_store.items()}
     all_stories = [{"url": cur["shelf"][bid]["url"], "events": ev}
                    for bid, ev in heur_store.items()
                    if bid in cur["shelf"] and len(ev) >= 3]
-    comp_report = comprehension.evaluate_comprehension(all_stories, prev_comp)
+    comp_forbidden = comprehension.forbidden_training_collections(prev_comp, all_stories)
+    retell_forbidden = retell.forbidden_training_collections(prev_retell, all_stories)
+    training_data_fp = None
 
-    # character RNN over the sentences of the books Noise has READ (continuous
-    # capability signal).  The RNN is also used by the retelling metric, so
-    # exclude the retelling benchmark's held-out collections here -- a source must
-    # not sit in both the RNN's training text and the retelling test set.
-    retell_held = {retell._collection(s["url"]) for s in all_stories
-                   if retell._held_out(s["url"])}
+    # character RNN over the sentences of the books Noise has READ.  Every
+    # collection that feeds a comprehension or retelling SELECTION / FINAL / RESERVE
+    # snapshot is kept out of the RNN's training text -- a source must never sit in
+    # both a capability test set and the model that is tested on it.
+    forbidden_cols = comp_forbidden | retell_forbidden
     seq_texts: dict[str, str] = {}
     for bid, ev in heur_store.items():
         if bid in real and ev and bid in cur["shelf"] \
-                and retell._collection(cur["shelf"][bid]["url"]) not in retell_held:
+                and jb.collection(cur["shelf"][bid]["url"]) not in forbidden_cols:
             url = cur["shelf"][bid]["url"]
             seq_texts[url] = seq_texts.get(url, "") + "".join(e.get("sentence", "") for e in ev)
-    seq_report = sequence.train_and_evaluate(seq_texts, prev_seq, SEQUENCE_TRAIN_SECONDS)
+    training_context = {
+        "regime": sequence.TRAINING_REGIME,
+        "parser_version": PARSER_VERSION,
+        "provenance_policy": curriculum.PROVENANCE_POLICY,
+        "read_only": True,
+        "forbidden_collections": sorted(forbidden_cols),
+    }
+    seq_report = sequence.train_and_evaluate(seq_texts, prev_seq, SEQUENCE_TRAIN_SECONDS,
+                                             training_context=training_context)
+    training_data_fp = (seq_report.get("training_data_fingerprint") or {}).get("training_set_fingerprint")
 
-    # retelling capability = the RNN's free-generation retelling beating a
-    # shuffled-template baseline on held-out stories (the template's own
-    # round-trip is a diagnostic, not a capability)
+    # archive a retired (contaminated) RNN, then keep only metadata in the report
+    retired = seq_report.get("retired_model")
+    if retired and retired.get("retired_state"):
+        audit_dir = runtime / "audit"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        _write(audit_dir / f"reading-sequence-retired-{stamp}.json", retired)
+        seq_report["retired_model"] = {k: v for k, v in retired.items() if k != "retired_state"}
+
+    comp_report = comprehension.evaluate_comprehension(
+        all_stories, prev_comp, training_data_fingerprint=training_data_fp)
+
+    # retelling capability -- narrative order recovery, tiered selection + final
     retell_report = retell.evaluate_retelling(all_stories, prev_retell,
                                               rnn_state=seq_report.get("state"))
 
@@ -374,17 +410,28 @@ def run_once(runtime: Path) -> dict:
         "comprehension": {k: comp_report.get(k) for k in
                           ("status", "comprehension_score", "consequence",
                            "consequence_baseline", "consequence_z", "beats_baseline",
+                           "capability_confirmed", "capability_pending_reason",
                            "comprehension_trend", "test_stories", "eval_regime",
-                           "snapshot_stories", "snapshot_fingerprint", "snapshot_migrated",
-                           "significant_streak")},
+                           "regime_reset_from", "snapshot_migrated",
+                           "selection_stories", "selection_fingerprint", "selection_measurements",
+                           "selection_significant_streak", "reserve_stories",
+                           "final_status", "final_opened_count", "final_query_budget",
+                           "final_result", "final_stale_for_current_model",
+                           "tier_collection_counts", "collection_disjointness",
+                           "collections_disjoint")},
         "retelling": {k: retell_report.get(k) for k in
                       ("status", "roundtrip_fidelity", "order_gain", "gain_z",
                        "rnn_pairwise_accuracy", "position_baseline_accuracy",
-                       "beats_baseline", "retelling_trend", "test_stories", "eval_regime",
-                       "snapshot_stories", "snapshot_fingerprint", "snapshot_migrated",
-                       "regime_reset_from", "significant_streak", "recomputed",
-                       "rnn_fingerprint", "rnn_steps_at_eval", "rnn_steps_now",
-                       "rnn_model_changed", "next_reeval")},
+                       "beats_baseline", "capability_confirmed", "capability_pending_reason",
+                       "retelling_trend", "test_stories", "eval_regime", "regime_reset_from",
+                       "snapshot_migrated", "recomputed",
+                       "selection_stories", "selection_fingerprint", "selection_measurements",
+                       "selection_significant_streak", "reserve_stories",
+                       "final_status", "final_opened_count", "final_query_budget",
+                       "final_result", "final_stale_for_current_model",
+                       "tier_collection_counts", "collection_disjointness", "collections_disjoint",
+                       "rnn_fingerprint", "rnn_training_regime", "rnn_steps_at_eval",
+                       "rnn_steps_now", "rnn_model_changed", "next_reeval")},
         "self_vs_aided": {
             "self_comprehension": (reading.get("comprehension")
                                    if isinstance(reading, dict) else None),
@@ -396,7 +443,15 @@ def run_once(runtime: Path) -> dict:
         "sequence": {k: seq_report.get(k) for k in
                      ("status", "held_out_bits_per_char", "baseline_bits_per_char",
                       "improvement_bits", "improvement_z", "beats_char_baseline",
-                      "perplexity_trend", "steps_trained", "model_fingerprint")},
+                      "perplexity_trend", "steps_trained", "model_fingerprint",
+                      "training_regime", "contamination_status", "reset_reason",
+                      "started_clean_at", "parent_model_fingerprint",
+                      "training_source_count", "significant_streak")},
+        "sequence_training_fingerprint":
+            (seq_report.get("training_data_fingerprint") or {}).get("training_set_fingerprint"),
+        "sequence_boundary_fingerprint":
+            (seq_report.get("training_data_fingerprint") or {}).get("boundary_fingerprint"),
+        "sequence_retirement_log": seq_report.get("retirement_log", []),
         "sequence_sample": (seq_report.get("samples") or [""])[0],
         "caregiver": caregiver.summary(care_state),
         "caregiver_questions": [q["prompt"] for q in care_state.get("pending", [])],
@@ -407,6 +462,9 @@ def run_once(runtime: Path) -> dict:
         "aided_reading": reading.get("aided"),          # evidence 0, diagnostic only
         "aided_store": {"file": AIDED_FILE, "total_readings": aided_total,
                         "this_cycle": aided_record is not None},
+        "provenance": {"policy": curriculum.PROVENANCE_POLICY,
+                       "events_store_non_self_events": _quarantine_count(events_store),
+                       "events_store_books": len(events_store)},
         "schema_migration": migration if migration.get("migrated") else
                             {"schema_version": cur.get("curriculum_schema_version")},
     }

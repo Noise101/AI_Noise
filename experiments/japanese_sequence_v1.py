@@ -20,6 +20,7 @@ one-sided z on a frozen, collection-disjoint split, for two consecutive cycles.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import random
 import re
@@ -33,6 +34,16 @@ from sequence_model_v1 import TinyRNN, HIDDEN, SEQ_LEN, LEARNING_RATE
 VERSION = 1
 BENCHMARK_SALT = "japanese-sequence-benchmark:v1"
 VOCAB_CAP = 200
+
+# --- training identity (re-audit #5): a capability-grade RNN must know what it
+# was trained on.  A state without a matching training_regime, or one whose
+# training BOUNDARY moved (parser / provenance policy / normalisation / model
+# structure / the set of collections forbidden from training), is contaminated
+# for capability purposes and is retired rather than continued.
+TRAINING_REGIME = "jseq_clean_v1"
+PROVENANCE_POLICY = "fail_closed_heuristic_self_v1"
+NORMALISATION_VERSION = 1
+VOCAB_METHOD = "freq_capped_top200_min3"
 MIN_TRAIN_CHARS = 3000
 MIN_EVAL_CHARS = 1500
 MAX_EVAL_CHARS = 20000
@@ -68,6 +79,74 @@ def model_fingerprint(state: dict, steps_trained: int) -> str:
             h.update(bytes(name, "ascii"))
             h.update(",".join(f"{v:.5f}" for v in row).encode())
     return h.hexdigest()[:16]
+
+
+def _norm_hash(text: str) -> str:
+    return hashlib.sha256(normalise(text).encode()).hexdigest()[:16]
+
+
+def boundary_fingerprint(ctx: dict) -> str:
+    """The part of the training identity whose change RETIRES the model: not the
+    training set itself (that grows) but the rules that give the training data
+    meaning."""
+    payload = json.dumps({
+        "training_regime": TRAINING_REGIME,
+        "model_version": VERSION, "hidden_dim": HIDDEN, "seq_len": SEQ_LEN,
+        "vocab_cap": VOCAB_CAP, "vocab_method": VOCAB_METHOD,
+        "normalisation_version": NORMALISATION_VERSION,
+        "provenance_policy": ctx.get("provenance_policy", PROVENANCE_POLICY),
+        "parser_version": ctx.get("parser_version"),
+        "read_only_training": bool(ctx.get("read_only")),
+        "forbidden_collections": sorted(ctx.get("forbidden_collections", [])),
+    }, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def training_data_fingerprint(train_texts: dict, ctx: dict) -> dict:
+    """Full, auditable training-data identity: the boundary plus the exact
+    training sources and their normalised-text hashes."""
+    sources = sorted((u, _norm_hash(t)) for u, t in train_texts.items())
+    src_payload = json.dumps(sources, ensure_ascii=False, separators=(",", ":"))
+    return {
+        "boundary_fingerprint": boundary_fingerprint(ctx),
+        "training_set_fingerprint": hashlib.sha256(src_payload.encode()).hexdigest()[:16],
+        "training_regime": TRAINING_REGIME,
+        "parser_version": ctx.get("parser_version"),
+        "provenance_policy": ctx.get("provenance_policy", PROVENANCE_POLICY),
+        "normalisation_version": NORMALISATION_VERSION,
+        "vocab_method": VOCAB_METHOD,
+        "model_structure": {"version": VERSION, "hidden": HIDDEN, "seq_len": SEQ_LEN},
+        "training_source_count": len(sources),
+        "training_sources": [{"url": u, "text_hash": h} for u, h in sources],
+        "forbidden_collections": sorted(ctx.get("forbidden_collections", [])),
+    }
+
+
+def _contamination_check(previous: dict, ctx: dict, train_texts: dict) -> "str | None":
+    """Return a reset_reason if the previous RNN state cannot be continued as a
+    capability-grade model, else None."""
+    prev_state = previous.get("state") or {}
+    if not prev_state or not prev_state.get("vocab"):
+        return None                                    # nothing to continue anyway
+    prev_regime = previous.get("training_regime") or prev_state.get("training_regime")
+    if not prev_regime:
+        return "legacy_state_without_training_regime"
+    if prev_regime != TRAINING_REGIME:
+        return f"training_regime_changed:{prev_regime}->{TRAINING_REGIME}"
+    prev_boundary = previous.get("training_data_fingerprint", {}).get("boundary_fingerprint")
+    if prev_boundary != boundary_fingerprint(ctx):
+        return "training_boundary_changed"
+    if not previous.get("read_only_training") and not ctx.get("read_only"):
+        return "state_predates_unread_book_exclusion"
+    forbidden = set(ctx.get("forbidden_collections", []))
+    if forbidden and any(_collection_for_forbidden(u) in forbidden for u in train_texts):
+        return "forbidden_collection_present_in_training_set"
+    return None
+
+
+def _collection_for_forbidden(url: str) -> str:
+    from japanese_benchmark_v1 import collection
+    return collection(url)
 
 
 def collection_key(url: str) -> str:
@@ -115,14 +194,59 @@ def _insufficient(previous: dict, train_chars: int, held_chars: int) -> dict:
 
 def train_and_evaluate(raw_texts: dict[str, str], previous: dict | None = None,
                        train_seconds: float = DEFAULT_TRAIN_SECONDS,
-                       max_steps: int | None = None) -> dict:
-    previous = previous or {}
+                       max_steps: int | None = None,
+                       training_context: dict | None = None) -> dict:
+    previous = dict(previous or {})
+    ctx = dict(training_context or {})
+    ctx.setdefault("provenance_policy", PROVENANCE_POLICY)
+    ctx.setdefault("read_only", True)
     texts = {u: n for u, t in raw_texts.items() if len(n := normalise(t)) >= 40}
+
+    # --- contamination gate: a capability-grade RNN cannot carry weights trained
+    # under a different boundary (parser / provenance / normalisation / forbidden
+    # collections) or on data since removed. ---
+    reset_reason = _contamination_check(previous, ctx, raw_texts)
+    retired = None
+    contamination_status = "clean_continued"
+    if reset_reason:
+        retired = {"retired_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                   "reset_reason": reset_reason,
+                   "retired_model_fingerprint": previous.get("model_fingerprint"),
+                   "retired_steps_trained": previous.get("steps_trained", 0),
+                   "retired_training_regime": previous.get("training_regime"),
+                   "retired_report": {k: previous.get(k) for k in
+                                      ("status", "held_out_bits_per_char", "baseline_bits_per_char",
+                                       "improvement_z", "steps_trained", "significant_streak",
+                                       "benchmark", "learning_curve")},
+                   "retired_state": previous.get("state")}
+        parent_fp = previous.get("model_fingerprint")
+        _prior_retirements = list(previous.get("retirement_log", []))
+        previous = {"learning_curve": [], "retirement_log": _prior_retirements}
+        contamination_status = "retired_replaced"
+    else:
+        parent_fp = previous.get("parent_model_fingerprint")
+
     train_urls, held_urls = _split(texts, previous)
     train_chars = sum(len(texts[u]) for u in train_urls)
     held_chars = sum(len(texts[u]) for u in held_urls)
+    tdf = training_data_fingerprint({u: raw_texts[u] for u in train_urls if u in raw_texts}, ctx)
+    started_clean_at = (previous.get("started_clean_at")
+                        or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    retirement_log = list(previous.get("retirement_log", []))
+    if retired:
+        retirement_log = retirement_log + [{k: retired[k] for k in retired if k != "retired_state"}]
+    ident = {"training_regime": TRAINING_REGIME,
+             "training_data_fingerprint": tdf,
+             "training_source_count": tdf["training_source_count"],
+             "read_only_training": bool(ctx.get("read_only")),
+             "contamination_status": contamination_status,
+             "reset_reason": reset_reason,
+             "started_clean_at": started_clean_at,
+             "parent_model_fingerprint": parent_fp,
+             "retired_model": retired,               # full (incl. state) only on the reset cycle
+             "retirement_log": retirement_log}
     if train_chars < MIN_TRAIN_CHARS or held_chars < MIN_EVAL_CHARS:
-        return _insufficient(previous, train_chars, held_chars)
+        return {**_insufficient(previous, train_chars, held_chars), **ident}
 
     vocab = previous.get("state", {}).get("vocab") or build_vocab(texts)
     model = TinyRNN(vocab, previous.get("state"))
@@ -188,6 +312,7 @@ def train_and_evaluate(raw_texts: dict[str, str], previous: dict | None = None,
 
     final_state = model.state()
     fp = model_fingerprint(final_state, steps_trained)
+    ident["model_fingerprint"] = fp
 
     curve = list(previous.get("learning_curve", []))
     point = {"steps_trained": steps_trained, "train_chars": train_chars,
@@ -229,10 +354,12 @@ def train_and_evaluate(raw_texts: dict[str, str], previous: dict | None = None,
                     generate(model, "おじいさんは", 90)],
         "model_fingerprint": fp,
         "state": {**final_state, "version": VERSION, "steps_trained": steps_trained,
-                  "model_fingerprint": fp},
-        "limitations": ["character-level, no word or concept supervision",
-                        "credit only when the per-source improvement clears a strict "
-                        "one-sided z on two consecutive cycles"],
+                  "model_fingerprint": fp, "training_regime": TRAINING_REGIME,
+                  "boundary_fingerprint": ident["training_data_fingerprint"]["boundary_fingerprint"]},
+        **ident,
+        "limitations": ["character-level, no word or concept supervision; a state "
+                        "whose training regime / boundary / provenance policy changed "
+                        "is retired, not continued -- steps restart at 0."],
     }
 
 

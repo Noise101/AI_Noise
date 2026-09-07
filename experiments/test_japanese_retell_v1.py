@@ -158,15 +158,15 @@ class RetellTest(unittest.TestCase):
     def test_reeval_is_gated_on_the_rnn_fingerprint(self):
         stories = folktale_stories(180)
         st = self._rnn()
-        st["model_fingerprint"], st["steps_trained"] = "fp-1", 1000
+        st["model_fingerprint"], st["steps_trained"] = "fp-1", 500_000
         r1 = jr.evaluate_retelling(stories, {}, rnn_state=st)
         self.assertTrue(r1["recomputed"])
         r2 = jr.evaluate_retelling(stories, r1, rnn_state=st)     # identical model
         self.assertFalse(r2["recomputed"])
         self.assertFalse(r2["rnn_model_changed"])
         self.assertEqual(r2["order_gain"], r1["order_gain"])
-        st2 = dict(st); st2["model_fingerprint"], st2["steps_trained"] = "fp-2", 4000
-        r3 = jr.evaluate_retelling(stories, r2, rnn_state=st2)    # moved a lot
+        st2 = dict(st); st2["model_fingerprint"], st2["steps_trained"] = "fp-2", 700_000
+        r3 = jr.evaluate_retelling(stories, r2, rnn_state=st2)    # +200k steps
         self.assertTrue(r3["recomputed"])
 
     def test_a_tiny_step_change_does_not_force_a_full_reeval(self):
@@ -186,17 +186,19 @@ class RetellTest(unittest.TestCase):
 
     def test_eval_regime_change_resets_the_streak(self):
         stories = folktale_stories(180)
-        old = {"eval_regime": "event_conditioned_generation_v1",
+        old = {"eval_regime": "narrative_order_recovery_v1",   # a superseded regime
                "significant_streak": 2, "beats_baseline": True,
-               "beats_baseline_significant": True, "last_significant_train": 40,
+               "beats_baseline_significant": True, "selection_significant_streak": 2,
+               "selection_last_significant_train": 40, "final_history": [{"tier": "final"}],
                "learning_curve": [{"train_stories": 40}],
                "test_snapshot": [{"url": s["url"], "events": s["events"]}
                                  for s in stories[:30]]}
         r = jr.evaluate_retelling(stories, old, rnn_state=self._rnn())
-        self.assertEqual(r["eval_regime"], "narrative_order_recovery_v1")
-        self.assertEqual(r["regime_reset_from"], "event_conditioned_generation_v1")
+        self.assertEqual(r["eval_regime"], jr.EVAL_REGIME)
+        self.assertEqual(r["regime_reset_from"], "narrative_order_recovery_v1")
         self.assertFalse(r["beats_baseline"])
-        self.assertLessEqual(r["significant_streak"], 1)
+        self.assertEqual(r["final_opened_count"], 0)          # old finals not inherited
+        self.assertLessEqual(r["selection_significant_streak"], 1)
 
     def test_insufficient_stories_reports_cleanly(self):
         report = jr.evaluate_retelling(folktale_stories(n=10), {})
@@ -212,6 +214,30 @@ class RetellTest(unittest.TestCase):
         second = jr.evaluate_retelling(grown, first)
         self.assertEqual(second["snapshot_fingerprint"], fp)     # unchanged
         self.assertEqual(second["test_stories"], n_test)          # did not grow
+
+    def test_selection_alone_is_never_a_capability_claim(self):
+        stories = folktale_stories(220)
+        r = jr.evaluate_retelling(stories, {}, rnn_state=self._rnn())
+        self.assertEqual(r["status"], "measured")
+        self.assertFalse(r["capability_confirmed"])
+        self.assertEqual(r["final_opened_count"], 0)
+        for _ in range(3):
+            r = jr.evaluate_retelling(stories, r, rnn_state=self._rnn())
+        self.assertFalse(r["capability_confirmed"])           # selection is diagnostic only
+
+    def test_final_needs_selection_significance_which_an_untrained_rnn_lacks(self):
+        stories = folktale_stories(260)
+        r = jr.evaluate_retelling(stories, {}, rnn_state=self._rnn())
+        # untrained RNN -> selection not significant -> final never opens
+        self.assertFalse((r.get("selection") or {}).get("significant"))
+        self.assertEqual(r["final_status"] in ("unopened", "insufficient_final_stories",
+                                               "no_generation_model"), True)
+        self.assertFalse(r["capability_confirmed"])
+        self.assertIn("final not yet opened", r["capability_pending_reason"] or "")
+
+    def test_train_selection_final_are_collection_disjoint(self):
+        r = jr.evaluate_retelling(folktale_stories(260), {}, rnn_state=self._rnn())
+        self.assertTrue(r["collections_disjoint"], r["collection_disjointness"])
 
     def test_re_measuring_the_same_snapshot_twice_is_not_a_replication(self):
         stories = folktale_stories(140)

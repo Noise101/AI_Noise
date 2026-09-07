@@ -33,46 +33,82 @@ def unstructured_stories(n=120, seed=2):
 
 
 class ReadingComprehensionTest(unittest.TestCase):
-    def test_structured_stories_beat_the_frequency_baseline_significantly(self):
-        report = rcp.evaluate_comprehension(structured_stories(n=120), {})
-        self.assertEqual(report["status"], "measured")
-        self.assertGreater(report["consequence"], report["consequence_baseline"])
-        self.assertGreater(report["consequence_z"], rcp.SIGNIFICANCE_Z)
-        self.assertTrue(report["beats_baseline_significant"])
-        self.assertFalse(report["beats_baseline"])
-        fp1 = report["snapshot_fingerprint"]
-        # re-measuring the SAME frozen snapshot with no training growth is NOT
-        # an independent replication -- the streak does not advance
-        same = rcp.evaluate_comprehension(structured_stories(n=120), report)
-        self.assertEqual(same["snapshot_fingerprint"], fp1)   # snapshot frozen
-        self.assertFalse(same["beats_baseline"])
-        # a second measurement at a LARGER training size does count
-        grown = structured_stories(n=120) + structured_stories(n=80, seed=9)
-        second = rcp.evaluate_comprehension(grown, same)
-        self.assertEqual(second["snapshot_fingerprint"], fp1)   # still frozen
-        self.assertTrue(second["beats_baseline"])
-        self.assertGreaterEqual(second["significant_streak"], 2)
+    def _grow(self, prev, sizes):
+        r = prev
+        for i, n in enumerate(sizes):
+            r = rcp.evaluate_comprehension(structured_stories(n=n, seed=1), r)
+        return r
 
-    def test_eval_regime_change_does_not_inherit_the_old_streak(self):
-        stories = structured_stories(n=120)
-        held = [{"url": s["url"], "events": s["events"]}
-                for s in stories if rcp._held_out(s["url"])]
-        # a fixture that was "confirmed" under a previous regime with streak 2
+    def test_selection_alone_never_confirms_capability(self):
+        # SELECTION is diagnostic: significant there is NOT a capability claim,
+        # no matter how many times it is measured.
+        r = rcp.evaluate_comprehension(structured_stories(n=160), {})
+        self.assertEqual(r["status"], "measured")
+        self.assertTrue(r["selection"]["significant"])           # structured data does beat freq
+        self.assertFalse(r["capability_confirmed"])
+        self.assertEqual(r["final_opened_count"], 0)
+        for _ in range(4):                                       # re-measure the same selection
+            r = rcp.evaluate_comprehension(structured_stories(n=160), r)
+        self.assertFalse(r["capability_confirmed"])              # still not confirmed
+        self.assertGreaterEqual(r["selection_measurements"], 5)
+
+    def test_capability_needs_an_unopened_final_to_also_pass(self):
+        r = self._grow({}, [160, 260])                           # grow -> sel streak >= 2
+        self.assertGreaterEqual(r["selection_significant_streak"], 2)
+        self.assertGreaterEqual(r["final_opened_count"], 1)
+        self.assertEqual(r["final_status"], "opened")
+        self.assertTrue(r["final_result"]["significant"])
+        self.assertTrue(r["capability_confirmed"])
+        # the final's preconditions were frozen from the selection side
+        pre = r["final_preconditions"]
+        for k in ("model_fingerprint", "parser_version", "eval_regime", "scoring_version",
+                  "baseline_definition", "significance_z", "selection_result",
+                  "final_snapshot_fingerprint", "final_query_index"):
+            self.assertIn(k, pre)
+
+    def test_re_measuring_the_same_final_is_not_a_second_confirmation(self):
+        r = self._grow({}, [160, 260])
+        opened = r["final_opened_count"]
+        self.assertGreaterEqual(opened, 1)
+        r2 = rcp.evaluate_comprehension(structured_stories(n=260, seed=1), r)  # same model + data
+        self.assertEqual(r2["final_opened_count"], opened)       # no extra open
+        self.assertEqual(r2["final_history"], r["final_history"])
+
+    def test_budget_caps_independent_finals_then_reports_stale(self):
+        r = self._grow({}, [160, 260, 460, 820])                 # 4 big retrainings
+        self.assertLessEqual(r["final_opened_count"], rcp.jb.FINAL_QUERY_BUDGET)
+        if r["final_opened_count"] >= rcp.jb.FINAL_QUERY_BUDGET and r["final_stale_for_current_model"]:
+            self.assertEqual(r["final_status"], "stale_needs_fresh_final")
+            self.assertFalse(r["capability_confirmed"])
+
+    def test_train_selection_final_collections_are_disjoint(self):
+        r = self._grow({}, [160, 260])
+        d = r["collection_disjointness"]
+        self.assertEqual(d["train_x_selection"], [])
+        self.assertEqual(d["train_x_final"], [])
+        self.assertEqual(d["selection_x_final"], [])
+        self.assertTrue(r["collections_disjoint"])
+
+    def test_eval_regime_change_does_not_inherit_the_old_streak_or_finals(self):
         old = {"eval_regime": "legacy_regime_v0", "significant_streak": 2,
-               "beats_baseline": True, "beats_baseline_significant": True,
-               "last_significant_train": 25, "test_snapshot": held,
+               "selection_significant_streak": 2, "capability_confirmed": True,
+               "beats_baseline": True, "final_history": [{"tier": "final", "result": {"significant": True}}],
+               "test_snapshot": [{"url": s["url"], "events": s["events"]}
+                                 for s in structured_stories(120) if rcp._held_out(s["url"])],
                "learning_curve": [{"train_stories": 25}]}
-        r = rcp.evaluate_comprehension(stories, old)
+        r = rcp.evaluate_comprehension(structured_stories(n=160), old)
         self.assertEqual(r["eval_regime"], rcp.EVAL_REGIME)
         self.assertEqual(r["regime_reset_from"], "legacy_regime_v0")
-        # the first measurement under the new regime is streak 1 at most, never a pass
-        self.assertFalse(r["beats_baseline"])
-        self.assertLessEqual(r["significant_streak"], 1)
-        # only a SECOND measurement at a larger training size can reach streak 2
-        grown = structured_stories(n=120) + structured_stories(n=90, seed=11)
-        r2 = rcp.evaluate_comprehension(grown, r)
-        self.assertGreaterEqual(r2["significant_streak"], 2)
-        self.assertTrue(r2["beats_baseline"])
+        self.assertFalse(r["capability_confirmed"])
+        self.assertEqual(r["final_opened_count"], 0)             # old finals not inherited
+        self.assertLessEqual(r["selection_significant_streak"], 1)
+
+    def test_insufficient_final_stories_is_reported_honestly(self):
+        # too few collections in the 'final' tier -> no fake final
+        r = rcp.evaluate_comprehension(structured_stories(n=45), {})
+        if r["status"] == "measured":
+            self.assertIn(r["final_status"], ("unopened", "insufficient_final_stories"))
+            self.assertFalse(r["capability_confirmed"])
 
     def test_snapshot_fingerprint_depends_on_event_content(self):
         a = [{"url": "http://x/1", "events": [{"subject": "a", "verb": "b", "obj": ""}]}]
