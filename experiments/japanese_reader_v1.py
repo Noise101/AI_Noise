@@ -154,8 +154,13 @@ def run_once(runtime: Path) -> dict:
     cur["cycle"] = cycle
     events_store = _read_events()
 
-    # a better parser can rescue books an older one set aside: put them back in
-    # rotation and drop their stale cached events so they are re-extracted
+    # a better parser deserves a fresh reading of the whole shelf: drop the event
+    # cache, put books it had set aside back in rotation, and re-walk from the
+    # easiest level.
+    from japanese_event_v1 import PARSER_VERSION
+    if cur.get("events_parser_version", 0) < PARSER_VERSION:
+        events_store = {}
+        cur["events_parser_version"] = PARSER_VERSION
     for bid in curriculum.reevaluate_stale_parses(cur):
         events_store.pop(bid, None)
     curriculum.reset_level_for_new_parser(cur, cycle)

@@ -30,7 +30,8 @@ from dataclasses import dataclass, field
 # stamps this per book; japanese_reader_v1 re-shelves the stragglers).
 #   1 -> initial per-fragment extractor
 #   2 -> sentence-level clause chaining + relative-clause / predicate-が fixes
-PARSER_VERSION = 2
+#   3 -> direct-speech (「…」と言った) events; te-form subject carries forward
+PARSER_VERSION = 3
 
 # character classes
 HIRAGANA = r"ぁ-ゖゝゞ"
