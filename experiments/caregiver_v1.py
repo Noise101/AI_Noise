@@ -46,21 +46,37 @@ def _distinct(seq):
     return list(dict.fromkeys(x for x in seq if x))
 
 
-_PARTICLE_CHARS = set("はがをにへでとのも、。")
-# pronouns / deixis / quantifiers the parser leaves as "subjects" -- never a
-# meaningful multiple-choice answer for "whose story is it?"
+_PARTICLE_CHARS = set("はがをへ、。")          # rare inside a noun (もり/こうもり/つの keep も/の)
+# pronouns / deixis / quantifiers / connectives / adverbs the parser leaves as
+# "subjects" -- never a meaningful multiple-choice answer for "whose story is it?"
 _NON_ENTITY = {"それ", "これ", "あれ", "どれ", "ここ", "そこ", "あそこ", "わたし", "わたくし",
                "あなた", "きみ", "おまえ", "ぼく", "おれ", "だれ", "なに", "みんな", "みな",
                "ひとり", "ふたり", "なるほう", "ある", "いる", "こと", "もの", "とき", "ところ",
-               "じぶん", "ひとつ", "そう", "どう", "なるほど"}
+               "じぶん", "ひとつ", "そう", "どう", "なるほど",
+               "けれど", "けれども", "しかし", "そして", "それから", "すると", "ところが",
+               "いつか", "いつも", "いきなり", "やがて", "とうとう", "なぜ", "どうして",
+               "たしかに", "もし", "きっと", "まるで", "ちょうど", "もう", "まだ", "しまいに",
+               "とき", "あいだ", "うち", "ため", "まま", "ほう", "とおり"}
 
 
 def _name_like(subject: str) -> bool:
     """A caregiver question is only worth asking if the candidate answers look
-    like real story entities, not parser debris ('冬はあつぼったい木のくつを') or
+    like real story entities, not parser debris ('取り扱う傾', 'けれど') or
     pronouns ('それ')."""
-    return (bool(subject) and 2 <= len(subject) <= 6
-            and not (_PARTICLE_CHARS & set(subject)) and subject not in _NON_ENTITY)
+    if not subject or not (2 <= len(subject) <= 6):
+        return False
+    if _PARTICLE_CHARS & set(subject) or subject in _NON_ENTITY:
+        return False
+    # a relative-clause fragment ("同化しない間", "見事な牡鹿") carries verb/adjective
+    # material -- the extractor's modifier stripper shortens it, or it embeds a
+    # negation / verb ending mid-string
+    from japanese_event_v1 import _strip_modifier
+    if _strip_modifier(subject) != subject:
+        return False
+    if any(v in subject for v in ("ない", "しな", "する", "って", "たり", "ながら")):
+        return False
+    return not subject.startswith(("いきなり", "だんだん", "そのうち", "しばらく", "まもなく",
+                                   "見事な", "りっぱな", "ふしぎな", "あわれな"))
 
 
 def _fidelity_band(fidelity: float | None) -> int:
@@ -102,10 +118,12 @@ def generate_questions(recent: list[dict], cycle: int, model=None) -> list[dict]
         excerpt = retold[:140]
         n = len(questions)
 
-        subjects = [s for s in _distinct(e.get("subject") for e in events) if _name_like(s)]
+        # only real, recurring entities make a fair "whose story is it?" -- a
+        # noun the parser produced once is debris, not a character
+        counts = Counter(e.get("subject") for e in events if _name_like(e.get("subject") or ""))
+        subjects = [s for s, c in counts.most_common() if c >= 2]
         if len(subjects) >= 2 and n % 2 == 0:
-            counts = Counter(e.get("subject") for e in events if _name_like(e.get("subject") or ""))
-            protagonist = counts.most_common(1)[0][0]
+            protagonist = subjects[0]
             options = _distinct([protagonist] + subjects)[:3]
             options.sort(key=lambda o: hashlib.md5(f"{url}{o}".encode()).hexdigest())
             questions.append({

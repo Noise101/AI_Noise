@@ -31,7 +31,9 @@ from dataclasses import dataclass, field
 #   1 -> initial per-fragment extractor
 #   2 -> sentence-level clause chaining + relative-clause / predicate-が fixes
 #   3 -> direct-speech (「…」と言った) events; te-form subject carries forward
-PARSER_VERSION = 3
+#   4 -> verb normalisation: negative-past, bare te-form, clause-tail stripping,
+#        った defaults to る; single-kanji topic は
+PARSER_VERSION = 4
 
 # character classes
 HIRAGANA = r"ぁ-ゖゝゞ"
@@ -133,9 +135,15 @@ VERB_TABLE = {
 # godan: i-row (ます-stem last kana) -> dictionary u-row
 I_TO_U = {"い": "う", "き": "く", "ぎ": "ぐ", "し": "す", "ち": "つ",
           "に": "ぬ", "ひ": "ふ", "び": "ぶ", "み": "む", "り": "る"}
-# past-tense godan endings: surface tail -> (drop, dictionary tail)
-GODAN_PAST = {"った": ["う", "つ", "る"], "いた": ["く"], "いだ": ["ぐ"],
+# past-tense godan endings: surface tail -> (drop, dictionary tail).  For った the
+# ending is ambiguous (買う/待つ/取る all -> った); default to る (つかまる, とまる,
+# かかる, わかる are far more common in these stories than the odd new う-verb) and
+# list the frequent う-verbs whose stem ends the surface before った.
+GODAN_PAST = {"った": ["る", "つ", "う"], "いた": ["く"], "いだ": ["ぐ"],
               "した": ["す"], "んだ": ["ぬ", "ぶ", "む"]}
+_GODAN_U_STEMS = ("思", "おも", "笑", "わら", "使", "つか", "歌", "うた", "買", "か",
+                  "会", "合", "あ", "手伝", "てつだ", "もら", "はら", "うしな", "した",
+                  "すく", "とりあ", "であ", "い")
 
 
 def normalise_text(text: str) -> str:
@@ -162,6 +170,12 @@ def _protect_quotes(text: str) -> "tuple[str, list[str]]":
 TE_AUX = re.compile(r"[てで](き(た|ました|ます)|くる|きます|"
                     r"い(た|ました|ます|きました|る)|いく|"
                     r"しま(った|いました|う)|お(いた|きました)|み(た|ました|る))$")
+# clause-final nominalisers / conjunctions that hang off a finished verb
+_VERB_TAIL = re.compile(
+    r"(の(だ|です|である|でした)?|ん(だ|です)|(んだ|の)けれど[も]?|"
+    r"から|ので|のに|けれど[も]?|"
+    r"のである|のでした|んだと|ということ)$")
+_NEG_PAST = re.compile(r"な(かった|かっ)(ら|ので|のです|のである|から|けれど[も]?|り)?$")
 
 
 def _dictionary_verb(surface: str) -> tuple[str, float]:
@@ -169,6 +183,12 @@ def _dictionary_verb(surface: str) -> tuple[str, float]:
     surface = surface.strip("。、！？「」『』（）　 \n")
     if not surface:
         return "", 0.0
+    for _ in range(2):                           # 受けたのである -> 受けた
+        stripped = _VERB_TAIL.sub("", surface)
+        if stripped == surface or len(stripped) < 2:
+            break
+        surface = stripped
+    surface = _NEG_PAST.sub("ない", surface)      # できなかった -> できない
     # strip a subsidiary て-verb (流れてきた -> 流れる, 持っていった -> 持つ)
     aux = TE_AUX.search(surface)
     if aux and aux.start() > 1:
@@ -196,10 +216,22 @@ def _dictionary_verb(surface: str) -> tuple[str, float]:
     # plain past: ...た / ...だ
     if surface.endswith(("た", "だ")):
         for tail, options in GODAN_PAST.items():
-            if surface.endswith(tail):
-                return surface[:-len(tail)] + options[0], 0.6
+            if not surface.endswith(tail):
+                continue
+            root = surface[:-len(tail)]
+            if tail == "った" and root.endswith(_GODAN_U_STEMS):
+                return root + "う", 0.7
+            return root + options[0], 0.6
         if surface.endswith("た"):               # ichidan past: 食べた -> 食べる
             return surface[:-1] + "る", 0.65
+    # bare te-form that TE_AUX did not catch: おちて -> おちる, 見て -> 見る
+    if surface.endswith("て") and not surface.endswith(("って", "いて", "して")):
+        return surface[:-1] + "る", 0.6
+    if surface.endswith("って"):                  # 走って -> 走る (default る, not う)
+        return surface[:-2] + "る", 0.5
+    if surface.endswith(("いで", "んで")):
+        tail = {"いで": "ぐ", "んで": "む"}[surface[-2:]]
+        return surface[:-2] + tail, 0.5
     # negative: ...ない
     if surface.endswith("ない") and len(surface) > 2:
         stem = surface[:-2]
@@ -327,11 +359,13 @@ def _split_particles(clause: str, known_words: "set[str] | None" = None) -> list
             if matched is None and not seen_topic and not out:
                 cleaned = _clean_noun(current)
                 run = len(cleaned)
-                # topic は only at the first NP after a >=2-char run; topic も
-                # needs >=3 (も is far more often word-internal: もも, くも, ...).
-                # 「いっぴきも」「だれも」: quantifier/deixis + も is "even", not a topic
+                # topic は after a >=2-char run, OR a single kanji/katakana noun
+                # (犬は, 熊は); topic も needs >=3 (も is far more often
+                # word-internal).  「いっぴきも」「だれも」: quantifier/deixis + も
+                # is "even", not a topic.
+                single_kanji = run == 1 and bool(_KANJI_KATA.match(cleaned))
                 if cleaned not in NON_TOPIC_NOUNS and not COUNTER_WORD.match(cleaned):
-                    for particle, need in (("は", 2), ("も", 3)):
+                    for particle, need in (("は", 1 if single_kanji else 2), ("も", 3)):
                         if clause.startswith(particle, i) and run >= need:
                             matched, seen_topic = particle, True
                             break

@@ -70,8 +70,9 @@ class JapaneseEventTest(unittest.TestCase):
             "あるとき、あそびまわっていたこうもりが、あやまって地べたにおちて、"
             "そこにいたいたちに、つかまってしまいました。")
         self.assertTrue(events)
-        self.assertEqual(events[-1].subject, "こうもり")
-        self.assertTrue(events[-1].subject_explicit)
+        self.assertTrue(all(e.subject == "こうもり" for e in events))
+        self.assertTrue(any(e.subject_explicit for e in events))
+        self.assertIn("つかまる", [e.verb for e in events])
 
     def test_relative_clause_before_the_subject_is_stripped(self):
         event = extract_clause("そこにいたいたちがこうもりをつかまえました。")
@@ -125,6 +126,14 @@ class JapaneseEventTest(unittest.TestCase):
         self.assertEqual(_dictionary_verb("買った")[0], "買う")
         self.assertEqual(_dictionary_verb("書いた")[0], "書く")
         self.assertEqual(_dictionary_verb("しました")[0], "する")
+
+    def test_verb_normalisation_negative_past_and_te_form(self):
+        self.assertEqual(_dictionary_verb("できなかった")[0], "できる")
+        self.assertEqual(_dictionary_verb("わからなかったので")[0], "わかる")
+        self.assertEqual(_dictionary_verb("しなかった")[0], "する")
+        self.assertEqual(_dictionary_verb("おちて")[0], "おちる")
+        self.assertEqual(_dictionary_verb("つかまった")[0], "つかまる")
+        self.assertEqual(_dictionary_verb("受けたのである")[0], "受ける")
 
     def test_te_auxiliary_is_stripped(self):
         self.assertEqual(_dictionary_verb("流れてきました")[0], "流れる")

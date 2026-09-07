@@ -55,6 +55,21 @@ class CaregiverTest(unittest.TestCase):
         cg.open_batch(state, coherence, cycle=15)
         self.assertEqual(cg.apply_answers(state, "3")["matched_story"], 1)
 
+    def test_parser_debris_is_not_offered_as_a_protagonist_option(self):
+        self.assertFalse(cg._name_like("同化しない間"))
+        self.assertFalse(cg._name_like("けれど"))
+        self.assertFalse(cg._name_like("命乞をするのを"))
+        self.assertFalse(cg._name_like("いきなり霧積"))
+        for real in ("きつね", "こうもり", "とり", "ももたろう", "おじいさん"):
+            self.assertTrue(cg._name_like(real), real)
+
+    def test_protagonist_question_needs_two_recurring_entities(self):
+        # a noun the parser produced once is not a character
+        recent = [story("t", ["さる", "さる", "取り扱う傾", "けれど"],
+                        ["みる", "とる", "する", "つづく"])]
+        qs = cg.generate_questions(recent, cycle=15)
+        self.assertEqual(qs[0]["kind"], "retelling_coherent")   # only one real entity -> no protagonist Q
+
     def test_stale_batch_expires(self):
         state = cg.empty_state()
         cg.open_batch(state, [{"id": "q", "kind": "order", "options": ["はい", "いいえ"],
