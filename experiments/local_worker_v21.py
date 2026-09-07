@@ -303,10 +303,12 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
                      f"{ret.get('eval_regime')}：連続回数を0にリセット")
     fp = comp.get("snapshot_fingerprint") or ret.get("snapshot_fingerprint")
     if fp:
-        lines.append(f"固定スナップショット: 理解 {comp.get('snapshot_stories')}話/{comp.get('snapshot_fingerprint')}"
+        lines.append(f"固定スナップショット: 理解 {comp.get('snapshot_stories')}話/"
+                     f"{comp.get('snapshot_fingerprint')}（{comp.get('eval_regime')}）"
                      f"、再話 {ret.get('snapshot_stories')}話/{ret.get('snapshot_fingerprint')}"
-                     f"（方式 {comp.get('eval_regime')}、移行 "
-                     f"{bool(comp.get('snapshot_migrated') or ret.get('snapshot_migrated'))}）")
+                     f"（{ret.get('eval_regime')}）"
+                     f"／指紋はURL＋イベント内容、移行 "
+                     f"{bool(comp.get('snapshot_migrated') or ret.get('snapshot_migrated'))}")
     mig = reading_status.get("schema_migration", {}) or {}
     if mig.get("migrated"):
         lines.append(f"カリキュラム移行 v{mig.get('from_schema')}→v3: 読了 {mig.get('books_read')}冊／"
