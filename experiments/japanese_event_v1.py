@@ -698,8 +698,12 @@ def _refine_dicts(events: list[dict]) -> list[dict]:
             verb = _teacher_main_verb(a, e.get("verb", "")) or e.get("verb", "")
             subject = _teacher_noun_head(a, e.get("subject", "")) if e.get("subject") else e.get("subject", "")
             if verb != e.get("verb") or subject != e.get("subject"):
+                # a score-0 proposal re-reads the SAME textual evidence -- it may
+                # supply a cleaner surface form but must not raise confidence
+                # (ARCHITECTURE.md invariant 10); cap it at the heuristic value
                 e["verb"], e["subject"] = verb, subject
-                e["confidence"] = round(min(0.95, (e.get("confidence") or 0.5) + 0.15), 3)
+                e["confidence"] = round(min(e.get("confidence") or 0.5, 0.6), 3)
+                e["teacher_refined"] = True
         out.append(e)
     return out
 

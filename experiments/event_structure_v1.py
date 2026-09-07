@@ -214,17 +214,35 @@ def _sign_p(wins: int, losses: int) -> float:
     return sum(math.comb(discordant, k) for k in range(wins, discordant + 1)) / (2 ** discordant)
 
 
+def _collection_sign(per_collection: "dict[str, list[int]]") -> tuple[int, int]:
+    """A collection wins if the model's net correct-vs-baseline is positive
+    within it, loses if negative.  Events inside one collection are correlated,
+    so significance is a sign test over COLLECTIONS, not events."""
+    wins = sum(1 for net in per_collection.values() if net[0] - net[1] > 0)
+    losses = sum(1 for net in per_collection.values() if net[0] - net[1] < 0)
+    return wins, losses
+
+
 def _summarise(correct: int, baseline: int, total: int, covered: int,
-               wins: int, losses: int) -> dict:
+               wins: int, losses: int,
+               per_collection: "dict[str, list[int]] | None" = None) -> dict:
+    coll_wins, coll_losses = _collection_sign(per_collection or {})
     return {"correct": correct, "baseline_correct": baseline, "total": total,
             "coverage": round(covered / total, 4) if total else 0.0,
-            "lift": correct - baseline, "paired_wins": wins, "paired_losses": losses,
-            "one_sided_sign_p": round(_sign_p(wins, losses), 6)}
+            "lift": correct - baseline,
+            "paired_wins": wins, "paired_losses": losses,
+            "collection_wins": coll_wins, "collection_losses": coll_losses,
+            "evaluated_collections": len(per_collection or {}),
+            # significance is over collections; the event-level sign test stays
+            # for reference only
+            "one_sided_sign_p": round(_sign_p(coll_wins, coll_losses), 6),
+            "event_level_sign_p": round(_sign_p(wins, losses), 6)}
 
 
 def evaluate_cloze(model, baseline: FrequencyBaseline,
                    events: list[tuple[str, str, str, str]]) -> tuple[dict, list[dict]]:
     correct = base_correct = covered = wins = losses = 0
+    per_collection: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     trials = []
     for subject, verb, obj, url in events:
         predicted = model.predict_verb(subject, obj)
@@ -234,11 +252,14 @@ def evaluate_cloze(model, baseline: FrequencyBaseline,
         base_correct += base_hit
         wins += hit and not base_hit
         losses += base_hit and not hit
+        per_collection[collection_key(url)][0] += hit
+        per_collection[collection_key(url)][1] += base_hit
         covered += model.covers(subject, obj)
         trials.append({"source_id": source_key(url), "subject": subject, "object": obj,
                        "predicted": predicted, "observed": verb, "baseline": base,
                        "correct": hit, "baseline_correct": base_hit})
-    return _summarise(correct, base_correct, len(events), covered, wins, losses), trials
+    return _summarise(correct, base_correct, len(events), covered, wins, losses,
+                      per_collection), trials
 
 
 def evaluate_plausibility(model, baseline: FrequencyBaseline,
@@ -248,6 +269,7 @@ def evaluate_plausibility(model, baseline: FrequencyBaseline,
     weights = [baseline.verb_freq[v] for v in vocab]
     obj_vocab = sorted({obj for _, _, obj, _ in events if obj})
     correct = base_correct = covered = wins = losses = 0
+    per_collection: dict[str, list[int]] = defaultdict(lambda: [0, 0])
     trials = []
     for subject, verb, obj, url in events:
         rng = random.Random(f"{seed}:{subject}|{verb}|{obj}|{url}")
@@ -269,12 +291,15 @@ def evaluate_plausibility(model, baseline: FrequencyBaseline,
             base_correct += base_hit
             wins += hit and not base_hit
             losses += base_hit and not hit
+            per_collection[collection_key(url)][0] += hit
+            per_collection[collection_key(url)][1] += base_hit
             covered += model.covers(subject, obj)
             trials.append({"source_id": source_key(url), "corrupter": name,
                            "real": f"{subject}|{verb}|{obj}",
                            "corrupted": f"{corrupted[0]}|{bad_verb}|{bad_obj}",
                            "correct": hit, "baseline_correct": base_hit})
-    return _summarise(correct, base_correct, len(trials), covered, wins, losses), trials
+    return _summarise(correct, base_correct, len(trials), covered, wins, losses,
+                      per_collection), trials
 
 
 def passes_gain_gate(evaluation: dict, alpha: float) -> bool:
@@ -330,13 +355,22 @@ def _candidate_benchmark(events: list[tuple[str, str, str, str]]) -> dict:
 
 
 def choose_benchmark(events, previous: dict) -> dict:
-    """Return the frozen split, locking it the first time it is ready."""
+    """Return the frozen split, locking it the first time it is ready.  Once
+    locked the evaluation events themselves are a SNAPSHOT -- not re-derived from
+    current data -- so the held-out set cannot grow as its collections accrue
+    more events."""
     locked = (previous or {}).get("benchmark", {})
     if locked.get("selection_regime") == BENCHMARK_REGIME and locked.get("benchmark_collections"):
-        return {"ready": True, "locked": True,
-                "benchmark_collections": locked["benchmark_collections"],
-                "selection_collections": locked["selection_collections"],
-                "eligible_collection_count": locked.get("eligible_collection_count", 0)}
+        result = {"ready": True, "locked": True,
+                  "benchmark_collections": locked["benchmark_collections"],
+                  "selection_collections": locked["selection_collections"],
+                  "eligible_collection_count": locked.get("eligible_collection_count", 0)}
+        snap_sel = locked.get("selection_event_snapshot")
+        snap_fin = locked.get("final_event_snapshot")
+        if snap_sel is not None and snap_fin is not None:
+            result["selection_event_snapshot"] = [tuple(e) for e in snap_sel]
+            result["final_event_snapshot"] = [tuple(e) for e in snap_fin]
+        return result
     candidate = _candidate_benchmark(events)
     candidate["locked"] = False
     return candidate
@@ -367,10 +401,16 @@ def train_and_evaluate(verified_experience: dict, previous: dict | None = None) 
 
     bench_set = set(benchmark["benchmark_collections"])
     selection_set = set(benchmark["selection_collections"])
+    # training may grow (the point is to compare learning speed); the held-out
+    # evaluation events are frozen the first time they are captured
     train_events = [e for e in events if collection_key(e[3]) not in bench_set]
-    selection_events = [e for e in events if collection_key(e[3]) in selection_set]
-    final_events = [e for e in events
-                    if collection_key(e[3]) in bench_set and collection_key(e[3]) not in selection_set]
+    if benchmark.get("final_event_snapshot") is not None:
+        selection_events = benchmark["selection_event_snapshot"]
+        final_events = benchmark["final_event_snapshot"]
+    else:
+        selection_events = [e for e in events if collection_key(e[3]) in selection_set]
+        final_events = [e for e in events
+                        if collection_key(e[3]) in bench_set and collection_key(e[3]) not in selection_set]
 
     baseline = FrequencyBaseline(train_events)
     plaus_seed = hashlib.sha256(
@@ -487,6 +527,9 @@ def train_and_evaluate(verified_experience: dict, previous: dict | None = None) 
                       "source_count": len({e[3] for e in selection_events + final_events}),
                       "selection_events": len(selection_events),
                       "final_events": len(final_events),
+                      # the frozen evaluation events themselves (captured once)
+                      "selection_event_snapshot": [list(e) for e in selection_events],
+                      "final_event_snapshot": [list(e) for e in final_events],
                       "fingerprint": plaus_seed},
         "training": {"events": len(train_events),
                      "source_count": len({e[3] for e in train_events}),

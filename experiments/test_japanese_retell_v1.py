@@ -85,22 +85,31 @@ class RetellTest(unittest.TestCase):
                                ("なく", "おおごえでなきました。"))]
         self.assertLess(jr.retelling_coherence(events), 0.6)
 
-    def test_in_order_retelling_beats_shuffled_on_held_out_stories(self):
+    def test_template_roundtrip_is_a_diagnostic_not_a_capability(self):
+        # the in-order-vs-shuffled TEMPLATE comparison used to earn beats_baseline
+        # -- it only measured "can I serialise a list in order", so it must not
         stories = folktale_stories()
         report = jr.evaluate_retelling(stories, {})
-        self.assertEqual(report["status"], "measured")
-        self.assertGreater(report["fidelity"], report["fidelity_baseline"])
-        self.assertGreater(report["gain_z"], jr.SIGNIFICANCE_Z)
-        self.assertTrue(report["beats_baseline_significant"])
-        self.assertFalse(report["beats_baseline"])          # needs two cycles
+        self.assertEqual(report["status"], "no_generation_model")   # no RNN state
+        self.assertFalse(report["beats_baseline"])
+        self.assertGreater(report["roundtrip_fidelity"], 0.0)       # still reported
         second = jr.evaluate_retelling(stories, report)
-        self.assertTrue(second["beats_baseline"])
-        self.assertEqual(second["significant_streak"], 2)
+        self.assertFalse(second["beats_baseline"])
+
+    def test_generation_capability_needs_the_rnn_to_beat_the_shuffled_template(self):
+        import japanese_sequence_v1 as js
+        stories = folktale_stories()
+        state = js.TinyRNN(sorted("むかしきつねうさぎぶどうをみつけるたべるなく。")).state()
+        report = jr.evaluate_retelling(stories, {}, rnn_state=state)
+        self.assertEqual(report["status"], "measured")
+        self.assertIn("generation_gain", report)
+        # an untrained RNN will not beat the baseline -- that is the honest result
+        self.assertFalse(report["beats_baseline"])
 
     def test_insufficient_stories_reports_cleanly(self):
         report = jr.evaluate_retelling(folktale_stories(n=10), {})
         self.assertEqual(report["status"], "insufficient_stories")
-        self.assertIsNone(report["fidelity"])
+        self.assertIsNone(report["roundtrip_fidelity"])
         self.assertFalse(report["beats_baseline"])
 
     def test_free_retell_is_a_noop_without_a_trained_rnn_state(self):

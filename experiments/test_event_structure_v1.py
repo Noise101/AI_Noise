@@ -98,6 +98,32 @@ class EventStructureTest(unittest.TestCase):
         second = train_and_evaluate(verified(grown), first)
         self.assertEqual(second["benchmark"]["benchmark_collections"], frozen)
 
+    def test_frozen_evaluation_events_are_a_snapshot_not_re_derived(self):
+        first = train_and_evaluate(verified(learnable_sequences(60)), {})
+        self.assertEqual(first["benchmark"]["status"], "ready")
+        n_final = first["benchmark"]["final_events"]
+        n_sel = first["benchmark"]["selection_events"]
+        # the benchmark collections gain MANY more events later
+        bench_cols = first["benchmark"]["benchmark_collections"]
+        grown = learnable_sequences(60)
+        for col in bench_cols[:2]:
+            title = col.split("/")[-1] if "/" in col else col
+            grown += [{"seed": "x", "source_url": col + f"#extra{i}",
+                       "events": ["fox|ate|grapes", "fox|ran|home"]} for i in range(40)]
+        second = train_and_evaluate(verified(grown), first)
+        self.assertEqual(second["benchmark"]["final_events"], n_final)
+        self.assertEqual(second["benchmark"]["selection_events"], n_sel)
+
+    def test_significance_is_a_sign_test_over_collections_not_events(self):
+        report = train_and_evaluate(verified(learnable_sequences(80)), {})
+        curve = report.get("learning_curve", [])
+        # the reported p-value is derived from collection wins/losses
+        for ev in report.get("selection_evaluations", []) or []:
+            sel = ev.get("selection", ev)
+            if "collection_wins" in sel:
+                self.assertLessEqual(sel["collection_wins"] + sel["collection_losses"],
+                                     sel.get("evaluated_collections", 99))
+
     def test_benchmark_sources_never_enter_training(self):
         report = train_and_evaluate(verified(learnable_sequences(60)), {})
         bench = set(report["benchmark"]["benchmark_collections"])

@@ -281,19 +281,45 @@ def _held_out(url: str) -> bool:
     return int(hashlib.sha256(f"retell:{url}".encode()).hexdigest(), 16) % 5 == 0
 
 
-def evaluate_retelling(stories: list[dict], previous: dict | None = None) -> dict:
-    """stories: [{url, events}].  Held-out (source-disjoint) stories are retold
-    in order and, as a baseline, in a shuffled order; the capability is the
-    in-order fidelity gain."""
+def evaluate_retelling(stories: list[dict], previous: dict | None = None,
+                       rnn_state: dict | None = None) -> dict:
+    """stories: [{url, events}].
+
+    A *retelling capability* is generating a text from what was understood that,
+    re-parsed, preserves the story's events better than chance.  `retell()` is a
+    template baseline -- serialising the very triples the re-parser then recovers
+    is a round-trip identity, not a capability, so the in-order-vs-shuffled
+    template comparison NO LONGER counts as `beats_baseline` (it was measuring
+    "can I serialise a list in order").
+
+    The real signal is `free_retell` -- a generation from the character RNN --
+    beating the shuffled-template baseline on held-out stories.  Until the RNN
+    can do that this returns `beats_baseline: False` with a documented status.
+    """
     previous = previous or {}
     train = [s for s in stories if not _held_out(s["url"]) and len(s.get("events", [])) >= 3]
     test = [s for s in stories if _held_out(s["url"]) and len(s.get("events", [])) >= 3]
     if len(train) < MIN_TRAIN_STORIES or len(test) < MIN_TEST_STORIES:
-        return {"version": 1, "status": "insufficient_stories",
+        return {"version": 2, "status": "insufficient_stories",
                 "train_stories": len(train), "test_stories": len(test),
-                "fidelity": None, "fidelity_baseline": None, "beats_baseline": False,
+                "roundtrip_fidelity": None, "generation_gain": None, "beats_baseline": False,
                 "significant_streak": 0,
                 "learning_curve": list(previous.get("learning_curve", []))}
+
+    # generation capability: the RNN retelling vs the shuffled-template baseline
+    gen_scores, base_scores = [], []
+    if rnn_state and rnn_state.get("vocab"):
+        for story in test:
+            events = story["events"]
+            opening = (events[0].get("sentence") or "むかしむかし")[:12]
+            free = free_retell(rnn_state, opening)
+            rng = random.Random(int(hashlib.sha256(story["url"].encode()).hexdigest(), 16) % (2 ** 32))
+            shuffled = events[:]
+            rng.shuffle(shuffled)
+            gen_scores.append(score_retelling(events, free)["fidelity"] if free else 0.0)
+            base_scores.append(score_retelling(events, retell(shuffled))["fidelity"])
+    gen_gain = (sum(gen_scores) / len(gen_scores) - sum(base_scores) / len(base_scores)
+                if gen_scores else None)
 
     gains, ordered_scores, shuffled_scores = [], [], []
     for story in test:
@@ -307,26 +333,42 @@ def evaluate_retelling(stories: list[dict], previous: dict | None = None) -> dic
         shuffled_scores.append(scrambled)
         gains.append(ordered - scrambled)
 
-    n = len(gains)
-    mean_gain = sum(gains) / n
-    mean_ordered = sum(ordered_scores) / n
-    mean_shuffled = sum(shuffled_scores) / n
-    var = sum((g - mean_gain) ** 2 for g in gains) / max(1, n - 1)
-    se = math.sqrt(var / n) if var > 0 else 0.0
-    z = mean_gain / se if se > 0 else (99.0 if mean_gain > 0 else 0.0)
-    p = round(0.5 * math.erfc(z / math.sqrt(2)), 6) if z > 0 else 1.0
+    # round-trip diagnostic (NOT a capability): can retell() serialise its own
+    # triples in order?  Kept for the learning curve / trend display only.
+    diag = [score_retelling(s["events"], retell(s["events"]))["fidelity"] for s in test]
+    base = []
+    for story in test:
+        rng = random.Random(int(hashlib.sha256(story["url"].encode()).hexdigest(), 16) % (2 ** 32))
+        shuf = story["events"][:]
+        rng.shuffle(shuf)
+        base.append(score_retelling(story["events"], retell(shuf))["fidelity"])
+    n = len(diag)
+    mean_ordered, mean_shuffled = sum(diag) / n, sum(base) / n
 
-    significant = z >= SIGNIFICANCE_Z and n >= MIN_TEST_STORIES
-    prior_sig = previous.get("beats_baseline_significant", False)
-    streak = previous.get("significant_streak", 0) + 1 if significant else 0
+    # the actual capability: RNN generation beats the shuffled-template baseline
+    if gen_gain is None:
+        status, beats, streak = "no_generation_model", False, 0
+        z = 0.0
+    else:
+        gains = [g - b for g, b in zip(gen_scores, base_scores)]
+        mean_gain = sum(gains) / len(gains)
+        var = sum((g - mean_gain) ** 2 for g in gains) / max(1, len(gains) - 1)
+        se = math.sqrt(var / len(gains)) if var > 0 else 0.0
+        z = mean_gain / se if se > 0 else (99.0 if mean_gain > 0 else 0.0)
+        significant = z >= SIGNIFICANCE_Z and len(gains) >= MIN_TEST_STORIES
+        streak = previous.get("significant_streak", 0) + 1 if significant else 0
+        beats = significant and (previous.get("beats_baseline_significant")
+                                 or previous.get("significant_streak", 0) >= 1)
+        status = "measured"
 
     curve = list(previous.get("learning_curve", []))
-    point = {"train_stories": len(train), "fidelity": round(mean_ordered, 3),
-             "fidelity_baseline": round(mean_shuffled, 3), "gain_z": round(z, 2)}
+    point = {"train_stories": len(train), "roundtrip_fidelity": round(mean_ordered, 3),
+             "generation_gain": None if gen_gain is None else round(gen_gain, 3),
+             "gain_z": round(z, 2)}
     if not curve or curve[-1]["train_stories"] != len(train):
         curve.append(point)
     curve = curve[-200:]
-    tail = [c["fidelity"] for c in curve[-8:]]
+    tail = [c.get("generation_gain") or 0.0 for c in curve[-8:]]
     trend = "insufficient_data"
     if len(tail) >= 4:
         older = sum(tail[:len(tail) // 2]) / (len(tail) // 2)
@@ -334,19 +376,20 @@ def evaluate_retelling(stories: list[dict], previous: dict | None = None) -> dic
         trend = "improving" if newer > older + 0.01 else "declining" if newer < older - 0.01 else "flat"
 
     return {
-        "version": 1, "status": "measured",
+        "version": 2, "status": status,
         "train_stories": len(train), "test_stories": n,
-        "fidelity": round(mean_ordered, 3),
-        "fidelity_baseline": round(mean_shuffled, 3),
-        "fidelity_gain": round(mean_gain, 3),
-        "gain_z": round(z, 2), "gain_p_one_sided": p,
-        "beats_baseline_significant": significant,
-        "beats_baseline": significant and (prior_sig or previous.get("significant_streak", 0) >= 1),
+        "roundtrip_fidelity": round(mean_ordered, 3),          # diagnostic, not capability
+        "roundtrip_shuffled": round(mean_shuffled, 3),
+        "generation_gain": None if gen_gain is None else round(gen_gain, 3),
+        "gain_z": round(z, 2),
+        "beats_baseline_significant": status == "measured" and streak > 0,
+        "beats_baseline": beats,
         "significant_streak": streak,
         "learning_curve": curve, "retelling_trend": trend,
-        "limitations": ["template retelling from Noise's own events; fidelity credit "
-                        "only when in-order beats shuffled-order on held-out stories, "
-                        "twice.  A free-generation retelling (RNN) is a later step."],
+        "limitations": ["the in-order-vs-shuffled TEMPLATE comparison is a round-trip "
+                        "identity, not a capability, and no longer earns credit.  Credit "
+                        "requires a free-generation retelling (RNN) to beat the shuffled "
+                        "template on held-out stories, twice."],
     }
 
 

@@ -85,6 +85,27 @@ class ReadingCurriculumTest(unittest.TestCase):
                                     for b in cur["shelf"].values()), 1)
         self.assertEqual(rc.reset_level_for_new_parser(cur, cycle=10)["reset"], False)
 
+    def test_rereading_the_same_book_does_not_inflate_word_book_counts(self):
+        cur = rc.empty_curriculum()
+        rc.register_books(cur, [book("A", "a", SIMPLE)], cycle=1)
+        bid = rc._book_id("a", "A")
+        for c in range(2, 6):
+            rc.record_reading(cur, bid, GOOD_EVENTS, cycle=c, comprehension=0.5)
+        # "きつね" was seen in exactly ONE book, however many times it was re-read
+        self.assertEqual(cur["known_words"]["きつね"]["books"], 1)
+        rc.register_books(cur, [book("B", "b", SIMPLE)], cycle=10)
+        rc.record_reading(cur, rc._book_id("b", "B"), GOOD_EVENTS, cycle=11, comprehension=0.5)
+        self.assertEqual(cur["known_words"]["きつね"]["books"], 2)
+
+    def test_difficulty_coverage_uses_event_tokens_not_glued_runs(self):
+        known = {"きつね", "ぶどう"}
+        events = [{"subject": "きつね", "obj": "ぶどう", "verb": "みつける"}]
+        d = rc.text_difficulty("きつねがぶどうを見つけました。", 1, known, events=events)
+        self.assertGreater(d["known_word_coverage"], 0.5)     # 2/3 known
+        # without events the whole run is one unknown "word" -> 0
+        self.assertEqual(rc.text_difficulty("きつねがぶどうを見つけました。", 1, known)
+                         ["known_word_coverage"], 0.0)
+
     def test_a_stuck_book_is_shelved_but_retried_as_a_last_resort(self):
         cur = rc.empty_curriculum()
         rc.register_books(cur, [book("A", "a", SIMPLE), book("B", "b", SIMPLE)], cycle=1)

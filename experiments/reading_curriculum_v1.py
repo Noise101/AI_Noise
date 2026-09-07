@@ -103,13 +103,20 @@ def familiar_schema(curriculum: dict) -> set[str]:
             if b["status"] == "graduated" for v in b.get("schema", [])}
 
 
-def text_difficulty(text: str, event_count: int, known_words: set[str]) -> dict:
-    words = WORD.findall(text)
+def text_difficulty(text: str, event_count: int, known_words: set[str],
+                    events: "list[dict] | None" = None) -> dict:
     sentences = [s for s in SENT.split(text) if len(s) > 3]
     n_sent = max(1, len(sentences))
     total_chars = sum(len(s) for s in sentences)
     kanji = len(KANJI.findall(text))
-    vocab = set(words)
+    # `known_words` are event tokens (きつね, ぶどう, 見つける), so coverage must be
+    # measured over the same units -- WORD.findall returns whole particle-glued
+    # runs (「きつねがぶどうを見つけました」) that never match, forcing coverage to 0.
+    if events:
+        vocab = {t for e in events
+                 for t in (e.get("subject"), e.get("obj"), e.get("verb")) if t}
+    else:
+        vocab = set(WORD.findall(text))
     unknown = [w for w in vocab if w not in known_words]
     features = {
         "sentences": len(sentences),
@@ -194,7 +201,8 @@ def register_books(curriculum: dict, books: list[dict], cycle: int) -> int:
         bid = _book_id(book["url"], book["title"])
         if bid in curriculum["shelf"]:
             continue
-        difficulty = text_difficulty(book["text"], book.get("event_count", 0), known)
+        difficulty = text_difficulty(book["text"], book.get("event_count", 0), known,
+                                     events=book.get("events"))
         est = difficulty["estimated_level"]
         in_reach = est <= curriculum["level"] + LEVEL_STEP
         curriculum["shelf"][bid] = {
@@ -325,10 +333,12 @@ def select_next_book(curriculum: dict) -> str | None:
 
 def record_reading(curriculum: dict, book_id: str, events: list[dict],
                    cycle: int, comprehension: float | None = None,
-                   model=None) -> dict:
+                   model=None, vocab_events=None) -> dict:
     book = curriculum["shelf"].get(book_id)
     if not book:
         return {"status": "unknown_book"}
+    if vocab_events is None:
+        vocab_events = events
     from japanese_event_v1 import PARSER_VERSION
     book["parser_version"] = PARSER_VERSION       # which extractor produced this reading
     scorable = [e for e in events if e.get("verb")]
@@ -355,11 +365,17 @@ def record_reading(curriculum: dict, book_id: str, events: list[dict],
     if not book.get("schema"):
         book["schema"] = _schema_signature([e.get("verb", "") for e in events])
 
-    # grow known vocabulary from this book's events (subjects/objects/verbs)
-    tokens = {t for e in events for t in (e.get("subject"), e.get("obj"), e.get("verb")) if t}
+    # grow known vocabulary from this book's HEURISTIC events (subjects / objects
+    # / verbs) -- `books` counts DISTINCT books a word was seen in, so a re-read
+    # of the same book does not inflate it (KNOWN_AFTER_BOOKS wants two books)
+    tokens = {t for e in vocab_events
+              for t in (e.get("subject"), e.get("obj"), e.get("verb")) if t}
     for token in tokens:
-        info = curriculum["known_words"].setdefault(token, {"books": 0, "first_cycle": cycle})
-        info["books"] = info.get("books", 0) + 1
+        info = curriculum["known_words"].setdefault(
+            token, {"books": 0, "first_cycle": cycle, "book_ids": []})
+        if book_id not in info.setdefault("book_ids", []):
+            info["book_ids"].append(book_id)
+            info["books"] = len(info["book_ids"])
 
     history = book["comprehension_history"]
     if score >= GRADUATE_COMPREHENSION:
@@ -422,11 +438,13 @@ def maybe_advance_level(curriculum: dict, cycle: int) -> dict:
                                         f"mean comprehension {mean_recent:.2f}"})
     unshelved = 0
     for b in curriculum["shelf"].values():
-        if b["status"] in ("shelved_above_level", "shelved_stuck") and (
+        was = b["status"]
+        if was in ("shelved_above_level", "shelved_stuck") and (
                 b["shelved_at_level"] or 9) <= new_level + LEVEL_STEP:
             b["status"] = "in_rotation"
             b["shelved_at_level"] = None
-            b["times_read"] = 0 if b.get("status") == "shelved_stuck" else b["times_read"]
+            if was == "shelved_stuck":
+                b["times_read"] = 0          # a fresh chance at the higher level
             unshelved += 1
     return {"advanced": True, "level": new_level, "mean_comprehension": round(mean_recent, 3),
             "unshelved": unshelved}

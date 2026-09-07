@@ -4,9 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 import unittest
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
 
 QUICK_MODULES = [
@@ -57,8 +62,10 @@ def main() -> None:
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
     loader = unittest.defaultTestLoader
-    suite = loader.discover(".") if args.profile == "full" else unittest.TestSuite(
-        loader.loadTestsFromName(module) for module in QUICK_MODULES)
+    # discover in this file's directory, not the caller's cwd -- the README
+    # invokes it from the repo root
+    suite = loader.discover(_HERE, top_level_dir=_HERE) if args.profile == "full" else \
+        unittest.TestSuite(loader.loadTestsFromName(module) for module in QUICK_MODULES)
     started = time.monotonic()
     result = unittest.TextTestRunner(verbosity=1 if args.quiet else 2).run(suite)
     print(f"profile={args.profile} tests={result.testsRun} seconds={time.monotonic() - started:.3f}")

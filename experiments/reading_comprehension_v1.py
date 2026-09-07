@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import math
 import random
+import re
 from collections import Counter, defaultdict
 
 SIGNIFICANCE_Z = 3.0
@@ -162,30 +163,60 @@ def book_comprehension(events: list[dict], model: ComprehensionModel,
 
 # --- vocabulary use-test -------------------------------------------------
 def vocabulary_use_test(word: str, sentences: list[str], distractors: list[str],
-                        model: ComprehensionModel) -> dict:
-    """cloze (pick the real word) + wrong-use rejection, over held-out sentences.
-    Uses per-word verb/subject co-occurrence learned by the model."""
-    if not sentences or len(distractors) < 2:
+                        model: ComprehensionModel,
+                        cooccurrence: "dict[str, Counter] | None" = None) -> dict:
+    """Cloze (pick the real word for a BLANKED slot) + wrong-use rejection, over
+    held-out sentences.  The target is masked before scoring -- otherwise "is the
+    candidate literally in the sentence" trivially picks it.  Scoring uses a
+    word x context-word co-occurrence table learned from other reading."""
+    if not sentences or len(distractors) < 2 or not cooccurrence:
         return {"tested": False}
-    cooc = model.verb_freq  # coarse: how 'expected' each token is overall
     cloze_hits = reject_hits = 0
     for sentence in sentences:
+        if word not in sentence:
+            continue
+        context = [t for t in _content_tokens(sentence.replace(word, "〇")) if t != "〇"]
         options = [word] + distractors[:3]
-        # score = how well each option fits the sentence's other content tokens
-        scored = sorted(options, key=lambda w: -_fit(w, sentence, cooc))
+        scored = sorted(options, key=lambda w: -_context_fit(w, context, cooccurrence))
         cloze_hits += scored[0] == word
         wrong = distractors[0]
-        reject_hits += _fit(word, sentence, cooc) >= _fit(wrong, sentence, cooc)
-    n = len(sentences)
-    cloze_rate = cloze_hits / n
-    reject_rate = reject_hits / n
+        reject_hits += (_context_fit(word, context, cooccurrence)
+                        >= _context_fit(wrong, context, cooccurrence))
+    n = sum(1 for s in sentences if word in s)
+    if not n:
+        return {"tested": False}
+    cloze_rate, reject_rate = cloze_hits / n, reject_hits / n
     return {"tested": True, "sentences": n,
             "cloze_rate": round(cloze_rate, 3), "reject_rate": round(reject_rate, 3),
-            "passes_used": cloze_rate >= 0.5 and reject_rate >= 0.6}
+            "passes_used": cloze_rate >= 0.6 and reject_rate >= 0.6}
 
 
-def _fit(word: str, sentence: str, freq: Counter) -> float:
-    return (1.0 if word in sentence else 0.0) + 0.001 * freq.get(word, 0)
+_CONTENT = re.compile(r"[぀-ヿ㐀-鿿]{2,}")
+
+
+def _content_tokens(text: str) -> list[str]:
+    return _CONTENT.findall(text)
+
+
+def _context_fit(word: str, context: list[str], cooccurrence: "dict[str, Counter]") -> float:
+    row = cooccurrence.get(word)
+    if not row:
+        return 0.0
+    return sum(row.get(c, 0) for c in context) / (1 + sum(row.values()))
+
+
+def build_cooccurrence(stories: list[dict]) -> "dict[str, Counter]":
+    """word -> Counter(other content words seen in the same event), from events."""
+    from collections import defaultdict
+    table: "dict[str, Counter]" = defaultdict(Counter)
+    for story in stories:
+        for e in story.get("events", []):
+            toks = [t for t in (e.get("subject"), e.get("obj"), e.get("verb")) if t]
+            for a in toks:
+                for b in toks:
+                    if a != b:
+                        table[a][b] += 1
+    return dict(table)
 
 
 # --- frozen-benchmark capability measurement ----------------------------

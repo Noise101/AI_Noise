@@ -45,9 +45,14 @@ Read `ARCHITECTURE.md` before changing the learning path. Its invariants are the
 - `v47-v49`: rebuilds prediction evidence from retained source sentences, uses whole-source holdouts, and selects developmental sentence complexity only on unseen-source performance.
 - `v48`: local-model conversation produces hypotheses with zero evidence credit; only independently observed Web contexts may support a structural hypothesis.
 - `v50`: structures independently sourced experiences, retains counterexamples, and promotes a rule only after source-held-out success.
-- `v51`: introduces state/goal/action/result observation frames, persistent per-actor state across scenes, a locked narrative-source benchmark, disjoint model-selection and final source sets, paired baseline comparisons, and automatic rejection when improvement does not replicate.
+- `v51`: introduced state/goal/action/result observation frames and a locked narrative benchmark, but every next-event predictor (world_model_v51, association_learning_v33, causal_experiment_v28, representation_learning_v31) stayed at the frequency baseline. **All four were retired** and replaced by `event_structure_v1`, which predicts structure *inside* one event (verb_cloze, event_plausibility). See `ARCHITECTURE.md` "Predict within the event, not the next event".
 
-The active real-material path is `local_worker_v21.py` plus `world_model_v51.py`; `unified_agent_v9.py` is only the bounded binary-world experiment. At commit `742c30f`, the live v51 model remained at the frequency baseline after the stricter independent-final gate. Do not describe that as learned capability.
+The active real-material path is `local_worker_v21.py` plus `event_structure_v1.py`.
+`world_model_v51.py` and the other next-event predictors are DELETED -- do not
+resurrect them.  `unified_agent_v9.py` is only the bounded binary-world experiment.
+A parallel developmental Japanese reading loop
+(`japanese_reader_v1.py` + `japanese_event_v1.py` + `reading_curriculum_v1.py`) runs
+inside the same worker; its state lives in `.local/reading-*.json`.
 
 The latest live v18 run generated the query `きつね つる`, selected `イソップ童話集/きつねとつる`, and induced many repeated chunks. Only `きつね` and `つる` were corroborated by both Japanese Wiktionary and an exact/redirected Japanese Wikipedia page. `つる` remains meaning-ambiguous even though its boundary is accepted.
 
@@ -63,10 +68,10 @@ Use `python3 run_tests.py --profile quick --quiet` while iterating, then the ful
 
 External auditors that cannot browse GitHub trees can use these immutable raw URLs:
 
-- https://raw.githubusercontent.com/Noise101/AI_Noise/742c30f/experiments/world_model_v51.py
-- https://raw.githubusercontent.com/Noise101/AI_Noise/742c30f/experiments/local_worker_v21.py
-- https://raw.githubusercontent.com/Noise101/AI_Noise/742c30f/experiments/test_world_model_v51.py
-- https://raw.githubusercontent.com/Noise101/AI_Noise/742c30f/experiments/test_local_worker_v21.py
+- https://raw.githubusercontent.com/Noise101/AI_Noise/main/experiments/event_structure_v1.py
+- https://raw.githubusercontent.com/Noise101/AI_Noise/main/experiments/local_worker_v21.py
+- https://raw.githubusercontent.com/Noise101/AI_Noise/main/experiments/test_event_structure_v1.py
+- https://raw.githubusercontent.com/Noise101/AI_Noise/main/experiments/test_local_worker_v21.py
 
 Live read-only checks:
 

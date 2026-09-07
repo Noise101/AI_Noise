@@ -92,14 +92,26 @@ class ReadingComprehensionTest(unittest.TestCase):
         result = rcp.book_comprehension(events, model, set())
         self.assertGreaterEqual(result["tests"]["ordering"], 0.75)
 
-    def test_vocabulary_use_test_promotes_a_word_that_fits_its_sentences(self):
-        model = rcp.ComprehensionModel().fit([s["events"] for s in structured_stories(n=40)])
-        result = rcp.vocabulary_use_test(
-            "ぶどう",
-            ["きつねはぶどうをみつけました。", "きつねはぶどうがほしくなりました。"],
-            distractors=["いし", "くも", "かぜ"], model=model)
+    def test_vocabulary_use_test_masks_the_target_and_needs_a_cooccurrence_table(self):
+        stories = structured_stories(n=40)
+        model = rcp.ComprehensionModel().fit([s["events"] for s in stories])
+        cooc = rcp.build_cooccurrence(stories)
+        sentences = ["きつねはぶどうをみつけました。", "きつねはぶどうがほしくなりました。"]
+        # no table -> not tested (the leaky "word in sentence" scorer is gone)
+        self.assertFalse(rcp.vocabulary_use_test("ぶどう", sentences,
+                                                 ["いし", "くも", "かぜ"], model)["tested"])
+        result = rcp.vocabulary_use_test("ぶどう", sentences, ["いし", "くも", "かぜ"],
+                                         model, cooccurrence=cooc)
         self.assertTrue(result["tested"])
+        # ぶどう co-occurs with きつね / みつける in training, the distractors do not
         self.assertGreaterEqual(result["cloze_rate"], 0.5)
+
+    def test_cooccurrence_is_word_by_context_word_from_events(self):
+        stories = [{"url": "u", "events": [{"subject": "きつね", "obj": "ぶどう",
+                                            "verb": "みつける"}]}]
+        table = rcp.build_cooccurrence(stories)
+        self.assertIn("ぶどう", table["きつね"])
+        self.assertNotIn("かぜ", table.get("きつね", {}))
 
     def test_learning_curve_records_the_comprehension_score_over_cycles(self):
         state = {}

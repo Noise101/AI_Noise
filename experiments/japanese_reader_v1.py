@@ -125,7 +125,7 @@ def _fetch_more_books(cur: dict, cycle: int) -> int:
         evs = _events_of(s.text)
         fetched_events[s.url] = evs
         books.append({"title": s.title, "url": s.url, "source": "ja", "text": s.text,
-                      "event_count": len(evs),
+                      "event_count": len(evs), "events": evs,
                       "verbs": [e.get("verb", "") for e in evs]})
     added = curriculum.register_books(cur, books, cycle)
     # keep the raw events for the books we just added
@@ -194,22 +194,28 @@ def run_once(runtime: Path) -> dict:
     scaffold = None
     model = None                                  # caregiver batch reads this even with no book
     if book_id:
-        # a per-book comprehension model must not train on the book it scores
-        others = [ev for bid, ev in events_store.items()
-                  if bid != book_id and cur["shelf"].get(bid, {}).get("times_read", 0) > 0
-                  and len(ev) >= 3]
-        model = comprehension.ComprehensionModel().fit(others) if len(others) >= 5 else None
         book = cur["shelf"][book_id]
-        events = events_store.get(book_id) or _events_of(book.get("text", ""))
-        events_store.setdefault(book_id, events)
-        # local-LLM reading scaffold: a story Noise cannot parse (a caregiver
-        # would paraphrase the hard passages) -- verified to parse and preserve
-        # content, then used only for this book's comprehension, never the
-        # frozen benchmark or the RNN.
+        # the comprehension model trains on the HEURISTIC parse of other real
+        # books only -- never the book it scores, never an LLM-scaffolded book,
+        # never a teacher-refined reading (evidence score 0)
+        others = [ev for bid, ev in events_store.items()
+                  if bid != book_id and len(ev) >= 3
+                  and cur["shelf"].get(bid, {}).get("times_read", 0) > 0
+                  and not cur["shelf"].get(bid, {}).get("scaffolded")]
+        model = comprehension.ComprehensionModel().fit(others) if len(others) >= 5 else None
+        heuristic = events_store.get(book_id) or _events_of(book.get("text", ""))
+        events_store.setdefault(book_id, heuristic)      # heuristic parse, always
+
+        # best available reading of THIS book, used only for its own
+        # comprehension score + the retelling shown to the caregiver.  It never
+        # enters events_store, the model, the frozen benchmarks, the RNN, or the
+        # vocabulary -- heuristic -> morphological teacher -> local-LLM scaffold,
+        # each an evidence-score-0 aid.
+        scored = jevent.refine_event_dicts(heuristic)
         tried = cur.setdefault("llm_scaffolded", {})
-        parseable = sum(1 for e in events if e.get("verb"))
-        if (parseable < reading_llm.MIN_EVENTS and book_id not in tried
-                and book.get("text") and reading_llm.OllamaReader().available()):
+        if (sum(1 for e in scored if e.get("verb")) < reading_llm.MIN_EVENTS
+                and book_id not in tried and book.get("text")
+                and reading_llm.OllamaReader().available()):
             base_known = {w for w, info in cur.get("known_words", {}).items()
                           if info.get("books", 0) >= 1}
             scaffold = reading_llm.simplify_story(book["text"], base_known_words=base_known)
@@ -217,17 +223,13 @@ def run_once(runtime: Path) -> dict:
                               "event_count": scaffold.get("event_count", 0),
                               "content_kept": scaffold.get("content_kept"), "cycle": cycle}
             if scaffold.get("verified"):
-                events = scaffold["events"]
-                events_store[book_id] = events
+                scored = scaffold["events"]
                 book["scaffolded"] = True
-        # per-book scoring may use the disclosed morphological teacher (evidence
-        # score 0); events_store keeps the heuristic parse for the frozen
-        # benchmarks and the RNN, exactly like the LLM scaffold split
-        scored = events if book.get("scaffolded") else jevent.refine_event_dicts(events)
-        reading = curriculum.record_reading(cur, book_id, scored, cycle, model=model)
+
+        reading = curriculum.record_reading(cur, book_id, scored, cycle, model=model,
+                                            vocab_events=heuristic)
         reading["title"] = book["title"]
         reading["level"] = book["estimated_level"]
-        # what Noise understood, in its own (template) words
         retold = retell.retell(scored, max_sentences=10)
         reading["retelling"] = retold
         reading["retelling_score"] = retell.score_retelling(scored, retold)
@@ -241,7 +243,6 @@ def run_once(runtime: Path) -> dict:
                    for bid, ev in events_store.items()
                    if bid in real and len(ev) >= 3]
     comp_report = comprehension.evaluate_comprehension(all_stories, prev_comp)
-    retell_report = retell.evaluate_retelling(all_stories, prev_retell)
 
     # character RNN over the sentences read so far (continuous capability signal)
     seq_texts: dict[str, str] = {}
@@ -251,13 +252,19 @@ def run_once(runtime: Path) -> dict:
             seq_texts[url] = seq_texts.get(url, "") + "".join(e.get("sentence", "") for e in ev)
     seq_report = sequence.train_and_evaluate(seq_texts, prev_seq, SEQUENCE_TRAIN_SECONDS)
 
+    # retelling capability = the RNN's free-generation retelling beating a
+    # shuffled-template baseline on held-out stories (the template's own
+    # round-trip is a diagnostic, not a capability)
+    retell_report = retell.evaluate_retelling(all_stories, prev_retell,
+                                              rnn_state=seq_report.get("state"))
+
     # a free-generation retelling of the book just read, primed on its opening
     if book_id and seq_report.get("state"):
-        opening = (events[0].get("sentence") if events else "") or "むかしむかし"
+        opening = (heuristic[0].get("sentence") if heuristic else "") or "むかしむかし"
         free = retell.free_retell(seq_report["state"], opening[:12])
         if free:
             reading["free_retelling"] = free
-            reading["free_retelling_score"] = retell.score_retelling(events, free)
+            reading["free_retelling_score"] = retell.score_retelling(heuristic, free)
 
     # low-effort caregiver check: a small batch of multiple-choice / yes-no
     # questions about recently-read books, every CAREGIVER_INTERVAL cycles
@@ -294,7 +301,7 @@ def run_once(runtime: Path) -> dict:
                            "consequence_baseline", "consequence_z", "beats_baseline",
                            "comprehension_trend", "test_stories")},
         "retelling": {k: retell_report.get(k) for k in
-                      ("status", "fidelity", "fidelity_baseline", "gain_z",
+                      ("status", "roundtrip_fidelity", "generation_gain", "gain_z",
                        "beats_baseline", "retelling_trend", "test_stories")},
         "sequence": {k: seq_report.get(k) for k in
                      ("status", "held_out_bits_per_char", "baseline_bits_per_char",
@@ -362,9 +369,9 @@ def render_status(runtime: Path) -> str:
              f"帰結={comp.get('consequence')}/基準{comp.get('consequence_baseline')} "
              f"z={comp.get('consequence_z')} 基準超え={comp.get('beats_baseline')} "
              f"傾向={comp.get('comprehension_trend')}",
-             f"再話(固定) : 忠実度={ret.get('fidelity')}/基準{ret.get('fidelity_baseline')} "
-             f"z={ret.get('gain_z')} 基準超え={ret.get('beats_baseline')} "
-             f"傾向={ret.get('retelling_trend')}",
+             f"再話(固定) : 生成利得={ret.get('generation_gain')}（往復診断={ret.get('roundtrip_fidelity')}）"
+             f" z={ret.get('gain_z')} 基準超え={ret.get('beats_baseline')} "
+             f"傾向={ret.get('retelling_trend')} [{ret.get('status')}]",
              f"文字RNN   : {seq.get('held_out_bits_per_char')}bpc/基準{seq.get('baseline_bits_per_char')} "
              f"z={seq.get('improvement_z')} 基準超え={seq.get('beats_char_baseline')} "
              f"傾向={seq.get('perplexity_trend')} 学習{seq.get('steps_trained')}歩"]

@@ -739,6 +739,25 @@ class LocalWorkerTest(unittest.TestCase):
         self.assertGreaterEqual(run_once.call_count, 1)    # Japanese kept going
         self.assertEqual(result["phase"], "stopped_by_user")
 
+    @patch("local_worker_v21.japanese_reader.run_once",
+           side_effect=RuntimeError("reading loop is broken"))
+    @patch("local_worker_v21.wait_for_retry", side_effect=[True, True, True, False])
+    @patch("local_worker_v21.work", return_value={"phase": "capability_plateau", "seed": "one"})
+    def test_repeated_japanese_failures_are_surfaced_not_hidden(self, work_loop, _wait, run_once):
+        prev = os.environ.pop("AI_NOISE_SKIP_JAPANESE_READING", None)
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                d = Path(directory)
+                supervise("one", d, 0, 0, 1, 1, 1, local_conversation=False)
+                status = json.loads((d / "status.json").read_text())
+        finally:
+            if prev is not None:
+                os.environ["AI_NOISE_SKIP_JAPANESE_READING"] = prev
+        # the loop kept trying but the failure is visible, not a healthy heartbeat
+        self.assertGreaterEqual(run_once.call_count, 3)
+        self.assertIn("reading loop is broken", status.get("error") or "")
+        self.assertEqual(status["japanese_reading"]["error"][:12], "RuntimeError")
+
     @patch("local_worker_v21.work", return_value={"phase": "round_budget_exhausted"})
     def test_supervisor_respects_explicit_round_limit(self, work_loop):
         with tempfile.TemporaryDirectory() as directory:

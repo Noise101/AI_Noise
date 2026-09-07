@@ -92,6 +92,7 @@ PHASE_JA = {
     "storage_check": "容量確認中", "curriculum_exhausted": "教材候補を再探索中",
     "capability_plateau": "能力停滞のため無効な収集を停止",
     "japanese_only": "英語側は停滞、日本語読書のみ継続中",
+    "japanese_only_error": "日本語読書ループが連続で失敗（要確認）",
     "worker_error_wait": "内部エラーから復旧待ち", "stopped_by_user": "ユーザー操作で停止",
     "round_budget_exhausted": "指定回数を完了", "error": "エラー停止",
 }
@@ -278,9 +279,11 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
         lines.append(f"理解（固定検証）: {comp.get('comprehension_score')}"
                      f"（基準超え {comp.get('beats_baseline')}、傾向 "
                      f"{TREND_JA.get(comp.get('comprehension_trend'), 'データ不足')}）")
-    if ret.get("fidelity") is not None:
-        lines.append(f"再話（固定検証）: 忠実度 {ret.get('fidelity')}／基準 {ret.get('fidelity_baseline')}"
+    if ret.get("status") == "measured":
+        lines.append(f"再話（固定検証）: 生成利得 {ret.get('generation_gain')}"
                      f"（基準超え {ret.get('beats_baseline')}）")
+    elif ret.get("status"):
+        lines.append(f"再話（固定検証）: {ret.get('status')}（RNN生成モデル待ち）")
     if seq.get("held_out_bits_per_char") is not None:
         lines.append(f"日本語文字RNN  : {seq.get('held_out_bits_per_char')} bits/char"
                      f"（基準 {seq.get('baseline_bits_per_char')}、基準超え {seq.get('beats_char_baseline')}）")
@@ -555,8 +558,9 @@ def render_human_status(status: dict, now_epoch: float | None = None,
     age = None if heartbeat_epoch is None else max(0, int(now_epoch - heartbeat_epoch))
     stale = age is None or age > 120
     phase = status.get("phase", "unknown")
-    healthy = (process_alive and not stale
-               and phase not in {"error", "stopped_by_user", "capability_plateau"})
+    healthy = (process_alive and not stale and not status.get("error")
+               and phase not in {"error", "stopped_by_user", "capability_plateau",
+                                 "japanese_only_error", "worker_error_wait"})
     health = "正常に稼働" if healthy else "確認が必要"
     global_memory = status.get("global_memory", {})
     mastery = status.get("mastery", {})
@@ -1828,22 +1832,37 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
 def japanese_only_loop(seed: str, runtime: Path, interval: float) -> dict:
     """The English pipeline has plateaued (human action needed) but the parallel
     Japanese reading loop is independent -- keep it running on its own until STOP
-    instead of taking it down with the main worker."""
+    instead of taking it down with the main worker.  A failure here is isolated
+    but recorded: repeated failures flip the status to `japanese_only_error` so
+    `status-ja` shows 確認が必要 instead of a healthy heartbeat forever."""
     stop_path = runtime / "STOP"
     period = max(interval, 20.0)
-    rounds = 0
+    rounds = fails = 0
+    last_error = last_traceback = None
     while not stop_path.exists():
+        ran = False
         if os.environ.get("AI_NOISE_SKIP_JAPANESE_READING") != "1":
             rounds += 1
             try:
                 japanese_reader.run_once(runtime)
-            except Exception as error:            # isolate, same as in work()
-                pass
-        latest = status_record(seed, runtime, "japanese_only", rounds)
+                fails, last_error, last_traceback = 0, None, None
+            except Exception as error:            # isolate, but do not hide
+                ran = True
+                fails += 1
+                last_error = f"{type(error).__name__}: {error}"
+                last_traceback = traceback.format_exc()[-3000:]
+        phase = "japanese_only_error" if fails >= 3 else "japanese_only"
+        latest = status_record(seed, runtime, phase, rounds, error=last_error)
+        if last_error:
+            latest["japanese_reading"] = {"error": last_error}
+            latest["japanese_reading_consecutive_failures"] = fails
+            latest["traceback"] = last_traceback
         write_json(runtime / "status.json", latest)
         if not wait_for_retry(stop_path, period):
             break
-    latest = status_record(seed, runtime, "stopped_by_user", rounds)
+    latest = status_record(seed, runtime, "stopped_by_user", rounds, error=last_error)
+    if last_error:
+        latest["japanese_reading"] = {"error": last_error}
     write_json(runtime / "status.json", latest)
     return latest
 
