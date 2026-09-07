@@ -112,8 +112,9 @@ _OLD_KANA_TABLE = str.maketrans({"ゐ": "い", "ゑ": "え", "ヰ": "イ", "ヱ"
 _OLD_KANA_SUB = [
     (re.compile(r"くわ"), "か"), (re.compile(r"ぐわ"), "が"),
     (re.compile(r"ぢ"), "じ"), (re.compile(r"づ"), "ず"),
-    # sokuon written つ: 言つた / 待つて / ぶつかつた
-    (re.compile(r"([ぁ-ゖ㐀-鿿])つ(?=[たてちゃ])"), r"\1っ"),
+    # sokuon written つ: 言つた / 買つて / なつたので -- not the stem of
+    # 伝える(つたえる) / 伝えて / 伝えない
+    (re.compile(r"([ぁ-ゖ㐀-鿿])つ([たて])(?!え[るてられ]|ない)"), r"\1っ\2"),
     (re.compile(r"ちやん"), "ちゃん"),                     # 〜ちやん -> 〜ちゃん
     # au / iu / eu -> ou / yuu / you  (さう->そう, ませう->ましょう, てふ->ちょう)
     (re.compile(r"(せ|でせ|ませ|ましせ)う"), r"\1ょう"),
@@ -125,15 +126,21 @@ _OLD_KANA_SUB = [
     (re.compile(r"([ぁ-ゖ])ふ(?=[。、」\s]|$)"), r"\1う"),
     (re.compile(r"([かあこそのま])は(?=[。、」\s]|$)"), r"\1わ"),   # かは(川). 〜は particle excluded
     (re.compile(r"いへ(?=ば|、|。)"), "いえ"),
+    (re.compile(r"おほ(?=きい|きな|く|い|ぜい|かた|やけ|むね)"), "おお"),   # おほきい -> おおきい
+    (re.compile(r"かほ(?=[。、」\s]|$|を|は|に)"), "かお"),                # おかほ -> おかお
+    (re.compile(r"ゐ"), "い"),
+    (re.compile(r"([ぁ-ゖ])ふ(?=[、。」]|よ|ね|わ|の)"), r"\1う"),      # 似合ふよ -> 似合うよ
 ]
 
 
 def _dekana(text: str) -> str:
     """Fold 歴史的仮名遣い to modern kana so the parser and RNN see one
     orthography.  Applied to Aozora children's texts (pre-1946)."""
-    marks = sum(text.count(m) for m in ("ゐ", "ゑ", "なつた", "つた。", "さう", "ひました",
-                                        "ひます", "やう", "ませう"))
-    if marks < 3:
+    marks = sum(text.count(m) for m in (
+        "ゐ", "ゑ", "なつた", "だつた", "あつた", "いつた", "さう", "やう", "ませう",
+        "でせう", "ひました", "ひます", "おほき", "おほい", "おほく", "であふ",
+        "らう。", "ちやん", "しませう", "きらひ", "こひ", "おもひ"))
+    if marks < 4:
         return text
     text = text.translate(_OLD_KANA_TABLE)
     for pattern, repl in _OLD_KANA_SUB:
