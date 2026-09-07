@@ -40,6 +40,7 @@ COMPREHENSION_FILE = "reading-comprehension.json"
 RETELL_FILE = "reading-retelling.json"
 SEQUENCE_FILE = "reading-sequence.json"
 CAREGIVER_FILE = "caregiver.json"
+AIDED_FILE = "reading-aided.json"          # evidence-0 aided readings (diagnostic store)
 STATUS_FILE = "reading-status.json"
 SEQUENCE_TRAIN_SECONDS = 5.0
 STOP_FILE = "READING_STOP"
@@ -65,8 +66,23 @@ def _write(path: Path, value: dict) -> None:
     tmp.replace(path)
 
 
+HEURISTIC_SELF = "heuristic_self"
+
+
 def _events_of(text: str) -> list[dict]:
-    return [e.__dict__ for e in jevent.extract_story(text)]
+    """Noise's OWN parse of a text: particle-anchored heuristic events, no
+    morphological analyser, no LLM.  Every event is stamped `heuristic_self` so
+    downstream code can prove its provenance before learning from it."""
+    out = []
+    for e in jevent.extract_story(text):
+        d = dict(e.__dict__)
+        d["provenance"] = HEURISTIC_SELF
+        out.append(d)
+    return out
+
+
+def _heuristic_only(events: list[dict]) -> list[dict]:
+    return [e for e in events if e.get("provenance", HEURISTIC_SELF) == HEURISTIC_SELF]
 
 
 def _scaffold_totals(scaffolded: dict) -> dict:
@@ -120,21 +136,17 @@ def _fetch_more_books(cur: dict, cycle: int) -> int:
             if len(fetched) >= FETCH_TARGET or not budget_left():
                 break
     books = []
-    fetched_events = {}
     for s in fetched:
-        evs = _events_of(s.text)
-        fetched_events[s.url] = evs
+        evs = _events_of(s.text)                  # parsed here only to estimate difficulty
         books.append({"title": s.title, "url": s.url, "source": "ja", "text": s.text,
                       "event_count": len(evs), "events": evs,
                       "verbs": [e.get("verb", "") for e in evs]})
     added = curriculum.register_books(cur, books, cycle)
-    # keep the raw events for the books we just added
-    if added:
-        events = _read_events()
-        for s in fetched:
-            bid = curriculum._book_id(s.url, s.title)
-            events.setdefault(bid, fetched_events[s.url])
-        _write_events(events)
+    # NOTE: a fetched-but-unread book does NOT get its events written to the
+    # shared events store.  Its events enter the store only when Noise actually
+    # reads it (select_next_book -> record_reading), so an unread book can never
+    # be training data, RNN text, a frozen-benchmark story, or vocabulary
+    # evidence.  This is the read/unread boundary the re-audit requires.
     return added
 
 
@@ -200,16 +212,19 @@ def run_once(runtime: Path) -> dict:
     reading = {"status": "no_book"}
     scaffold = None
     model = None                                  # caregiver batch reads this even with no book
+    aided_record = None
     if book_id:
         book = cur["shelf"][book_id]
-        # the comprehension model trains on the HEURISTIC parse of other real
-        # books only -- never the book it scores, never an evidence-0-aided one
-        others = [ev for bid, ev in events_store.items()
-                  if bid != book_id and len(ev) >= 3
-                  and cur["shelf"].get(bid, {}).get("times_read", 0) > 0
-                  and not cur["shelf"].get(bid, {}).get("aided_ever")]
+        # the comprehension model trains on the HEURISTIC (`heuristic_self`) parse
+        # of other books Noise has actually read -- never the book it scores.  A
+        # book is NOT excluded just because an aided reading of it was once shown:
+        # its own heuristic events are legitimate experience.  Only teacher / LLM
+        # events are filtered out, and those never enter events_store anyway.
+        others = [_heuristic_only(ev) for bid, ev in events_store.items()
+                  if bid != book_id and cur["shelf"].get(bid, {}).get("times_read", 0) > 0]
+        others = [ev for ev in others if len(ev) >= 3]
         model = comprehension.ComprehensionModel().fit(others) if len(others) >= 5 else None
-        heuristic = events_store.get(book_id) or _events_of(book.get("text", ""))
+        heuristic = _heuristic_only(events_store.get(book_id) or _events_of(book.get("text", "")))
         events_store.setdefault(book_id, heuristic)      # heuristic parse, always
 
         # ---- Noise's own reading: heuristic events ONLY drive comprehension,
@@ -240,39 +255,51 @@ def run_once(runtime: Path) -> dict:
             if scaffold.get("verified"):
                 aided, aided_source = scaffold["events"], "llm_scaffold"
         if aided_source != "none" and len([e for e in aided if e.get("verb")]) >= 3:
-            book["aided_ever"] = True                    # excluded from other books' model
+            prov = "morphological_teacher" if aided_source == "teacher" else "local_llm_scaffold"
+            # the aided reading as a whole is evidence 0 -- stamp every event with
+            # the aid's provenance (overriding any inherited `heuristic_self`) so
+            # it can never be mistaken for Noise's own parse downstream
+            aided = [{**e, "provenance": prov} if isinstance(e, dict) else e for e in aided]
+            # audit breadcrumb only -- NOT used to exclude the book's heuristic events
+            book.setdefault("aided_shown_cycles", []).append(cycle)
+            book["aided_ever"] = True                    # legacy audit flag, no longer gates learning
             aided_retold = retell.retell(aided, max_sentences=10)
             reading["aided"] = {
-                "source": aided_source,
+                "source": aided_source, "provenance": prov,
                 "comprehension": (comprehension.book_comprehension(
                     aided, model, curriculum._known_set(cur))["score"] if model
                     else curriculum._self_consistency(aided)),
                 "retelling": aided_retold,
                 "retelling_score": retell.score_retelling(aided, aided_retold),
-                "note": "evidence score 0 -- does not affect graduation, level, "
-                        "vocabulary, the model, or any frozen benchmark"}
+                "note": "evidence score 0 -- stored in reading-aided.json; does not "
+                        "affect graduation, level, vocabulary, the model, the RNN, "
+                        "or any frozen benchmark"}
+            aided_record = {"cycle": cycle, "book_id": book_id, "title": book["title"],
+                            "url": book["url"], **reading["aided"]}
 
     advance = curriculum.maybe_advance_level(cur, cycle)
 
-    # frozen-benchmark capability measurements.  events_store holds the HEURISTIC
-    # parse only (aided readings never enter it), so every story here is Noise's
-    # own; a book only readable via the scaffold has < 3 heuristic events and is
-    # filtered out here.
+    # frozen-benchmark capability measurements.  events_store holds only READ
+    # books' `heuristic_self` events (a fetched-but-unread book is never in it,
+    # and aided readings never enter it), so every story here is Noise's own
+    # experience.  Filter by provenance again as defence in depth.
     real = set(events_store)
+    heur_store = {bid: _heuristic_only(ev) for bid, ev in events_store.items()}
     all_stories = [{"url": cur["shelf"][bid]["url"], "events": ev}
-                   for bid, ev in events_store.items()
+                   for bid, ev in heur_store.items()
                    if bid in cur["shelf"] and len(ev) >= 3]
     comp_report = comprehension.evaluate_comprehension(all_stories, prev_comp)
 
-    # character RNN over the sentences read so far (continuous capability signal).
-    # The RNN is also the retelling generator, so exclude the retelling
-    # benchmark's held-out collections here -- a source must not sit in both the
-    # generator's training text and the retelling test set.
+    # character RNN over the sentences of the books Noise has READ (continuous
+    # capability signal).  The RNN is also used by the retelling metric, so
+    # exclude the retelling benchmark's held-out collections here -- a source must
+    # not sit in both the RNN's training text and the retelling test set.
     retell_held = {retell._collection(s["url"]) for s in all_stories
                    if retell._held_out(s["url"])}
     seq_texts: dict[str, str] = {}
-    for bid, ev in events_store.items():
-        if bid in real and ev and retell._collection(cur["shelf"][bid]["url"]) not in retell_held:
+    for bid, ev in heur_store.items():
+        if bid in real and ev and bid in cur["shelf"] \
+                and retell._collection(cur["shelf"][bid]["url"]) not in retell_held:
             url = cur["shelf"][bid]["url"]
             seq_texts[url] = seq_texts.get(url, "") + "".join(e.get("sentence", "") for e in ev)
     seq_report = sequence.train_and_evaluate(seq_texts, prev_seq, SEQUENCE_TRAIN_SECONDS)
@@ -300,16 +327,26 @@ def run_once(runtime: Path) -> dict:
         recent = [{"title": b["title"], "url": b["url"],
                    # the caregiver judges Noise's OWN reading (heuristic events),
                    # the same one record_reading scored
-                   "events": events_store.get(bid, []),
+                   "events": heur_store.get(bid, []),
                    "fidelity": current_fidelity if bid == book_id else None,
                    "_last": b.get("last_read_cycle") or 0}
                   for bid, b in cur["shelf"].items()
-                  if b.get("times_read", 0) > 0 and len(events_store.get(bid, [])) >= 3]
+                  if b.get("times_read", 0) > 0 and len(heur_store.get(bid, [])) >= 3]
         recent.sort(key=lambda r: -r["_last"])
         questions = caregiver.generate_questions(recent, cycle, model)
         if questions:
             caregiver.open_batch(care_state, questions, cycle)
     _write(runtime / CAREGIVER_FILE, care_state)
+
+    # evidence-0 aided readings live in their OWN store, keyed by cycle, never
+    # merged into reading-events.json
+    if aided_record is not None:
+        aided_store = _read(runtime / AIDED_FILE) or {"readings": [], "note":
+            "evidence score 0 -- morphological-teacher / local-LLM readings shown "
+            "to the caregiver; never used for learning, evaluation or graduation"}
+        aided_store["readings"] = (aided_store.get("readings", []) + [aided_record])[-300:]
+        _write(runtime / AIDED_FILE, aided_store)
+    aided_total = len((_read(runtime / AIDED_FILE) or {}).get("readings", []))
 
     _write(runtime / CURRICULUM_FILE, cur)
     _write_events(events_store)
@@ -328,10 +365,13 @@ def run_once(runtime: Path) -> dict:
                            "snapshot_stories", "snapshot_fingerprint", "snapshot_migrated",
                            "significant_streak")},
         "retelling": {k: retell_report.get(k) for k in
-                      ("status", "roundtrip_fidelity", "generation_gain", "gain_z",
+                      ("status", "roundtrip_fidelity", "order_gain", "gain_z",
+                       "rnn_pairwise_accuracy", "position_baseline_accuracy",
                        "beats_baseline", "retelling_trend", "test_stories", "eval_regime",
                        "snapshot_stories", "snapshot_fingerprint", "snapshot_migrated",
-                       "significant_streak")},
+                       "regime_reset_from", "significant_streak", "recomputed",
+                       "rnn_fingerprint", "rnn_steps_at_eval", "rnn_steps_now",
+                       "rnn_model_changed", "next_reeval")},
         "self_vs_aided": {
             "self_comprehension": (reading.get("comprehension")
                                    if isinstance(reading, dict) else None),
@@ -343,7 +383,7 @@ def run_once(runtime: Path) -> dict:
         "sequence": {k: seq_report.get(k) for k in
                      ("status", "held_out_bits_per_char", "baseline_bits_per_char",
                       "improvement_bits", "improvement_z", "beats_char_baseline",
-                      "perplexity_trend", "steps_trained")},
+                      "perplexity_trend", "steps_trained", "model_fingerprint")},
         "sequence_sample": (seq_report.get("samples") or [""])[0],
         "caregiver": caregiver.summary(care_state),
         "caregiver_questions": [q["prompt"] for q in care_state.get("pending", [])],
@@ -352,6 +392,8 @@ def run_once(runtime: Path) -> dict:
                          if scaffold else None),
         "llm_scaffold_totals": _scaffold_totals(cur.get("llm_scaffolded", {})),
         "aided_reading": reading.get("aided"),          # evidence 0, diagnostic only
+        "aided_store": {"file": AIDED_FILE, "total_readings": aided_total,
+                        "this_cycle": aided_record is not None},
         "schema_migration": migration if migration.get("migrated") else
                             {"schema_version": cur.get("curriculum_schema_version")},
     }

@@ -85,9 +85,16 @@ class RetellTest(unittest.TestCase):
                                ("なく", "おおごえでなきました。"))]
         self.assertLess(jr.retelling_coherence(events), 0.6)
 
+    def _rnn(self, extra=""):
+        import japanese_sequence_v1 as js
+        vocab = sorted(set("むかしきつねうさぎたぬきねこいぬくまねずみさるぶどうにんじんかき"
+                           "さかなほねはちみつくりみずみつけるとるたべるかえるねむるなく"
+                           "ほしくなるちかづくしっぱいするかんがえるきめるがをはにでました。" + extra))
+        st = js.TinyRNN(vocab).state()
+        st["model_fingerprint"], st["steps_trained"] = "test-untrained", 0
+        return st
+
     def test_template_roundtrip_is_a_diagnostic_not_a_capability(self):
-        # the in-order-vs-shuffled TEMPLATE comparison used to earn beats_baseline
-        # -- it only measured "can I serialise a list in order", so it must not
         stories = folktale_stories()
         report = jr.evaluate_retelling(stories, {})
         self.assertEqual(report["status"], "no_generation_model")   # no RNN state
@@ -96,15 +103,100 @@ class RetellTest(unittest.TestCase):
         second = jr.evaluate_retelling(stories, report)
         self.assertFalse(second["beats_baseline"])
 
-    def test_generation_capability_needs_the_rnn_to_beat_the_shuffled_template(self):
-        import japanese_sequence_v1 as js
-        stories = folktale_stories()
-        state = js.TinyRNN(sorted("むかしきつねうさぎぶどうをみつけるたべるなく。")).state()
-        report = jr.evaluate_retelling(stories, {}, rnn_state=state)
+    def test_untrained_rnn_cannot_pass_narrative_order_recovery(self):
+        stories = folktale_stories(180)
+        report = jr.evaluate_retelling(stories, {}, rnn_state=self._rnn())
         self.assertEqual(report["status"], "measured")
-        self.assertIn("generation_gain", report)
-        # an untrained RNN will not beat the baseline -- that is the honest result
+        self.assertIn("order_gain", report)
+        self.assertIn("rnn_pairwise_accuracy", report)
+        # the verb-position baseline (built from training) IS informative here,
+        # so it is a real bar ...
+        self.assertGreater(report["position_baseline_accuracy"], 0.6)
+        # ... and an untrained likelihood model scores ~chance and does not clear it
         self.assertFalse(report["beats_baseline"])
+        self.assertLess(report["gain_z"], jr.SIGNIFICANCE_Z)
+
+    def test_a_scorer_that_ignores_order_cannot_pass(self):
+        from unittest.mock import patch
+        stories = folktale_stories(180)
+        state = {"vocab": list("abc"), "model_fingerprint": "flat", "steps_trained": 1}
+        with patch.object(jr, "_rnn_scorer", lambda s: (lambda text: 1.0)):
+            report = jr.evaluate_retelling(stories, {}, rnn_state=state)
+        self.assertEqual(report["status"], "measured")
+        # a constant score ties on every pair -> exactly 0.5, no order signal
+        self.assertEqual(report["rnn_pairwise_accuracy"], 0.5)
+        self.assertLess(report["order_gain"], 0)          # loses to the informative baseline
+        self.assertFalse(report["beats_baseline"])
+
+    def test_the_simple_baseline_does_not_beat_itself(self):
+        # feeding the position baseline in as the "scorer" must still not pass:
+        # order_gain is rnn_acc - baseline_acc, and here they are ~equal
+        from unittest.mock import patch
+        stories = folktale_stories(180)
+        pos = jr._position_model([s for s in stories if not jr._held_out(s["url"])])
+
+        def scorer_from_positions(_state):
+            def score(text):                     # lower = earlier-preferred
+                return sum(pos.get(v, 0.5) for v in ("みつける", "とる", "たべる",
+                                                     "かえる", "ねむる", "なく") if v in text)
+            return score
+        with patch.object(jr, "_rnn_scorer", scorer_from_positions):
+            report = jr.evaluate_retelling(
+                stories, {}, rnn_state={"vocab": list("a"), "model_fingerprint": "p", "steps_trained": 1})
+        self.assertFalse(report["beats_baseline"])
+
+    def test_free_retell_does_not_transcribe_the_event_order(self):
+        state = self._rnn()
+        ev = [{"subject": "きつね", "verb": "みつける", "obj": "ぶどう"},
+              {"subject": "きつね", "verb": "たべる", "obj": ""},
+              {"subject": "きつね", "verb": "なく", "obj": ""}]
+        a = jr.free_retell(state, ev)
+        b = jr.free_retell(state, list(reversed(ev)))
+        self.assertTrue(a)
+        self.assertEqual(a, b)          # permutation-invariant prime -> same output
+
+    def test_reeval_is_gated_on_the_rnn_fingerprint(self):
+        stories = folktale_stories(180)
+        st = self._rnn()
+        st["model_fingerprint"], st["steps_trained"] = "fp-1", 1000
+        r1 = jr.evaluate_retelling(stories, {}, rnn_state=st)
+        self.assertTrue(r1["recomputed"])
+        r2 = jr.evaluate_retelling(stories, r1, rnn_state=st)     # identical model
+        self.assertFalse(r2["recomputed"])
+        self.assertFalse(r2["rnn_model_changed"])
+        self.assertEqual(r2["order_gain"], r1["order_gain"])
+        st2 = dict(st); st2["model_fingerprint"], st2["steps_trained"] = "fp-2", 4000
+        r3 = jr.evaluate_retelling(stories, r2, rnn_state=st2)    # moved a lot
+        self.assertTrue(r3["recomputed"])
+
+    def test_a_tiny_step_change_does_not_force_a_full_reeval(self):
+        stories = folktale_stories(180)
+        st = self._rnn(); st["model_fingerprint"], st["steps_trained"] = "fp-a", 100000
+        r1 = jr.evaluate_retelling(stories, {}, rnn_state=st)
+        st2 = dict(st); st2["model_fingerprint"], st2["steps_trained"] = "fp-b", 101000  # +1%
+        r2 = jr.evaluate_retelling(stories, r1, rnn_state=st2)
+        self.assertFalse(r2["recomputed"])
+        self.assertTrue(r2["rnn_model_changed"])                 # changed, but not re-evaluated
+        self.assertEqual(r2["rnn_steps_now"], 101000)
+
+    def test_snapshot_fingerprint_depends_on_event_content_not_just_urls(self):
+        a = [{"url": "http://x/1", "events": [{"subject": "a", "verb": "b", "obj": "c"}]}]
+        b = [{"url": "http://x/1", "events": [{"subject": "a", "verb": "ZZ", "obj": "c"}]}]
+        self.assertNotEqual(jr._fingerprint(a), jr._fingerprint(b))
+
+    def test_eval_regime_change_resets_the_streak(self):
+        stories = folktale_stories(180)
+        old = {"eval_regime": "event_conditioned_generation_v1",
+               "significant_streak": 2, "beats_baseline": True,
+               "beats_baseline_significant": True, "last_significant_train": 40,
+               "learning_curve": [{"train_stories": 40}],
+               "test_snapshot": [{"url": s["url"], "events": s["events"]}
+                                 for s in stories[:30]]}
+        r = jr.evaluate_retelling(stories, old, rnn_state=self._rnn())
+        self.assertEqual(r["eval_regime"], "narrative_order_recovery_v1")
+        self.assertEqual(r["regime_reset_from"], "event_conditioned_generation_v1")
+        self.assertFalse(r["beats_baseline"])
+        self.assertLessEqual(r["significant_streak"], 1)
 
     def test_insufficient_stories_reports_cleanly(self):
         report = jr.evaluate_retelling(folktale_stories(n=10), {})
@@ -120,25 +212,12 @@ class RetellTest(unittest.TestCase):
         second = jr.evaluate_retelling(grown, first)
         self.assertEqual(second["snapshot_fingerprint"], fp)     # unchanged
         self.assertEqual(second["test_stories"], n_test)          # did not grow
-        self.assertGreater(second["train_stories"], first["train_stories"])  # training grew
-
-    def test_retelling_capability_baseline_has_the_same_information(self):
-        # the baseline is the SAME generator on a SHUFFLED event representation --
-        # identical (subject, verb, object) info, ordering removed
-        import japanese_sequence_v1 as js
-        stories = folktale_stories(140)
-        state = js.TinyRNN(sorted("むかしきつねうさぎぶどうをみつけるとるたべるなく。")).state()
-        report = jr.evaluate_retelling(stories, {}, rnn_state=state)
-        self.assertEqual(report["status"], "measured")
-        self.assertIn("generation_gain", report)
-        self.assertFalse(report["beats_baseline"])      # untrained RNN -> honest fail
 
     def test_re_measuring_the_same_snapshot_twice_is_not_a_replication(self):
-        import japanese_sequence_v1 as js
         stories = folktale_stories(140)
-        state = js.TinyRNN(sorted("むかしきつねうさぎぶどうみつけるたべる。" * 3)).state()
+        state = self._rnn(); state["model_fingerprint"], state["steps_trained"] = "s", 500
         r1 = jr.evaluate_retelling(stories, {}, rnn_state=state)
-        r2 = jr.evaluate_retelling(stories, r1, rnn_state=state)   # same data
+        r2 = jr.evaluate_retelling(stories, r1, rnn_state=state)   # same data + model
         self.assertLessEqual(r2["significant_streak"], max(1, r1["significant_streak"]))
 
     _EVENTS = [{"subject": "きつね", "verb": "みつける", "obj": "ぶどう"},

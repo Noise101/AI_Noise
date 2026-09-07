@@ -112,6 +112,25 @@ class JapaneseReaderTest(unittest.TestCase):
         events = reader._read(self.runtime / reader.EVENTS_FILE)
         self.assertNotEqual(events.get(stuck), [{"subject": "x", "verb": "stale", "obj": ""}])
 
+    def test_fetched_but_unread_books_do_not_enter_the_events_store(self):
+        # a book that was only fetched (registered on the shelf) must not appear
+        # in reading-events.json until Noise actually reads it
+        reader.run_once(self.runtime)
+        cur = reader._read(self.runtime / reader.CURRICULUM_FILE)
+        events = reader._read(self.runtime / reader.EVENTS_FILE)
+        read_ids = {bid for bid, b in cur["shelf"].items()
+                    if reader.curriculum.book_was_read(b)}
+        self.assertTrue(read_ids)
+        self.assertLess(len(events), len(cur["shelf"]))          # not every shelf book
+        self.assertTrue(set(events) <= read_ids)                 # only read books
+
+    def test_events_store_events_carry_heuristic_self_provenance(self):
+        reader.run_once(self.runtime)
+        events = reader._read(self.runtime / reader.EVENTS_FILE)
+        flat = [e for evs in events.values() for e in evs]
+        self.assertTrue(flat)
+        self.assertTrue(all(e.get("provenance") == "heuristic_self" for e in flat))
+
     def test_caregiver_batch_does_not_crash_when_no_book_is_selectable(self):
         # regression: `model` is only bound inside `if book_id:`, but the
         # caregiver batch reads it -- no selectable book must not raise

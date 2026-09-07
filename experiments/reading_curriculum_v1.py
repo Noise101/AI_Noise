@@ -239,71 +239,109 @@ def register_books(curriculum: dict, books: list[dict], cycle: int) -> int:
     return added
 
 
-CURRICULUM_SCHEMA_VERSION = 2
+CURRICULUM_SCHEMA_VERSION = 3
+
+
+def book_was_read(b: dict) -> bool:
+    """Conservative 'Noise actually read this book' check for legacy state that
+    has no explicit reading_history: a read leaves a last_read_cycle, a
+    times_read count, a comprehension_history entry, or a post-reading status."""
+    return bool(b.get("times_read", 0) > 0 or b.get("last_read_cycle")
+                or b.get("comprehension_history")
+                or b.get("status") in ("graduated", "reread", "shelved_stuck"))
+
+
+def _reading_log_ids(curriculum: dict) -> "set[str] | None":
+    """The canonical read-book set, if an explicit reading log exists."""
+    log = curriculum.get("reading_history") or curriculum.get("reading_log")
+    if not isinstance(log, (list, dict)):
+        return None
+    if isinstance(log, dict):
+        return {str(k) for k in log}
+    ids = set()
+    for entry in log:
+        if isinstance(entry, dict):
+            bid = entry.get("book_id") or entry.get("bid") or entry.get("id")
+            if bid:
+                ids.add(str(bid))
+        elif isinstance(entry, str):
+            ids.add(entry)
+    return ids or None
 
 
 def migrate_reading_state(curriculum: dict, events_store: dict, extract) -> dict:
-    """Idempotent migration to the evidence-isolated schema:
+    """Idempotent, conservative migration to the evidence-isolated schema.
 
-    * every shelf book's `difficulty` is recomputed from its HEURISTIC events
-      (coverage over event tokens, not particle-glued WORD runs); a book whose
-      text will not parse is marked `difficulty_stale`.
-    * `known_words` is rebuilt from those events -- `book_ids` are the DISTINCT
-      books a token was seen in, `books = len(book_ids)`; use/explained tiers and
-      first_cycle are preserved.  Legacy `books` values inflated by re-reads are
-      discarded.
-    * a `graduated` book that was read with an evidence-0 aid (LLM scaffold, or a
-      heuristic parse now too thin to have scored it) goes back to `in_rotation`
-      as `graduated_via_aid` / `re_eval_pending` -- history kept, level untouched.
+    v2: difficulty recomputed from heuristic events; known_words book counts
+        rebuilt (no re-read inflation); aid-graduated books returned for re-eval.
+    v3: ONLY books Noise can be shown to have READ contribute vocabulary evidence
+        or enter the shared events store.  A book that is merely on the shelf --
+        fetched but never selected -- can no longer be the reason a word counts as
+        known.  Words that lose all their support are quarantined, not deleted.
 
-    Running it twice is a no-op.
+    Running it again changes nothing; re-running from v2 applies only the v3 pass.
     """
-    if curriculum.get("curriculum_schema_version", 0) >= CURRICULUM_SCHEMA_VERSION:
-        return {"migrated": False}
+    have = curriculum.get("curriculum_schema_version", 0)
+    if have >= CURRICULUM_SCHEMA_VERSION:
+        return {"migrated": False, "schema_version": have}
 
-    # --- 1. re-extract every book's heuristic events ---
+    shelf = curriculum["shelf"]
+    log_ids = _reading_log_ids(curriculum)
+    if log_ids is not None:
+        read_ids = {bid for bid in shelf if bid in log_ids or book_was_read(shelf[bid])}
+    else:
+        read_ids = {bid for bid, b in shelf.items() if book_was_read(b)}
+    unread_ids = set(shelf) - read_ids
+
+    # --- 1. re-extract every book (difficulty needs it) but only READ books feed
+    # the shared events store and the vocabulary evidence. ---
     reparsed = difficulty_stale = 0
     per_book_tokens: dict[str, set] = {}
     per_book_events: dict[str, list] = {}
-    for bid, b in curriculum["shelf"].items():
+    for bid, b in shelf.items():
         text = b.get("text") or ""
         evs = extract(text) if text else []
         per_book_events[bid] = evs
-        if len(evs) >= 3:
+        if bid in read_ids and len(evs) >= 3:
             events_store[bid] = evs
-        per_book_tokens[bid] = {t for e in evs
-                                for t in (e.get("subject"), e.get("obj"), e.get("verb")) if t}
+            per_book_tokens[bid] = {t for e in evs
+                                    for t in (e.get("subject"), e.get("obj"), e.get("verb")) if t}
+        else:
+            events_store.pop(bid, None)          # an unread book leaves the shared store
 
-    # --- 2. rebuild known_words: keep the EXISTING vocabulary, fix its inflated
-    # book counts.  For every word already claimed as known, book_ids become the
-    # DISTINCT re-parsed books it actually appears in; a word found in no book is
-    # quarantined (books=0, books_unverified) rather than trusted at its legacy
-    # count.  The re-parse never MINTS new vocabulary -- that only happens through
-    # record_reading's coverage/repeat gate. ---
+    # --- 2. rebuild known_words from READ books only.  Keep the existing
+    # vocabulary; never mint new words here.  book_ids = distinct READ books the
+    # token appears in.  A word supported by no read book is quarantined
+    # (books=0, books_unverified) with its tier / provenance kept. ---
     old = curriculum.get("known_words", {})
     token_books: dict[str, list] = {}
     for bid, toks in per_book_tokens.items():
         for tok in toks:
             token_books.setdefault(tok, []).append(bid)
     fresh: dict = {}
-    quarantined = 0
+    quarantined = book_ids_removed = words_zeroed = 0
     for tok, prev in old.items():
-        book_ids = sorted(set(token_books.get(tok, [])))
+        legacy_ids = set(prev.get("book_ids", []))
+        read_book_ids = sorted(set(token_books.get(tok, [])))
+        book_ids_removed += len(legacy_ids - set(read_book_ids))
         entry = {k: prev[k] for k in ("use_tested", "used", "explained",
                                       "used_cycle", "explained_cycle", "first_cycle")
                  if k in prev}
-        entry["book_ids"] = book_ids
-        entry["books"] = len(book_ids)
-        if not book_ids:
+        entry["book_ids"] = read_book_ids
+        entry["books"] = len(read_book_ids)
+        if not read_book_ids:
             entry["books_unverified"] = True
             quarantined += 1
+            if legacy_ids:
+                words_zeroed += 1
         fresh[tok] = entry
     words_before, words_after = len(old), len(fresh)
+    words_retained = words_after - quarantined
     curriculum["known_words"] = fresh
     known = _known_set(curriculum)
 
     # --- 3. recompute difficulty from those events, against the fresh known set ---
-    for bid, b in curriculum["shelf"].items():
+    for bid, b in shelf.items():
         evs = per_book_events[bid]
         b["difficulty"] = text_difficulty(b.get("text") or "", len(evs), known,
                                           events=evs or None)
@@ -315,9 +353,9 @@ def migrate_reading_state(curriculum: dict, events_store: dict, extract) -> dict
             b.pop("difficulty_stale", None)
             reparsed += 1
 
-    # --- 4. audit graduated books ---
+    # --- 4. audit graduated books (v2 pass, still needed on a fresh v0/v1 state) ---
     re_eval = 0
-    for bid, b in curriculum["shelf"].items():
+    for bid, b in shelf.items():
         if b.get("status") != "graduated":
             continue
         aided = b.get("scaffolded") or len([e for e in events_store.get(bid, [])
@@ -330,10 +368,14 @@ def migrate_reading_state(curriculum: dict, events_store: dict, extract) -> dict
             re_eval += 1
 
     curriculum["curriculum_schema_version"] = CURRICULUM_SCHEMA_VERSION
-    return {"migrated": True, "books_reparsed": reparsed,
-            "books_difficulty_stale": difficulty_stale,
+    return {"migrated": True, "from_schema": have,
+            "books_read": len(read_ids), "books_unread": len(unread_ids),
+            "books_reparsed": reparsed, "books_difficulty_stale": difficulty_stale,
             "known_words_before": words_before, "known_words_after": words_after,
             "known_words_quarantined": quarantined,
+            "unread_book_ids_removed": book_ids_removed,
+            "known_words_zeroed_by_v3": words_zeroed,
+            "known_words_retained": words_retained,
             "graduated_returned_for_re_eval": re_eval}
 
 
@@ -435,8 +477,14 @@ def record_reading(curriculum: dict, book_id: str, events: list[dict],
     book = curriculum["shelf"].get(book_id)
     if not book:
         return {"status": "unknown_book"}
+    # defence in depth: only Noise's own heuristic events drive this record.  A
+    # teacher / LLM event that somehow reached here is dropped, not learned from.
+    events = [e for e in events if e.get("provenance", "heuristic_self") == "heuristic_self"]
     if vocab_events is None:
         vocab_events = events
+    else:
+        vocab_events = [e for e in vocab_events
+                        if e.get("provenance", "heuristic_self") == "heuristic_self"]
     from japanese_event_v1 import PARSER_VERSION
     book["parser_version"] = PARSER_VERSION       # which extractor produced this reading
     scorable = [e for e in events if e.get("verb")]

@@ -43,6 +43,23 @@ class ReadingCurriculumTest(unittest.TestCase):
         self.assertEqual(out["status"], "graduated")
         self.assertEqual(cur["shelf"][bid]["status"], "graduated")
 
+    def test_record_reading_ignores_non_heuristic_events(self):
+        # a teacher / LLM event that somehow reaches record_reading must not
+        # become vocabulary or schema -- only heuristic_self events count
+        cur = rc.empty_curriculum()
+        rc.register_books(cur, [book("A", "a", SIMPLE)], cycle=1)
+        bid = rc.select_next_book(cur)
+        mixed = ([{"subject": "きつね", "verb": v, "obj": "ぶどう",
+                   "provenance": "heuristic_self"} for v in ("みつける", "とる", "たべる")]
+                 + [{"subject": "ようせい", "verb": "たすける", "obj": "きつね",
+                     "provenance": "morphological_teacher"}])
+        rc.record_reading(cur, bid, mixed, cycle=2, comprehension=0.5)
+        self.assertIn("きつね", cur["known_words"])
+        self.assertIn("ぶどう", cur["known_words"])
+        self.assertNotIn("ようせい", cur["known_words"])     # teacher-only token: not learned
+        self.assertNotIn("たすける", cur["known_words"])
+        self.assertNotIn("たすける", cur["shelf"][bid].get("schema", []))
+
     def test_cold_start_proxy_rewards_a_coherent_parse(self):
         clean = [{"subject": "きつね", "verb": v, "obj": "", "confidence": 0.9}
                  for v in ("みつける", "とる", "たべる", "かえる", "なく")]
@@ -132,6 +149,11 @@ class ReadingCurriculumTest(unittest.TestCase):
 
         m1 = rc.migrate_reading_state(cur, store, fake_extract)
         self.assertTrue(m1["migrated"])
+        self.assertEqual(m1["from_schema"], 0)
+        # A (graduated) and S (graduated) count as read; B was only registered
+        self.assertEqual(m1["books_read"], 2)
+        self.assertEqual(m1["books_unread"], 1)
+        self.assertNotIn(b, store)                     # unread book: not in the shared store
         # a scaffold-graduated book is returned for re-evaluation, history kept
         self.assertEqual(cur["shelf"][s]["status"], "in_rotation")
         self.assertTrue(cur["shelf"][s]["graduated_via_aid"])
@@ -156,6 +178,49 @@ class ReadingCurriculumTest(unittest.TestCase):
         m2 = rc.migrate_reading_state(cur, store, fake_extract)
         self.assertFalse(m2["migrated"])
         self.assertEqual(json.loads(json.dumps(cur)), snapshot)
+
+    def test_v3_migration_drops_unread_books_as_vocabulary_evidence(self):
+        cur = rc.empty_curriculum()
+        rc.register_books(cur, [book("READ", "r", SIMPLE), book("UNREAD", "u", MID)], cycle=1)
+        rid, uid = rc._book_id("r", "READ"), rc._book_id("u", "UNREAD")
+        cur["shelf"][rid].update(times_read=1, last_read_cycle=2, comprehension_history=[0.7])
+        # UNREAD stays as-registered: no times_read, no history, no post-read status
+        cur["known_words"] = {
+            "きつね": {"books": 2, "book_ids": [rid, uid], "first_cycle": 1},  # some unread support
+            "ようせい": {"books": 1, "book_ids": [uid], "first_cycle": 1},      # ONLY unread support
+        }
+        store = {rid: [{"subject": "きつね", "verb": "みつける", "obj": ""}],
+                 uid: [{"subject": "ようせい", "verb": "でる", "obj": ""}]}
+
+        def fake_extract(text):
+            if text == SIMPLE:
+                return [{"subject": "きつね", "verb": "みつける", "obj": ""}] * 4
+            return [{"subject": "きつね", "verb": "にげる", "obj": ""},
+                    {"subject": "ようせい", "verb": "あらわれる", "obj": ""}] * 2
+
+        self.assertTrue(rc.book_was_read(cur["shelf"][rid]))
+        self.assertFalse(rc.book_was_read(cur["shelf"][uid]))
+        m = rc.migrate_reading_state(cur, store, fake_extract)
+        self.assertTrue(m["migrated"])
+        self.assertEqual(m["books_read"], 1)
+        self.assertEqual(m["books_unread"], 1)
+        self.assertNotIn(uid, store)                       # unread book left the shared store
+        self.assertIn(rid, store)
+        # きつね keeps ONLY the read book
+        self.assertEqual(cur["known_words"]["きつね"]["book_ids"], [rid])
+        self.assertEqual(cur["known_words"]["きつね"]["books"], 1)
+        # ようせい loses all support -> quarantined, not deleted, provenance kept
+        self.assertEqual(cur["known_words"]["ようせい"]["books"], 0)
+        self.assertEqual(cur["known_words"]["ようせい"]["book_ids"], [])
+        self.assertTrue(cur["known_words"]["ようせい"]["books_unverified"])
+        self.assertGreaterEqual(m["unread_book_ids_removed"], 2)   # きつね:uid + ようせい:uid
+        self.assertGreaterEqual(m["known_words_zeroed_by_v3"], 1)
+        self.assertEqual(set(cur["known_words"]), {"きつね", "ようせい"})   # nothing minted
+        # a fresh shelf book alone does not change known_words on the next migrate
+        snap = json.loads(json.dumps(cur["known_words"]))
+        rc.register_books(cur, [book("NEW", "n", SIMPLE)], cycle=3)
+        rc.migrate_reading_state(cur, store, fake_extract)         # already v3 -> no-op
+        self.assertEqual(cur["known_words"], snap)
 
     def test_a_stuck_book_is_shelved_but_retried_as_a_last_resort(self):
         cur = rc.empty_curriculum()

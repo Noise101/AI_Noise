@@ -53,6 +53,32 @@ class ReadingComprehensionTest(unittest.TestCase):
         self.assertTrue(second["beats_baseline"])
         self.assertGreaterEqual(second["significant_streak"], 2)
 
+    def test_eval_regime_change_does_not_inherit_the_old_streak(self):
+        stories = structured_stories(n=120)
+        held = [{"url": s["url"], "events": s["events"]}
+                for s in stories if rcp._held_out(s["url"])]
+        # a fixture that was "confirmed" under a previous regime with streak 2
+        old = {"eval_regime": "legacy_regime_v0", "significant_streak": 2,
+               "beats_baseline": True, "beats_baseline_significant": True,
+               "last_significant_train": 25, "test_snapshot": held,
+               "learning_curve": [{"train_stories": 25}]}
+        r = rcp.evaluate_comprehension(stories, old)
+        self.assertEqual(r["eval_regime"], rcp.EVAL_REGIME)
+        self.assertEqual(r["regime_reset_from"], "legacy_regime_v0")
+        # the first measurement under the new regime is streak 1 at most, never a pass
+        self.assertFalse(r["beats_baseline"])
+        self.assertLessEqual(r["significant_streak"], 1)
+        # only a SECOND measurement at a larger training size can reach streak 2
+        grown = structured_stories(n=120) + structured_stories(n=90, seed=11)
+        r2 = rcp.evaluate_comprehension(grown, r)
+        self.assertGreaterEqual(r2["significant_streak"], 2)
+        self.assertTrue(r2["beats_baseline"])
+
+    def test_snapshot_fingerprint_depends_on_event_content(self):
+        a = [{"url": "http://x/1", "events": [{"subject": "a", "verb": "b", "obj": ""}]}]
+        b = [{"url": "http://x/1", "events": [{"subject": "a", "verb": "CHANGED", "obj": ""}]}]
+        self.assertNotEqual(rcp._fingerprint(a), rcp._fingerprint(b))
+
     def test_unstructured_stories_do_not_beat_the_baseline(self):
         report = rcp.evaluate_comprehension(unstructured_stories(), {})
         self.assertLess(report["consequence_z"], rcp.SIGNIFICANCE_Z)

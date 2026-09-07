@@ -25,6 +25,7 @@ trained on, one-sided significance, same discipline as event_structure_v1.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import random
 from collections import Counter, defaultdict
@@ -70,8 +71,26 @@ def _held_out(url: str) -> bool:
     return int(hashlib.sha256(f"comprehension:{key}".encode()).hexdigest(), 16) % 5 == 0
 
 
+def _canon(events: list) -> list:
+    out = []
+    for e in events:
+        if isinstance(e, dict):
+            out.append({"subject": e.get("subject", ""), "verb": e.get("verb", ""),
+                        "obj": e.get("obj", "")})
+        else:
+            out.append({"subject": e[0] if len(e) > 0 else "",
+                        "verb": e[1] if len(e) > 1 else "",
+                        "obj": e[2] if len(e) > 2 else ""})
+    return out
+
+
 def _fingerprint(snapshot: list) -> str:
-    payload = "\n".join(sorted(s["url"] for s in snapshot))
+    """Hash URL *and event content* (canonical JSON): a snapshot whose events
+    were altered no longer matches even if the URL set is unchanged."""
+    payload = json.dumps(
+        sorted(({"url": s["url"], "events": _canon(s["events"])} for s in snapshot),
+               key=lambda s: s["url"]),
+        sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
@@ -273,15 +292,19 @@ def evaluate_comprehension(stories: list[dict], previous: dict | None = None) ->
     first time it is large enough -- new books only ever grow the training side.
     """
     previous = previous or {}
-    snap = previous.get("test_snapshot")
+    regime_ok = previous.get("eval_regime") == EVAL_REGIME
+    # an eval-regime change never inherits the old regime's streak / confirmation
+    # / last-significant-train: the new method's first measurement starts fresh.
+    streak_prev = previous if regime_ok else {}
+    snap = previous.get("test_snapshot") if regime_ok else None
     # sticky: once the frozen snapshot replaced a legacy (non-frozen) evaluation
     # it stays flagged, so status keeps showing that the migration happened
-    migrated = bool(previous.get("snapshot_migrated"))
+    migrated = bool(previous.get("snapshot_migrated")) or (bool(previous) and not regime_ok)
 
     train = [s["events"] for s in stories
              if not _held_out(s["url"]) and len(s["events"]) >= 3]
 
-    if snap and previous.get("eval_regime") == EVAL_REGIME:
+    if snap and regime_ok:
         test = [{"url": s["url"], "events": [tuple(e) if isinstance(e, list) else e
                                              for e in s["events"]]} for s in snap]
     else:
@@ -290,7 +313,7 @@ def evaluate_comprehension(stories: list[dict], previous: dict | None = None) ->
             return {"version": 2, "status": "insufficient_stories", "eval_regime": EVAL_REGIME,
                     "train_stories": len(train), "test_stories": len(candidate_test),
                     "comprehension_score": None, "beats_baseline": False,
-                    "learning_curve": list(previous.get("learning_curve", []))}
+                    "learning_curve": list(streak_prev.get("learning_curve", []))}
         test = candidate_test           # freeze it now
         snap = [{"url": s["url"], "events": s["events"]} for s in test]
         migrated = migrated or bool(previous)   # replaced a legacy evaluation
@@ -306,7 +329,7 @@ def evaluate_comprehension(stories: list[dict], previous: dict | None = None) ->
                 "train_stories": len(train), "test_stories": len(test),
                 "comprehension_score": None, "beats_baseline": False,
                 "test_snapshot": snap,
-                "learning_curve": list(previous.get("learning_curve", []))}
+                "learning_curve": list(streak_prev.get("learning_curve", []))}
 
     model = ComprehensionModel().fit(train)
     known = {w for events in train for e in events
@@ -330,17 +353,18 @@ def evaluate_comprehension(stories: list[dict], previous: dict | None = None) ->
     comprehension_score = round(0.5 * mean_consequence + 0.3 * mean_ordering
                                 + 0.2 * mean_protagonist, 3)
     significant = z >= SIGNIFICANCE_Z and n >= MIN_TEST_STORIES
-    prior_sig = previous.get("beats_baseline_significant", False)
+    prior_sig = streak_prev.get("beats_baseline_significant", False)
     # re-measuring the SAME frozen snapshot is not an independent replication --
     # the streak only advances when training has meaningfully grown since the
     # last significant measurement
-    last_sig_train = previous.get("last_significant_train", 0)
+    last_sig_train = streak_prev.get("last_significant_train", 0)
     grew = len(train) >= last_sig_train * SIGNIFICANT_TRAIN_GROWTH
-    streak = (previous.get("significant_streak", 0) + 1) if (significant and grew) \
-        else (previous.get("significant_streak", 0) if significant else 0)
+    streak = (streak_prev.get("significant_streak", 0) + 1) if (significant and grew) \
+        else (streak_prev.get("significant_streak", 0) if significant else 0)
 
-    curve = list(previous.get("learning_curve", []))
-    point = {"train_stories": len(train), "comprehension_score": comprehension_score,
+    curve = list(streak_prev.get("learning_curve", []))
+    point = {"train_stories": len(train), "eval_regime": EVAL_REGIME,
+             "comprehension_score": comprehension_score,
              "consequence": round(mean_consequence, 3),
              "consequence_baseline": round(mean_consequence_base, 3),
              "consequence_z": round(z, 2), "ordering": round(mean_ordering, 3)}
@@ -353,10 +377,11 @@ def evaluate_comprehension(stories: list[dict], previous: dict | None = None) ->
         older, newer = sum(tail[:len(tail)//2]) / (len(tail)//2), sum(tail[len(tail)//2:]) / (len(tail)-len(tail)//2)
         trend = "improving" if newer > older + 0.01 else "declining" if newer < older - 0.01 else "flat"
 
-    beats = significant and (prior_sig or previous.get("significant_streak", 0) >= 1) and streak >= 2
+    beats = significant and (prior_sig or streak_prev.get("significant_streak", 0) >= 1) and streak >= 2
     return {
         "version": 2, "status": "measured", "eval_regime": EVAL_REGIME,
         "snapshot_migrated": migrated,
+        "regime_reset_from": previous.get("eval_regime") if (previous and not regime_ok) else None,
         "train_stories": len(train), "test_stories": n,
         "snapshot_stories": len(snap), "snapshot_fingerprint": _fingerprint(snap),
         "test_snapshot": snap,

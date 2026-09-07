@@ -47,6 +47,29 @@ def normalise(text: str) -> str:
     return "".join(_KEEP.findall(text))
 
 
+def model_fingerprint(state: dict, steps_trained: int) -> str:
+    """A stable digest of the RNN's identity: version, vocabulary, how much it has
+    been trained, and a hash of the actual weights (rounded so float noise does
+    not churn it).  Two calls agree iff the model would score text identically;
+    it changes whenever the weights or step count move.  Downstream evaluators
+    use this to tell 'the model has not changed' apart from 'I skipped the eval'.
+    """
+    if not state or not state.get("vocab"):
+        return ""
+    h = hashlib.sha256()
+    h.update(f"seqrnn:v{VERSION}:steps={steps_trained}:".encode())
+    h.update(("".join(state["vocab"])).encode())
+    for name in ("Wxh", "Whh", "Why", "bh", "by"):
+        w = state.get(name)
+        if w is None:
+            continue
+        rows = w if w and isinstance(w[0], list) else [w]
+        for row in rows:
+            h.update(bytes(name, "ascii"))
+            h.update(",".join(f"{v:.5f}" for v in row).encode())
+    return h.hexdigest()[:16]
+
+
 def collection_key(url: str) -> str:
     """One key per work.  Aozora keeps the file path (an author is not one
     collection here -- character statistics don't leak between an author's
@@ -163,6 +186,9 @@ def train_and_evaluate(raw_texts: dict[str, str], previous: dict | None = None,
     confirmed = significant_now and (prior_sig or previous.get("significant_streak", 0) >= 1)
     streak = previous.get("significant_streak", 0) + 1 if significant_now else 0
 
+    final_state = model.state()
+    fp = model_fingerprint(final_state, steps_trained)
+
     curve = list(previous.get("learning_curve", []))
     point = {"steps_trained": steps_trained, "train_chars": train_chars,
              "held_out_bits_per_char": round(model_bpc, 4),
@@ -201,7 +227,9 @@ def train_and_evaluate(raw_texts: dict[str, str], previous: dict | None = None,
         "learning_curve": curve,
         "samples": [generate(model, "むかしむかし", 90),
                     generate(model, "おじいさんは", 90)],
-        "state": model.state(),
+        "model_fingerprint": fp,
+        "state": {**final_state, "version": VERSION, "steps_trained": steps_trained,
+                  "model_fingerprint": fp},
         "limitations": ["character-level, no word or concept supervision",
                         "credit only when the per-source improvement clears a strict "
                         "one-sided z on two consecutive cycles"],

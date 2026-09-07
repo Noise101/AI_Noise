@@ -63,6 +63,18 @@ class JapaneseSequenceTest(unittest.TestCase):
         self.assertEqual(len(out), 20)
         self.assertTrue(all("぀" <= ch or ch in "。" for ch in out))
 
+    def test_model_fingerprint_moves_with_weights_and_steps(self):
+        r1 = js.train_and_evaluate(learnable_texts(40), {}, train_seconds=30, max_steps=60)
+        self.assertTrue(r1["model_fingerprint"])
+        self.assertEqual(r1["model_fingerprint"], r1["state"]["model_fingerprint"])
+        # re-scoring the SAME saved state is byte-stable
+        same = js.model_fingerprint(r1["state"], r1["state"]["steps_trained"])
+        self.assertEqual(same, r1["model_fingerprint"])
+        # more training -> different fingerprint (weights AND step count moved)
+        r2 = js.train_and_evaluate(learnable_texts(40), r1, train_seconds=30, max_steps=60)
+        self.assertNotEqual(r2["model_fingerprint"], r1["model_fingerprint"])
+        self.assertGreater(r2["state"]["steps_trained"], r1["state"]["steps_trained"])
+
 
 if __name__ == "__main__":
     unittest.main()
