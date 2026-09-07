@@ -337,14 +337,16 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
         lines.append(f"補助読解の保存  : {ast_.get('total_readings')}件（{ast_.get('file')}、"
                      f"証拠0・学習非使用）")
     if seq.get("held_out_bits_per_char") is not None:
-        rr = seq.get("reset_reason")
-        cs = seq.get("contamination_status")
+        rlog = reading_status.get("sequence_retirement_log") or []
         lines.append(f"日本語文字RNN  : {seq.get('held_out_bits_per_char')} bits/char"
                      f"（基準 {seq.get('baseline_bits_per_char')}、基準超え {seq.get('beats_char_baseline')}"
                      f"、steps {seq.get('steps_trained')}、regime {seq.get('training_regime')}）")
-        if cs == "retired_replaced" or rr:
-            lines.append(f"  ⚠ 旧RNNを汚染可能性により退役（{rr}）、新RNNをクリーン再訓練中"
-                         f"（親指紋 {seq.get('parent_model_fingerprint')}、clean開始 {seq.get('started_clean_at')}）")
+        if rlog and not seq.get("beats_char_baseline"):
+            last = rlog[-1]
+            lines.append(f"  ⚠ 旧RNNを汚染可能性により退役（{last.get('reset_reason')}、"
+                         f"旧{last.get('retired_steps_trained')}steps→退避済）、新RNNをクリーン再訓練中"
+                         f"（親指紋 {seq.get('parent_model_fingerprint')}、clean開始 "
+                         f"{seq.get('started_clean_at')}、退役 {len(rlog)}回、新モデル評価が出るまで能力値は非表示）")
     if reading_status.get("level_advance", {}).get("advanced"):
         lines.append(f"★ レベル上昇 → {reading_status['level_advance']['level']}")
     sc = reading_status.get("llm_scaffold_totals", {}) or {}
