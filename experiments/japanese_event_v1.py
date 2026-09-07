@@ -41,6 +41,28 @@ JP_RUN = re.compile(f"{JP}+")
 RUBY = re.compile(r"《[^》]*》|｜")            # aozora-style ruby markers -> strip
 SENT_SPLIT = re.compile(r"(?<=[。！？])")
 
+# 「…」 direct speech: the quote content is pulled out before sentence splitting
+# (it contains its own 。), replaced by a placeholder, and turned into a
+# "speaker said ..." event when followed by と + a speech verb.
+_QUOTE = re.compile(r"「([^「」]*)」", re.S)
+_DANGLING_QUOTE = re.compile(r"「([^「」\n]*)(?=\n|$)")
+_QUOTE_PH = re.compile(r"\x01(\d+)\x01")
+_SPEECH_STEMS = {
+    "言っ": "言う", "云っ": "言う", "いっ": "言う", "言い": "言う", "云い": "言う",
+    "いい": "言う", "もうし": "申す", "申し": "申す", "もうす": "申す", "申す": "申す",
+    "答え": "答える", "こたえ": "答える", "尋ね": "尋ねる", "たずね": "尋ねる",
+    "きき": "聞く", "聞き": "聞く", "問い": "問う", "とい": "問う",
+    "頼み": "頼む", "たのみ": "頼む", "たのん": "頼む", "叫び": "叫ぶ", "さけび": "叫ぶ",
+    "つぶやい": "つぶやく", "わめい": "わめく", "呼び": "呼ぶ", "よび": "呼ぶ",
+    "どなっ": "どなる", "どなり": "どなる", "ささやい": "ささやく", "きい": "聞く",
+}
+_SPEECH_AFTER = re.compile(
+    r"^[、。\s]*と[、\s]*"
+    r"(?:(?:いって|云って|言って)[、\s]*)?"           # 「…」と いって、V too
+    rf"(?:([{KANJI}{KATAKANA}]|{JP}{{2,6}})(?:は|が)[、\s]*)?"   # 「…」と 熊が V
+    r"(" + "|".join(sorted(_SPEECH_STEMS, key=len, reverse=True)) + r")")
+_NP_MARKED = re.compile(f"^([{KANJI}{KATAKANA}]|{JP}{{2,8}}?)(は|が)")
+
 # Case particles, longest first.  が/を are the reliable anchors; に/へ/から
 # introduce obliques; は/も are the topic and are only matched at clause start
 # (mid-run they are usually word-internal: もも, おも..., ...も).
@@ -69,6 +91,7 @@ PROTECTED_NOUN_HEADS = ("もも", "おに", "かに", "とり", "にわ", "に�
 NOUN_PREFIX = re.compile(r"^(大きな|小さな|きれいな|りっぱな|元気な|かわいい|やさしい|"
                          r"わるい|いい|ある|その|この|あの|ひとつの|一つの|"
                          r"ひとりの|ふたりの|いっぴきの|いちわの|いっぽんの|としとった|"
+                         r"たくさんの|おおくの|すべての|いくつかの|なんびきかの|"
                          r"まだ|もう|ずっと|やがて|すぐ|とても|いつも|きっと|"
                          r"でも|そして|それから|すると|しかし|ところが|また)")
 # 「... という ...」: the noun before という names the entity that follows
@@ -116,6 +139,23 @@ GODAN_PAST = {"った": ["う", "つ", "る"], "いた": ["く"], "いだ": ["�
 
 def normalise_text(text: str) -> str:
     return RUBY.sub("", text).replace("　", " ")
+
+
+def _protect_quotes(text: str) -> "tuple[str, list[str]]":
+    """Replace every 「…」 span with a \x01N\x01 placeholder and collect the quote
+    strings, so a quote's own 。 does not split the sentence and its words are not
+    scanned as case-marked NPs."""
+    quotes: list[str] = []
+
+    def take(match: "re.Match") -> str:
+        quotes.append(match.group(1).strip())
+        return f"\x01{len(quotes) - 1}\x01"
+
+    prev = None
+    while prev != text:                          # inner-most first, for nesting
+        prev = text
+        text = _QUOTE.sub(take, text)
+    return _DANGLING_QUOTE.sub(take, text), quotes
 
 
 TE_AUX = re.compile(r"[てで](き(た|ました|ます)|くる|きます|"
@@ -397,16 +437,72 @@ def _bare_topic(clause: str) -> str | None:
     return ""                                    # a topic-shaped clause, but not an entity
 
 
+def _last_np_before(text: str) -> str:
+    """The nearest preceding 「Xは」/「Xが」 noun -- the speaker of a quote.
+    Prefer the は-topic of the closest clause; fall back to its が-subject."""
+    for frag in reversed(re.split(r"[、\x01]", text)):
+        marked = _NP_MARKED.findall(frag)                    # [(noun, marker), ...]
+        for want in ("は", "が"):
+            for noun, marker in marked:
+                if marker != want:
+                    continue
+                noun = _strip_modifier(_clean_noun(noun))
+                if _noun_ok(noun) and noun not in CONNECTIVES and noun not in NON_TOPIC_NOUNS:
+                    return noun
+    return ""
+
+
+_SPEECH_TAIL = re.compile(r"^(まし(た|て)|ます|た|て|ながら|つつ|、)+")
+
+
+def _speech_events(sentence: str, quotes: "list[str]", recent_subject: str | None
+                   ) -> "tuple[list[JapaneseEvent], str]":
+    """「…」と言いました -> speaker | 言う | roles={と: quote}.  Returns the events
+    and the sentence with each consumed 「…」と<speech verb> span cut out."""
+    events: list[JapaneseEvent] = []
+    residual, cursor = [], 0
+    for m in _QUOTE_PH.finditer(sentence):
+        after = _SPEECH_AFTER.match(sentence[m.end():])
+        if not after:
+            continue
+        idx = int(m.group(1))
+        quote = quotes[idx] if 0 <= idx < len(quotes) else ""
+        after_speaker = _strip_modifier(_clean_noun(after.group(1))) if after.group(1) else ""
+        explicit_speaker = after_speaker or _last_np_before(sentence[:m.start()])
+        speaker = explicit_speaker or (recent_subject or "")
+        if not speaker or not _noun_ok(speaker):
+            continue
+        events.append(JapaneseEvent(
+            subject=speaker, verb=_SPEECH_STEMS[after.group(2)], obj="",
+            confidence=0.75, sentence=_QUOTE_PH.sub("", sentence).strip(),
+            roles={"と": quote[:40]}, subject_explicit=bool(explicit_speaker)))
+        # consume 「…」と<verb>(ました|て|ながら…) so the residue is not re-parsed
+        end = m.end() + after.end()
+        tail = _SPEECH_TAIL.match(sentence[end:])
+        end += tail.end() if tail else 0
+        residual.append(sentence[cursor:m.start()])
+        cursor = end
+    residual.append(sentence[cursor:])
+    return events, _QUOTE_PH.sub("", "".join(residual))
+
+
 def _sentence_events(sentence: str, recent_subject: str | None,
-                     vocab: "set[str] | None") -> list[JapaneseEvent]:
+                     vocab: "set[str] | None", quotes: "list[str] | None" = None
+                     ) -> list[JapaneseEvent]:
     """A multi-clause sentence is one predication chain: case-marked NPs from
     every 、-fragment feed the sentence's verbs.  A fragment with no verb of its
     own carries its NPs forward to the next verb (「…こうもりが、…おちて、…
     つかまってしまいました」-> こうもり is the subject of both おちる and つかまる)."""
+    events: list[JapaneseEvent] = []
+    if quotes:
+        speech, sentence = _speech_events(sentence, quotes, recent_subject)
+        events.extend(speech)
+        if speech:
+            recent_subject = speech[-1].subject
+    sentence = _QUOTE_PH.sub("", sentence)        # drop any un-consumed placeholders
     core = TO_IU.sub("", sentence, count=1) if TO_IU.search(sentence) else sentence
     core = core.rstrip(SENTENCE_END)
     frags = [f.strip() for f in re.split(r"、", core) if f.strip()]
-    events: list[JapaneseEvent] = []
     carried: list[tuple[str, str]] = []          # NPs from verbless fragments
     for frag in frags:
         topic = _bare_topic(frag)
@@ -425,22 +521,28 @@ def _sentence_events(sentence: str, recent_subject: str | None,
             carried = []                         # consumed by a trusted predicate
             if event.subject:
                 recent_subject = event.subject
-        # else: this sub-clause's predicate is too weak to trust -- drop its own
-        # pairs but keep `carried` for a later main verb
+        else:
+            # this sub-clause's predicate is too weak to trust -- drop its
+            # obliques, but a 「牛が…よりあつまって」 subject still belongs to the
+            # sentence's main verb, so carry the subject markers forward
+            carried = [(n, p) for n, p in carried + pairs if p in SUBJECT_MARKERS]
     return events
 
 
 def extract_story(text: str, known_words: "set[str] | None" = None) -> list[JapaneseEvent]:
     """Ordered events for a whole story, threading the omitted subject across
-    clauses and sentences."""
-    vocab = known_words if known_words is not None else learn_word_vocabulary(text)
+    clauses and sentences.  Direct speech (「…」と言った) is pulled out first so a
+    quote's own 。 does not split the sentence."""
+    dequoted, quotes = _protect_quotes(normalise_text(text))
+    vocab = known_words if known_words is not None else learn_word_vocabulary(
+        _QUOTE_PH.sub("", dequoted))
     events: list[JapaneseEvent] = []
     recent_subject: str | None = None
-    for raw in SENT_SPLIT.split(normalise_text(text)):
+    for raw in SENT_SPLIT.split(dequoted):
         sentence = raw.strip()
-        if len(sentence) < 4:
+        if len(_QUOTE_PH.sub("", sentence)) < 4:
             continue
-        for event in _sentence_events(sentence, recent_subject, vocab):
+        for event in _sentence_events(sentence, recent_subject, vocab, quotes):
             events.append(event)
             if event.subject:
                 recent_subject = event.subject

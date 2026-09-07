@@ -85,6 +85,30 @@ class JapaneseEventTest(unittest.TestCase):
         events = extract_story("おおきなたいこをもったたぬきが、やまからおりてきました。")
         self.assertEqual(events[-1].subject, "たぬき")
 
+    def test_direct_speech_becomes_a_said_event(self):
+        events = extract_story(
+            "きつねは「たすけてください」とたのみました。"
+            "くまが「よろしい」とこたえました。")
+        speech = [e for e in events if e.roles.get("と")]
+        self.assertEqual([(e.subject, e.verb) for e in speech],
+                         [("きつね", "頼む"), ("くま", "答える")])
+        self.assertIn("たすけて", speech[0].roles["と"])
+
+    def test_speaker_can_follow_the_quote(self):
+        events = extract_story("「おおい」と犬がさけびました。")
+        self.assertEqual((events[0].subject, events[0].verb), ("犬", "叫ぶ"))
+
+    def test_a_quotes_own_period_does_not_split_the_sentence(self):
+        # the 。 inside 「…」 must not end the sentence early
+        events = extract_story("むすめは「もう、いや。だいきらい。」といって、へやをでました。")
+        verbs = [e.verb for e in events]
+        self.assertIn("言う", verbs)
+        self.assertTrue(any(v in ("でる", "出る") for v in verbs))
+
+    def test_te_form_subject_carries_to_the_main_verb(self):
+        events = extract_story("たくさんの牛があつまって、そうだん会をひらきました。")
+        self.assertEqual(events[-1].subject, "牛")
+
     def test_single_kanji_noun_is_a_valid_argument(self):
         event = extract_clause("おじいさんは山から帰りました。")
         self.assertEqual(event.roles.get("から"), "山")
