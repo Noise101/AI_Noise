@@ -69,6 +69,22 @@ class ReadingCurriculumTest(unittest.TestCase):
         # current-version books are left alone; no repeat reset
         self.assertEqual(rc.reevaluate_stale_parses(cur), [])
 
+    def test_parser_bump_resets_an_inflated_level_and_re_walks_the_corpus(self):
+        import japanese_event_v1 as jevent
+        cur = rc.empty_curriculum()
+        rc.register_books(cur, [book("easy", "e", SIMPLE), book("mid", "m", MID),
+                                book("hard", "h", HARDER)], cycle=1)
+        cur["level"] = 4.0                       # inflated by the old parser
+        cur["level_parser_version"] = jevent.PARSER_VERSION - 1
+        for b in cur["shelf"].values():
+            b["status"] = "shelved_above_level"
+        result = rc.reset_level_for_new_parser(cur, cycle=9)
+        self.assertTrue(result["reset"])
+        self.assertLess(cur["level"], 4.0)
+        self.assertGreaterEqual(sum(b["status"] == "in_rotation"
+                                    for b in cur["shelf"].values()), 1)
+        self.assertEqual(rc.reset_level_for_new_parser(cur, cycle=10)["reset"], False)
+
     def test_a_stuck_book_is_shelved_and_not_re_pulled(self):
         cur = rc.empty_curriculum()
         rc.register_books(cur, [book("A", "a", SIMPLE)], cycle=1)

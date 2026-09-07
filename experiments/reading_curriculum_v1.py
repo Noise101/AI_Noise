@@ -250,6 +250,37 @@ def reevaluate_stale_parses(curriculum: dict) -> list[str]:
     return reset
 
 
+def reset_level_for_new_parser(curriculum: dict, cycle: int) -> dict:
+    """One-off when the parser version moves: the level was inflated by the old
+    extractor's over-generous scoring, so drop it back to the easiest real book
+    and re-walk the corpus from there.  Graduated books stay graduated (retention
+    checks re-test them); everything else re-shelves against the new level."""
+    from japanese_event_v1 import PARSER_VERSION
+    if curriculum.get("level_parser_version", 0) >= PARSER_VERSION:
+        return {"reset": False}
+    curriculum["level_parser_version"] = PARSER_VERSION
+    real = [b["estimated_level"] for b in curriculum["shelf"].values()
+            if not b.get("scaffolded") and b["status"] != "graduated"]
+    if not real:
+        return {"reset": False}
+    target = round(max(1.0, min(real)) * 2) / 2
+    if target >= curriculum["level"]:
+        return {"reset": False}
+    old = curriculum["level"]
+    curriculum["level"] = target
+    curriculum["graduated_since_advance"] = 0
+    curriculum["level_history"].append(
+        {"cycle": cycle, "level": target,
+         "reason": f"parser v{PARSER_VERSION}: re-walk from the easiest book (was {old})"})
+    for b in curriculum["shelf"].values():
+        if b["status"] == "graduated":
+            continue
+        in_reach = b["estimated_level"] <= target + LEVEL_STEP
+        b["status"] = "in_rotation" if in_reach else "shelved_above_level"
+        b["shelved_at_level"] = None if in_reach else b["estimated_level"]
+    return {"reset": True, "from": old, "to": target}
+
+
 def select_next_book(curriculum: dict) -> str | None:
     level = curriculum["level"]
     rotation = [(bid, b) for bid, b in curriculum["shelf"].items()

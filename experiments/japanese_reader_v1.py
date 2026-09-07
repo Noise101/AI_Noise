@@ -158,6 +158,7 @@ def run_once(runtime: Path) -> dict:
     # rotation and drop their stale cached events so they are re-extracted
     for bid in curriculum.reevaluate_stale_parses(cur):
         events_store.pop(bid, None)
+    curriculum.reset_level_for_new_parser(cur, cycle)
 
     in_rotation = sum(1 for b in cur["shelf"].values() if b["status"] == "in_rotation")
     reachable = in_rotation + sum(1 for b in cur["shelf"].values()
