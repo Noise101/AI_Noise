@@ -370,6 +370,22 @@ def evaluate_retelling(stories: list[dict], previous: dict | None = None,
     train = [s for s in stories if _collection(s["url"]) not in held_cols
              and len(s.get("events", [])) >= 3]
     n = len(test)
+    fingerprint = _fingerprint(snap)
+
+    # This is a FROZEN measurement: re-running it at the same training size on the
+    # same snapshot reproduces the same numbers (and, per item 4, is not an
+    # independent replication anyway).  The generation pass is ~minutes of pure
+    # Python, so when nothing that feeds it has changed, carry the last result
+    # forward untouched rather than recompute an identical measurement.
+    if (previous.get("eval_regime") == EVAL_REGIME
+            and previous.get("status") in ("measured", "no_generation_model")
+            and previous.get("train_stories") == len(train)
+            and previous.get("snapshot_fingerprint") == fingerprint
+            and bool(previous.get("gain_z") is not None) == bool(rnn_state and rnn_state.get("vocab"))):
+        carried = dict(previous)
+        carried["snapshot_migrated"] = migrated or bool(previous.get("snapshot_migrated"))
+        carried["recomputed"] = False
+        return carried
 
     # round-trip diagnostic (NOT a capability)
     diag, tmpl_base = [], []
@@ -429,9 +445,9 @@ def evaluate_retelling(stories: list[dict], previous: dict | None = None,
 
     return {
         "version": 3, "status": status, "eval_regime": EVAL_REGIME,
-        "snapshot_migrated": migrated,
+        "snapshot_migrated": migrated, "recomputed": True,
         "train_stories": len(train), "test_stories": n,
-        "snapshot_stories": len(snap), "snapshot_fingerprint": _fingerprint(snap),
+        "snapshot_stories": len(snap), "snapshot_fingerprint": fingerprint,
         "test_snapshot": snap,
         "roundtrip_fidelity": round(mean_ordered, 3),          # diagnostic, not capability
         "roundtrip_template_shuffled": round(mean_tmpl_shuffled, 3),
