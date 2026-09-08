@@ -266,6 +266,26 @@ class ReadingCurriculumTest(unittest.TestCase):
         self.assertEqual(by_title["Easy"], "in_rotation")
         self.assertEqual(by_title["Hard"], "shelved_above_level")
 
+    def test_tatoeba_readers_in_rotation_do_not_block_level_advancement(self):
+        cur = rc.empty_curriculum()
+        cur["level"] = 2.0
+        # 4 narrative books at the band, all graduated with good scores
+        rc.register_books(cur, [book(f"B{i}", f"b{i}", SIMPLE) for i in range(4)], cycle=1)
+        for b in cur["shelf"].values():
+            b["status"] = "graduated"
+            b["comprehension_history"] = [0.85]
+            b["estimated_level"] = 2.0
+        # a Tatoeba reader still in rotation at the band
+        rc.register_books(cur, [{"title": "文集", "url": "tatoeba://reader/2.0/1",
+                                 "source": "tatoeba", "text": SIMPLE, "verbs": []}], cycle=1)
+        for b in cur["shelf"].values():
+            if b.get("source") == "tatoeba":
+                b["estimated_level"] = 2.0
+                b["status"] = "in_rotation"
+        adv = rc.maybe_advance_level(cur, cycle=2)
+        self.assertTrue(adv["advanced"])
+        self.assertEqual(cur["level"], 2.5)
+
     def test_a_tatoeba_reader_is_graded_by_the_sentence_scorer(self):
         cur = rc.empty_curriculum()
         rc.register_books(cur, [{"title": "やさしい文集", "url": "tatoeba://reader/2.0/1",

@@ -54,6 +54,8 @@ AOZORA_LEVEL_MARGIN = 1.0   # skip Aozora works more than this above the reading
                             # cannot handle is what stalled it (was 3.0)
 TATOEBA_MAX_LEVEL = 4.0     # above this the parser handles literary prose well
                             # enough that sentence drills add little
+TATOEBA_READERS_PER_LEVEL = 6   # once this many exist near the level, stop
+                            # fetching so the band can drain and the level rise
 AOZORA_WORKS_PER_AUTHOR = 10
 
 
@@ -177,10 +179,15 @@ def _fetch_more_books(cur: dict, cycle: int) -> int:
     # rise on a solid footing.  Pulled only near picture-book level and only when
     # the narrative sources came up short.
     tatoeba = []
-    if len(fetched) < FETCH_TARGET and budget_left() and level <= TATOEBA_MAX_LEVEL:
+    near_tatoeba = sum(1 for b in cur["shelf"].values()
+                       if b.get("source") == "tatoeba"
+                       and abs(b.get("estimated_level", 0) - level) <= 0.75)
+    if (len(fetched) < FETCH_TARGET and budget_left() and level <= TATOEBA_MAX_LEVEL
+            and near_tatoeba < TATOEBA_READERS_PER_LEVEL):
         skip = cur.get("_tatoeba_cursor", 0)
+        want = min(FETCH_TARGET - len(fetched), TATOEBA_READERS_PER_LEVEL - near_tatoeba)
         try:
-            tatoeba = corpus.tatoeba_readers(round(level, 1), n_readers=FETCH_TARGET - len(fetched),
+            tatoeba = corpus.tatoeba_readers(round(level, 1), n_readers=want,
                                              skip=skip, network=4)
         except Exception:
             tatoeba = []

@@ -606,7 +606,11 @@ def maybe_advance_level(curriculum: dict, cycle: int) -> dict:
                if abs(b["estimated_level"] - curriculum["level"]) <= LEVEL_STEP]
     graduated_band = [b for b in at_band
                       if b["status"] == "graduated" and b["comprehension_history"]]
-    ungraduated_band = [b for b in at_band if b["status"] == "in_rotation"]
+    # Tatoeba readers are an unbounded vocabulary supply -- graduating them is
+    # evidence the level is solid, but they must not keep the band "not
+    # exhausted" forever and block the level from ever rising.
+    ungraduated_band = [b for b in at_band
+                        if b["status"] == "in_rotation" and b.get("source") != "tatoeba"]
     dead_band = [b for b in at_band if b["status"] in ("shelved_stuck", "unparsable")]
     # advance when the band is essentially exhausted: enough graduates OR every
     # available book at this level has been graduated (a thin shelf must not trap)
