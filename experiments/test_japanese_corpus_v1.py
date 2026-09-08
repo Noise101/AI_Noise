@@ -77,6 +77,15 @@ class JapaneseCorpusTest(unittest.TestCase):
         finally:
             jc.aesop_kernel = orig
 
+    def test_strip_section_headings_drops_a_leading_title_line(self):
+        from japanese_corpus_v1 import _strip_section_headings
+        out = _strip_section_headings("生い立ち\n\nわたしは捨て子だった。つぎの日がきた。")
+        self.assertFalse(out.lstrip().startswith("生い立ち"))
+        self.assertIn("わたしは捨て子だった。", out)
+        # a normal sentence is not stripped
+        keep = "わたしは山へ行った。\n木を切った。"
+        self.assertEqual(_strip_section_headings(keep), keep)
+
     def test_sentence_level_rises_with_kanji_and_length(self):
         self.assertLess(_sentence_level("ねこがねむる。"), _sentence_level("彼は複雑な問題を解決した。"))
 

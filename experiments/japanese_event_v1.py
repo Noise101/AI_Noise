@@ -35,7 +35,9 @@ from dataclasses import dataclass, field
 #        った defaults to る; single-kanji topic は
 #   5 -> compound verbs (〜ておる, 〜ながら), copula ではなかった, ことができる,
 #        んだ -> ぶ/む/ぬ, 考える/思う in the table; adverbs out of the subject slot
-PARSER_VERSION = 6      # v6: conjunctions / sentence adverbs rejected as subjects
+PARSER_VERSION = 7      # v7: sentences also split on blank lines (section
+                       # headings no longer glue to the first subject); time
+                       # adverbials (〜まで, 〜ごろ) rejected as subjects
 
 # character classes
 HIRAGANA = r"ぁ-ゖゝゞ"
@@ -44,7 +46,13 @@ KANJI = r"㐀-䶿一-鿿"
 JP = f"[{HIRAGANA}{KATAKANA}{KANJI}]"
 JP_RUN = re.compile(f"{JP}+")
 RUBY = re.compile(r"《[^》]*》|｜")            # aozora-style ruby markers -> strip
-SENT_SPLIT = re.compile(r"(?<=[。！？])")
+# split after sentence-final punctuation, and also on a blank line -- an Aozora
+# section heading ("生い立ち\n\nわたしは...") is otherwise glued to the first
+# sentence and read as part of its subject.
+SENT_SPLIT = re.compile(r"(?<=[。！？])|\n[ \t　]*\n")
+# a noun run that is really a time adverbial ("八つの年まで", "そのうちに",
+# "今ごろ") -- never the agent of the clause
+_TIME_ADVERBIAL = re.compile(r"(まで|ごろ|ころ|あいだ|うち|さい中|とちゅう)$")
 
 # 「…」 direct speech: the quote content is pulled out before sentence splitting
 # (it contains its own 。), replaced by a placeholder, and turned into a
@@ -461,7 +469,8 @@ def _assemble_event(pairs: "list[tuple[str, str]]", verb: str, verb_conf: float,
             # agent -- keep it as a role and let the dropped topic be the subject
             roles.setdefault("が", noun)
             suppressed_ga = True
-        elif particle in SUBJECT_MARKERS and not subject and noun not in NON_SUBJECT:
+        elif (particle in SUBJECT_MARKERS and not subject and noun not in NON_SUBJECT
+              and not _TIME_ADVERBIAL.search(noun)):
             subject = noun
         elif particle in OBJECT_MARKERS and not obj and noun not in NON_SUBJECT:
             obj = noun

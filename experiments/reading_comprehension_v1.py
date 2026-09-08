@@ -334,10 +334,16 @@ def book_comprehension(events: list[dict], model: "ComprehensionModel | None",
 
     from japanese_retell_v1 import retelling_coherence, retell as _retell, score_retelling
     coherence = retelling_coherence(events)
-    # retelling fidelity: can Noise reproduce the story's structure?  (structural
-    # f1 + order, gated by whether the retelling reads as Japanese)
-    retold = _retell(events, max_sentences=10)
-    retell_fidelity = score_retelling(events, retold)["fidelity"]
+    # retelling fidelity: structural f1 + order, gated by coherence.  The
+    # retelling may summarise (recall is credited up to a "gist" fraction -- a
+    # short retelling that faithfully covers ~40% of a long story's event pairs
+    # is a good retelling), but it must be faithful and ordered.
+    retold = _retell(events, max_sentences=min(20, max(8, len(events))))
+    rs = score_retelling(events, retold)
+    recall_credit = min(1.0, rs["recall"] / 0.4)
+    f1c = (2 * recall_credit * rs["precision"] / (recall_credit + rs["precision"])
+           if (recall_credit + rs["precision"]) else 0.0)
+    retell_fidelity = round((0.6 * f1c + 0.4 * rs["order_correlation"]) * rs["coherence"], 3)
 
     # --- picture-book (絵本) graduation score ---------------------------------
     # "Understood a picture book" = named who it is about, from a parse that

@@ -170,11 +170,20 @@ class JapaneseText:
         return len(JP_CHARS.findall(self.text))
 
 
+def _strip_section_headings(text: str) -> str:
+    """A short line with no sentence punctuation, on its own between blank lines
+    (or at the very start), is an Aozora section heading -- "生い立ち" glued to the
+    first sentence otherwise becomes part of its subject."""
+    text = re.sub(r"\A(?:[^\n。！？、」』]{1,18}\n)+", "", text)
+    return re.sub(r"\n[ \t　]*\n[^\n。！？、」』]{1,18}\n[ \t　]*\n", "\n\n", text)
+
+
 def _clean(raw: str) -> str:
     text = _NOTES.sub("", raw)
     text = _HEADING.sub("", text)
     text = _RUBY.sub("", text)
     text = _BRACKET.sub("", text)
+    text = _strip_section_headings(text)
     text = re.sub(r"[ \t　]+", "", text)
     text = re.sub(r"\n{2,}", "\n", text).strip()
     return _modernise(text)
@@ -241,6 +250,7 @@ def fetch_aozora(html_url: str) -> JapaneseText | None:
         return None
     text = _RT.sub("", body.group(1))
     text = _TAG.sub("", text).replace("｜", "")
+    text = _strip_section_headings(text)
     text = _modernise(re.sub(r"[ \t　]+", "", re.sub(r"\n{2,}", "\n", text)).strip())
     if len(JP_CHARS.findall(text)) < 120:
         return None

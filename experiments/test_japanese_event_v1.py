@@ -62,6 +62,16 @@ class JapaneseEventTest(unittest.TestCase):
                                "とてもかなしみました。")
         self.assertNotIn("いっぴき", [e.subject for e in events])
 
+    def test_a_section_heading_does_not_glue_to_the_first_subject(self):
+        events = extract_story("生い立ち\n\nわたしは すてごだった。おかあさんが いた。")
+        subs = [e.subject for e in events]
+        self.assertNotIn("生い立ちわたし", subs)
+        self.assertIn("わたし", subs)
+
+    def test_a_time_adverbial_is_not_read_as_the_subject(self):
+        events = extract_story("八つの年まで、おかあさんが いると おもっていた。")
+        self.assertNotIn("八つの年まで", [e.subject for e in events])
+
     def test_conjunction_keredo_is_not_read_as_a_subject(self):
         # 「けれども、…」 used to split into topic "けれど" + particle も and then
         # thread through the story as its subject.
