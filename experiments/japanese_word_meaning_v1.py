@@ -34,7 +34,7 @@ from collections import Counter
 from web_cache import WEB_CACHE, NetworkBudgetExceeded
 
 VERSION = 1
-SELECTION_VERSION = 2         # re-freeze the held-out set (v1's was parse garbage)
+SELECTION_VERSION = 3         # re-freeze the held-out set from word-like tokens only
 USER_AGENT = "AI_Noise/0.31 (developmental Japanese word meaning; read-only)"
 WIKTIONARY_API = "https://ja.wiktionary.org/w/api.php"
 WIKIPEDIA_API = "https://ja.wikipedia.org/w/api.php"
@@ -84,6 +84,15 @@ def _norm(w: str) -> str:
 def _is_content(w: str) -> bool:
     w = _norm(w)
     return bool(_CONTENT.match(w)) and w not in _STOP
+
+
+def _is_wordlike(w: str) -> bool:
+    """A single word, not a phrase or a parse fragment: 2..6 chars, no の / 、,
+    no dangling particle, not と+name."""
+    w = _norm(w)
+    return (_is_content(w) and 2 <= len(w) <= 6 and "の" not in w and "、" not in w
+            and not w.endswith(("の", "は", "が", "も", "を", "に", "て", "で", "と"))
+            and not re.match(r"^と[゠-ヿ]", w))
 
 
 def _held_out(word: str) -> bool:
@@ -215,11 +224,11 @@ def _observe(state: dict, stories: list[dict]) -> None:
 
 
 def _entity_vocab(state: dict, known_words: "set[str] | None") -> list[str]:
-    """Content words that appeared as a subject/object at least twice -- the
+    """Word-like tokens that appeared as a subject/object at least twice -- the
     things worth having a meaning for.  Ordered most-read first."""
     ent = state.get("entities", {})
     return [w for w, _ in sorted(ent.items(), key=lambda kv: -kv[1])
-            if ent[w] >= 2 and _is_content(w)
+            if ent[w] >= 2 and _is_wordlike(w)
             and (known_words is None or w in known_words)]
 
 
@@ -231,9 +240,9 @@ def explain(word: str, state: dict, *, allow_self: bool = True) -> dict:
     tax = state["taxonomy"]
     genus = tax.get(word, "") if allow_self else ""
     if not genus:
-        # propagate: the most common genus among this word's context neighbours
+        # propagate: a genus shared by >= 2 of this word's context neighbours
         votes = Counter(tax[n] for n in ctx if n in tax and (allow_self or n != word))
-        if votes:
+        if votes and votes.most_common(1)[0][1] >= 2:
             genus = votes.most_common(1)[0][0]
     assoc = [w for w, _ in ctx.most_common(EXPLAIN_TERMS)]
     terms = set(assoc) | ({genus} if genus else set())
@@ -276,9 +285,9 @@ def learn_and_evaluate(stories: list[dict], previous: dict | None, cycle: int,
     train_words = [w for w in vocab if not _held_out(w)]
     test_words = [w for w in vocab if _held_out(w)]
 
-    # freeze the held-out set once, from clean entity words only
+    # freeze the held-out set once, from word-like tokens only
     if not state["selection_words"] and len(test_words) >= MIN_TEST_WORDS:
-        state["selection_words"] = [w for w in test_words if _norm(w) == w][:60]
+        state["selection_words"] = [w for w in test_words if _is_wordlike(w)][:60]
     frozen_test = [w for w in state["selection_words"] if w in state["contexts"]]
 
     # research TRAIN entity words: one most-read, the rest sampled across the

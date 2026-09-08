@@ -51,12 +51,15 @@ class WordMeaningTest(unittest.TestCase):
 
     def test_explain_is_model_free_and_uses_the_taxonomy(self):
         state = wm._blank()
-        wm._observe(state, [{"events": STORY}] * 3)
-        state["taxonomy"] = {"からす": "鳥"}
-        # きつね co-occurs with からす -> genus propagates via the neighbour
+        wm._observe(state, [{"events": STORY + _self([
+            {"subject": "きつね", "verb": "みる", "obj": "はと"}])}] * 3)
+        # >= 2 neighbours must agree on a genus before it propagates
+        state["taxonomy"] = {"からす": "鳥", "はと": "鳥"}
         e = wm.explain("きつね", state, allow_self=False)
         self.assertIn("ぶどう", e["assoc"])
-        self.assertEqual(e["genus"], "鳥")                     # propagated (toy data)
+        self.assertEqual(e["genus"], "鳥")                     # propagated (2 votes)
+        state["taxonomy"] = {"からす": "鳥"}                    # only 1 vote -> no genus
+        self.assertEqual(wm.explain("きつね", state, allow_self=False)["genus"], "")
 
     def test_learn_and_evaluate_reports_a_stable_shape_when_offline(self):
         # no network -> no research, but the pipeline must not crash and the
