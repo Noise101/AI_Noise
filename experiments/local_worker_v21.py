@@ -345,6 +345,17 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
     if ast_.get("total_readings"):
         lines.append(f"補助読解の保存  : {ast_.get('total_readings')}件（{ast_.get('file')}、"
                      f"証拠0・学習非使用）")
+    wm = reading_status.get("word_meaning", {}) or {}
+    if wm.get("status") in ("measured", "insufficient_test_words"):
+        cap = "確定" if wm.get("capability_confirmed") else (
+            "有意" if wm.get("significant_now") else "未確定")
+        lines.append(
+            f"語の意味（説明で判定・診断）: 分類辞書 {wm.get('taxonomy_size')}語／調査 "
+            f"{wm.get('researched_count')}語／held-out {wm.get('test_words')}語 "
+            f"利得 {wm.get('mean_gain')} z={wm.get('z')}（{cap}）"
+            + "（ja.wiktionary/wikipedia CC-BY-SA から学習、定義は保存しない）")
+        for gloss in (wm.get("sample_explanations") or [])[:2]:
+            lines.append(f"  例: {gloss}")
     if seq.get("held_out_bits_per_char") is not None:
         rlog = reading_status.get("sequence_retirement_log") or []
         lines.append(f"日本語文字RNN（診断のみ・能力判定に不使用）: "

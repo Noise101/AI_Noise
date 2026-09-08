@@ -52,6 +52,7 @@ class JapaneseReaderTest(unittest.TestCase):
             "fetch_aozora": reader.corpus.fetch_aozora,
             "tatoeba_readers": reader.corpus.tatoeba_readers,
         }
+        self._orig_wm = reader.word_meaning.learn_and_evaluate
         titles = tuple(b.title for b in self._books)
         reader.corpus.kernel_titles = lambda *a, **k: titles
         reader.corpus.fetch = fake_fetch
@@ -59,10 +60,12 @@ class JapaneseReaderTest(unittest.TestCase):
         reader.corpus.aozora_author_works = lambda *a, **k: []
         reader.corpus.fetch_aozora = lambda *a, **k: None
         reader.corpus.tatoeba_readers = lambda *a, **k: []       # offline
+        reader.word_meaning.learn_and_evaluate = lambda *a, **k: {"status": "measured", "vocab": 0}
 
     def tearDown(self):
         for k, v in self._orig.items():
             setattr(reader.corpus, k, v)
+        reader.word_meaning.learn_and_evaluate = self._orig_wm
         self._tmp.cleanup()
 
     def test_first_cycle_fetches_books_and_reads_one(self):

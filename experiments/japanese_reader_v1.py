@@ -30,6 +30,7 @@ import reading_curriculum_v1 as curriculum
 import reading_comprehension_v1 as comprehension
 import japanese_retell_v1 as retell
 import japanese_sequence_v1 as sequence
+import japanese_word_meaning_v1 as word_meaning
 import caregiver_v1 as caregiver
 import reading_llm_v1 as reading_llm
 
@@ -40,6 +41,7 @@ EVENTS_FILE = "reading-events.json"
 COMPREHENSION_FILE = "reading-comprehension.json"
 RETELL_FILE = "reading-retelling.json"
 SEQUENCE_FILE = "reading-sequence.json"
+WORD_MEANING_FILE = "reading-word-meaning.json"
 CAREGIVER_FILE = "caregiver.json"
 AIDED_FILE = "reading-aided.json"          # evidence-0 aided readings (diagnostic store)
 STATUS_FILE = "reading-status.json"
@@ -430,6 +432,16 @@ def run_once(runtime: Path) -> dict:
         rnn_training_urls=rnn_training_urls,
         ever_trained_collections=rnn_ever_trained_cols, cycle=cycle)
 
+    # word meaning -- learn what the entities Noise reads DENOTE, from
+    # ja.wiktionary / ja.wikipedia (CC-BY-SA); tested by self-explanation
+    prev_wm = _read(runtime / WORD_MEANING_FILE)
+    try:
+        wm_report = word_meaning.learn_and_evaluate(
+            all_stories, prev_wm, cycle, known_words=curriculum._known_set(cur))
+    except Exception as exc:                      # never let it break the reader
+        wm_report = {**(prev_wm or {}), "status": "error", "error": repr(exc)}
+    _write(runtime / WORD_MEANING_FILE, wm_report)
+
     # a free-generation retelling of the book just read, conditioned ONLY on the
     # event representation Noise formed (no gold text, no LLM rephrasing)
     if book_id and seq_report.get("state") and heuristic:
@@ -478,6 +490,11 @@ def run_once(runtime: Path) -> dict:
         "cycle": cycle, "books_fetched": fetched,
         "reading": reading, "level_advance": advance,
         "curriculum": curriculum.summary(cur),
+        "word_meaning": {k: wm_report.get(k) for k in
+                         ("status", "vocab", "researched_count", "taxonomy_size",
+                          "test_words", "measured", "mean_gain", "z",
+                          "significant_now", "capability_confirmed",
+                          "sample_explanations")},
         "comprehension": {k: comp_report.get(k) for k in
                           ("status", "comprehension_score", "consequence",
                            "consequence_baseline", "consequence_z", "beats_baseline",
