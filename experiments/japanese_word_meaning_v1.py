@@ -87,11 +87,12 @@ def _is_content(w: str) -> bool:
 
 
 def _is_wordlike(w: str) -> bool:
-    """A single word, not a phrase or a parse fragment: 2..6 chars, no の / 、,
-    no dangling particle, not と+name."""
+    """A single word, not a phrase or a parse fragment: 2..6 chars, no の / 、;
+    no dangling case particle on a LONGER run (はと/ひと/あと are real words);
+    not と+katakana-name."""
     w = _norm(w)
     return (_is_content(w) and 2 <= len(w) <= 6 and "の" not in w and "、" not in w
-            and not w.endswith(("の", "は", "が", "も", "を", "に", "て", "で", "と"))
+            and not (len(w) >= 4 and w.endswith(("は", "が", "を", "に", "で")))
             and not re.match(r"^と[゠-ヿ]", w))
 
 
@@ -212,10 +213,10 @@ def _observe(state: dict, stories: list[dict]) -> None:
             if not isinstance(e, dict) or e.get("provenance") != "heuristic_self":
                 continue
             for slot in ("subject", "obj"):
-                if _is_content(e.get(slot)):
+                if _is_wordlike(e.get(slot)):
                     ent[_norm(e[slot])] += 1
             toks += [_norm(t) for t in (e.get("subject"), e.get("obj"), e.get("verb"))
-                     if _is_content(t)]
+                     if _is_wordlike(t)]
         for i, w in enumerate(toks):
             near = toks[max(0, i - 4):i] + toks[i + 1:i + 5]
             ctx.setdefault(w, Counter()).update(x for x in near if x != w)
