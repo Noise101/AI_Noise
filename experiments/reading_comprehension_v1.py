@@ -274,7 +274,7 @@ def _kendall_fraction(order: list[int]) -> float:
     return correct / (n * (n - 1) / 2)
 
 
-def book_comprehension(events: list[dict], model: ComprehensionModel,
+def book_comprehension(events: list[dict], model: "ComprehensionModel | None",
                        known_words: set[str]) -> dict:
     events = [e for e in events if e.get("verb")]
     if len(events) < 3:
@@ -282,35 +282,41 @@ def book_comprehension(events: list[dict], model: ComprehensionModel,
     verbs = [e["verb"] for e in events]
     subjects = [e.get("subject", "") for e in events]
 
-    # consequence: predict each event's verb from the prior ones.
-    #  - `consequence` / `consequence_baseline`: the 0/1 argmax hit rate the
-    #    curriculum's per-book score uses (unchanged).
-    #  - `consequence_prob` / `_baseline`: the probability the LEARNED back-off
-    #    model / the unigram assign to the true next verb -- a proper scoring
-    #    rule that moves smoothly with training (the capability benchmark).
+    # consequence / ordering: predict each verb from the prior ones / recover the
+    # narrative order.  These need a fitted ComprehensionModel; the picture-book
+    # graduation `score` below does NOT use them (a beginner shelf is far too
+    # small to learn them), so `model=None` is fine -- they report as chance.
     trials = max(1, len(verbs) - 2)
-    hits = sum(1 for i in range(2, len(verbs))
-               if model.predict_next_verb(verbs[:i]) == verbs[i])
-    consequence = hits / trials
-    baseline_verb = model._fallback
-    consequence_baseline = sum(1 for i in range(2, len(verbs)) if baseline_verb == verbs[i]) / trials
-    probs = [model.verb_prob(verbs[:i], verbs[i]) for i in range(2, len(verbs))]
-    uni = [model.unigram_prob(verbs[i]) for i in range(2, len(verbs))]
-    consequence_prob = sum(probs) / trials
-    consequence_prob_baseline = sum(uni) / trials
+    if model is not None:
+        hits = sum(1 for i in range(2, len(verbs))
+                   if model.predict_next_verb(verbs[:i]) == verbs[i])
+        consequence = hits / trials
+        baseline_verb = model._fallback
+        consequence_baseline = sum(1 for i in range(2, len(verbs))
+                                   if baseline_verb == verbs[i]) / trials
+        probs = [model.verb_prob(verbs[:i], verbs[i]) for i in range(2, len(verbs))]
+        uni = [model.unigram_prob(verbs[i]) for i in range(2, len(verbs))]
+        consequence_prob = sum(probs) / trials
+        consequence_prob_baseline = sum(uni) / trials
+    else:
+        consequence = consequence_baseline = 0.0
+        consequence_prob = consequence_prob_baseline = 0.0
 
     # ordering: shuffle, ask the model to reorder, score against the true order
-    rng = random.Random(_story_key("".join(verbs)))
-    shuffled = list(range(len(events)))
-    rng.shuffle(shuffled)
-    predicted = model.order_events([events[i] for i in shuffled])
-    reconstructed = [shuffled[p] for p in predicted]
-    ordering = _kendall_fraction(reconstructed)
+    if model is not None:
+        rng = random.Random(_story_key("".join(verbs)))
+        shuffled = list(range(len(events)))
+        rng.shuffle(shuffled)
+        predicted = model.order_events([events[i] for i in shuffled])
+        reconstructed = [shuffled[p] for p in predicted]
+        ordering = _kendall_fraction(reconstructed)
+    else:
+        ordering = 0.5
 
     # protagonist: from the first 3 events alone, name who the story is about;
-    # score against the whole-story answer (fuzzy entity match).
+    # score against the whole-story answer (fuzzy entity match).  Model-free.
     true_protagonist = _story_protagonist(events)
-    predicted_protagonist = model.predict_protagonist(events[:3], [])
+    predicted_protagonist = _story_protagonist(events[:3])
     protagonist = 1.0 if _entities_match(predicted_protagonist, true_protagonist) else 0.0
 
     coverage = (sum(w in known_words for w in {e.get("subject") for e in events} |

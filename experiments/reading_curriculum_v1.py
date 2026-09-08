@@ -55,6 +55,10 @@ SUBORDINATE = re.compile(
     r"|し、|が、|ば、|たら、|なら、|ても、|でも、|から、|と、)")
 
 GRADUATE_COMPREHENSION = 0.75      # a book is "understood" at/above this
+# bumped when the graduation SCORE definition changes -- readable books shelved
+# under the old definition get one fresh reading under the new one.
+GRADUATION_SCORER_VERSION = 2      # v2: picture-book score (book_comprehension for
+                                  # all readers, was _self_consistency when cold)
 ADVANCE_COMPREHENSION = 0.80       # mean over recent graduates to raise the level
 STALL_COMPREHENSION_DROP = 0.15    # recent comprehension this far below -> pause advancement
 MAX_REREADS = 6                    # rereads before a stuck book is shelved
@@ -420,8 +424,18 @@ def reevaluate_stale_parses(curriculum: dict) -> list[str]:
     from japanese_event_v1 import PARSER_VERSION
     reach = curriculum["level"] + LEVEL_STEP
     reset = []
+    scorer_bumped = curriculum.get("graduation_scorer_version", 0) < GRADUATION_SCORER_VERSION
+    curriculum["graduation_scorer_version"] = GRADUATION_SCORER_VERSION
     for bid, b in curriculum["shelf"].items():
         if b["status"] == "graduated":
+            continue
+        # the graduation score definition changed -> give every readable book
+        # shelved under the old one a fresh reading under the new one
+        if (scorer_bumped and b["status"] == "shelved_stuck"
+                and b["estimated_level"] <= reach):
+            b["status"] = "in_rotation"
+            b["times_read"] = 0
+            reset.append(bid)
             continue
         # a book more than a mild stretch above the level is parked as
         # `shelved_above_level` (not read) whatever its history -- including one
@@ -538,11 +552,11 @@ def record_reading(curriculum: dict, book_id: str, events: list[dict],
                 "times_read": book["times_read"], "book_level": book["estimated_level"]}
     if comprehension is not None:
         score = comprehension
-    elif model is not None:                       # reading_comprehension_v1 model
+    else:
+        # the picture-book graduation score (who / coherent / retell / vocab) is
+        # model-independent; `model` only enriches the diagnostic `tests`.
         from reading_comprehension_v1 import book_comprehension
         score = book_comprehension(events, model, _known_set(curriculum))["score"]
-    else:
-        score = _self_consistency(events)         # cold-start proxy
     book["times_read"] += 1
     book["last_read_cycle"] = cycle
     book["comprehension_history"].append(round(score, 3))
