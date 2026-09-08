@@ -34,6 +34,7 @@ from collections import Counter
 from web_cache import WEB_CACHE, NetworkBudgetExceeded
 
 VERSION = 1
+SELECTION_VERSION = 2         # re-freeze the held-out set (v1's was parse garbage)
 USER_AGENT = "AI_Noise/0.31 (developmental Japanese word meaning; read-only)"
 WIKTIONARY_API = "https://ja.wiktionary.org/w/api.php"
 WIKIPEDIA_API = "https://ja.wikipedia.org/w/api.php"
@@ -94,6 +95,21 @@ def _content_words(text: str) -> list[str]:
     return [w for w in re.findall(r"[ぁ-ゟ゠-ヿ一-鿿]{2,}", text or "") if _is_content(w)]
 
 
+_KANJI_JP = re.compile(r"^[ぁ-ゟ゠-ヿ一-鿿々〆ヶ]+$")
+# simplified-Chinese chars that leak in from ja.wiktionary's 中国語 sections
+_CN_ONLY = set("时间说话见这个们来对开关会门电脑页务实际标边过还爱国车轮马鸟鱼语学")
+_GENUS_JUNK = frozenset(("三省堂", "岩波", "広辞苑", "現世", "嗅覚システム",
+                         "抽象概念", "総体", "一切", "存在物"))
+
+
+def _plausible_genus(g: str) -> bool:
+    """A genus is a plain everyday noun -- 2..6 chars, JIS-range, not a fragment."""
+    return (bool(g) and 2 <= len(g) <= 6 and g not in _BAD_GENUS and g not in _STOP
+            and g not in _GENUS_JUNK and bool(_KANJI_JP.match(g))
+            and not (set(g) & _CN_ONLY)
+            and not g.endswith(("など", "こと", "もの", "え", "り")))
+
+
 # --- ja.wiktionary (CC-BY-SA) ---------------------------------------------
 def _wiktionary_gist(word: str) -> dict | None:
     """{'genus': str, 'terms': [str], 'related': [str]} from the 名詞 definition."""
@@ -134,7 +150,7 @@ def _wiktionary_gist(word: str) -> dict | None:
     genus = ""
     for g in _GENUS.finditer(defsent):
         cand = g.group(1)
-        if cand not in _STOP and cand not in _BAD_GENUS and word not in cand and not cand.startswith("で"):
+        if _plausible_genus(cand) and word not in cand:
             genus = cand
     rel_m = re.search(r"関連語。(.{0,120})", text)
     related = [w for w in _content_words(rel_m.group(1)) if w not in _BAD_GENUS][:8] if rel_m else []
@@ -165,14 +181,15 @@ def _wikipedia_genus(word: str) -> str:
         return ""
     for g in _GENUS.finditer(lead.split("。")[0] + "。"):
         c = g.group(1)
-        if c not in _BAD_GENUS and c not in _STOP and word not in c:
+        if _plausible_genus(c) and word not in c:
             return c
     return ""
 
 
 # --- learning + explanation ---------------------------------------------
 def _blank() -> dict:
-    return {"version": VERSION, "contexts": {}, "entities": {}, "taxonomy": {},
+    return {"version": VERSION, "selection_version": 0,
+            "contexts": {}, "entities": {}, "taxonomy": {},
             "researched": [], "selection_words": [], "selection_refs": {},
             "learning_curve": [], "capability_confirmed": False}
 
@@ -247,13 +264,21 @@ def learn_and_evaluate(stories: list[dict], previous: dict | None, cycle: int,
         state.setdefault(k, v)
     _observe(state, stories)
 
+    # re-freeze the held-out set / scrub the taxonomy when the policy bumps
+    if state.get("selection_version") != SELECTION_VERSION:
+        state["selection_version"] = SELECTION_VERSION
+        state["selection_words"] = []
+        state["selection_refs"] = {}
+        state["taxonomy"] = {w: g for w, g in state["taxonomy"].items()
+                             if _plausible_genus(g)}
+
     vocab = _entity_vocab(state, known_words)
     train_words = [w for w in vocab if not _held_out(w)]
     test_words = [w for w in vocab if _held_out(w)]
 
-    # freeze the selection (held-out) set once
+    # freeze the held-out set once, from clean entity words only
     if not state["selection_words"] and len(test_words) >= MIN_TEST_WORDS:
-        state["selection_words"] = test_words[:40]
+        state["selection_words"] = [w for w in test_words if _norm(w) == w][:60]
     frozen_test = [w for w in state["selection_words"] if w in state["contexts"]]
 
     # research TRAIN entity words: one most-read, the rest sampled across the
