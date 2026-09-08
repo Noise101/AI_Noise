@@ -1,6 +1,22 @@
 import unittest
 
-from japanese_corpus_v1 import _clean, _aozora_title, _modernise, KERNEL_SEED, kernel_titles
+import japanese_corpus_v1 as jc
+from japanese_corpus_v1 import (_clean, _aozora_title, _modernise, KERNEL_SEED, kernel_titles,
+                                _sentence_level, tatoeba_readers)
+
+
+_FAKE_TATOEBA = [
+    f"{i}\tjpn\t{s}" for i, s in enumerate([
+        "私は山にいました。", "ねこがねむっています。", "とりがそらをとびました。",
+        "こどもがわらいました。", "いぬがはしります。", "はながさきました。",
+        "あめがふっています。", "つきがでました。", "かぜがふきました。",
+        "むしがなきました。", "ふねがきました。", "とりがなきました。",
+        "きつねがはしりました。", "うさぎがはねました。", "さかながおよぎました。",
+        "ほしがひかりました。", "くもがうごきました。", "ゆきがつもりました。",
+        "かわがながれました。", "はっぱがおちました。", "とけいがとまりました。",
+        "でんしゃがきました。", "パン。", "何？", "abc123 is here.",
+    ], start=1000)
+]
 
 
 class JapaneseCorpusTest(unittest.TestCase):
@@ -54,13 +70,36 @@ class JapaneseCorpusTest(unittest.TestCase):
         self.assertEqual(len(KERNEL_SEED), len(set(KERNEL_SEED)))
 
     def test_kernel_titles_offline_falls_back_to_the_seed(self):
-        import japanese_corpus_v1 as jc
         orig = jc.aesop_kernel
         jc.aesop_kernel = lambda *a, **k: ()
         try:
             self.assertEqual(kernel_titles(), KERNEL_SEED)
         finally:
             jc.aesop_kernel = orig
+
+    def test_sentence_level_rises_with_kanji_and_length(self):
+        self.assertLess(_sentence_level("ねこがねむる。"), _sentence_level("彼は複雑な問題を解決した。"))
+
+    def test_tatoeba_readers_bundles_clean_short_sentences(self):
+        jc._CLEAN_POOL.clear()
+        readers = tatoeba_readers(2.0, n_readers=2, per_reader=5, band=3.0,
+                                  _lines=_FAKE_TATOEBA)
+        self.assertEqual(len(readers), 2)
+        for r in readers:
+            self.assertTrue(r.url.startswith("tatoeba://reader/2.0/"))
+            lines = r.text.split("\n")
+            self.assertEqual(len(lines), 5)
+            self.assertNotIn("パン。", lines)          # too short
+            self.assertNotIn("abc123 is here.", lines)  # latin/digits
+        # skip advances to fresh material
+        first = tatoeba_readers(2.0, n_readers=1, per_reader=5, band=3.0, _lines=_FAKE_TATOEBA)
+        later = tatoeba_readers(2.0, n_readers=1, per_reader=5, band=3.0, skip=5,
+                                _lines=_FAKE_TATOEBA)
+        self.assertNotEqual(first[0].text, later[0].text)
+
+    def test_tatoeba_offline_returns_empty(self):
+        jc._CLEAN_POOL.clear()
+        self.assertEqual(tatoeba_readers(2.0, _lines=[]), [])
 
 
 if __name__ == "__main__":

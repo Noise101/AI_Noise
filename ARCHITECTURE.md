@@ -58,6 +58,16 @@ If the helper is absent, slow, malformed, repetitive, or low quality, the pipeli
 - The autonomous word-boundary-discovery claim stays measured on the induction-only path. The analyser is a reference to check against, like a Wiktionary page — not a replacement for the discovery.
 - `AI_NOISE_NO_MORPHOLOGY=1` forces the null backend; `test_architecture_contract` asserts the reading loop still extracts events without any analyser.
 
+### Reading corpus (read-only, third-party)
+
+The developmental reading loop fetches public text: **Aozora Bunko** (public-domain
+literature), **Japanese Wikisource** (`イソップ童話集` + folktales), and **Tatoeba**
+(`downloads.tatoeba.org` bulk export, CC-BY 2.0 FR — short example sentences bundled
+into graded "readers"). See `experiments/ATTRIBUTION.md`. Tatoeba readers carry
+`source: "tatoeba"`: they build vocabulary and character-model text but are **kept
+out of the narrative benchmarks** (`evaluate_comprehension`, `evaluate_retelling`)
+and graded by parse quality, not narrative comprehension.
+
 ## Predict within the event, not the next event
 
 The parsed corpus (isolated `subject|verb|object` clauses from real 19th-century

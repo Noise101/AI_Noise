@@ -328,6 +328,104 @@ def fetch_kernel(network: int = 20) -> list[JapaneseText]:
     return out
 
 
+# --- Tatoeba: a large pool of short, clean, single-clause sentences ----------
+# The Aozora / wikisource corpus is literary prose that the from-scratch parser
+# mangles.  Tatoeba is CC-BY 2.0 FR example sentences -- mostly simple, one
+# clause, which the parser handles far better.  Used to build "graded readers":
+# a bundle of ~20 sentences near a target level acts as one shelf entry.  These
+# are NOT narratives -- no protagonist / order / retelling -- so they are graded
+# by parse quality + vocabulary and kept out of the narrative benchmarks.
+TATOEBA_SENTENCES_URL = (
+    "https://downloads.tatoeba.org/exports/per_language/jpn/jpn_sentences.tsv.bz2")
+TATOEBA_LICENSE = "CC-BY-2.0-FR"
+TATOEBA_ATTRIBUTION = ("Tatoeba (https://tatoeba.org) -- example sentences by its "
+                       "contributors, released under CC-BY 2.0 FR")
+_KANJI = re.compile(r"[㐀-鿿]")
+_LATIN_DIGIT = re.compile(r"[A-Za-z0-9０-９]")
+
+
+def _sentence_level(sentence: str) -> float:
+    """Cheap per-sentence difficulty: kana + short ~ 1.4, kanji-dense + long ~ 4+."""
+    kanji = len(_KANJI.findall(sentence))
+    return round(min(6.0, 1.4 + 0.18 * kanji + 0.04 * max(0, len(sentence) - 12)), 2)
+
+
+def _tatoeba_lines() -> list[str]:
+    """The decompressed jpn_sentences.tsv, one cached bulk download."""
+    import bz2
+    try:
+        raw = _get_bytes(TATOEBA_SENTENCES_URL, UA, "application/octet-stream")
+        return bz2.decompress(raw).decode("utf-8", "replace").splitlines()
+    except (NetworkBudgetExceeded, Exception):
+        return []
+
+
+# process-lifetime cache of the parse-filtered pool per (level, band) -- the
+# download is cached on disk but decompressing + parse-filtering 200k lines is
+# slow, and `_fetch_more_books` runs every few cycles in one long-lived process
+_CLEAN_POOL: "dict[tuple[float, float], list[tuple[int, str]]]" = {}
+
+
+def _tatoeba_clean_pool(level: float, band: float, network: int,
+                        _lines: "list[str] | None" = None) -> list[tuple[int, str]]:
+    key = (round(level, 1), band)
+    if key in _CLEAN_POOL:
+        return _CLEAN_POOL[key]
+    WEB_CACHE.set_network_budget(network)
+    lines = _lines if _lines is not None else _tatoeba_lines()
+    if not lines:
+        return []
+    lo, hi = level - band, level + band
+    cand: list[tuple[int, str]] = []
+    for line in lines:
+        p = line.split("\t")
+        if len(p) < 3:
+            continue
+        try:
+            sid = int(p[0])
+        except ValueError:
+            continue
+        s = p[2].strip()
+        if (not (6 <= len(s) <= 28) or not s.endswith(("。", "！", "？"))
+                or _LATIN_DIGIT.search(s) or "「" in s):
+            continue
+        if lo <= _sentence_level(s) <= hi:
+            cand.append((sid, s))
+        if len(cand) >= 2000:
+            break
+    cand.sort()
+    from japanese_event_v1 import extract_story
+    clean = [(sid, s) for sid, s in cand
+             if (evs := extract_story(_modernise(s)))
+             and evs[0].subject and evs[0].verb and evs[0].subject_explicit]
+    if _lines is None:                       # only cache real (not test) data
+        _CLEAN_POOL[key] = clean
+    return clean
+
+
+def tatoeba_readers(level: float, n_readers: int = 6, per_reader: int = 20,
+                    band: float = 0.4, network: int = 4, skip: int = 0,
+                    _lines: "list[str] | None" = None) -> list[JapaneseText]:
+    """`n_readers` bundles of `per_reader` short Tatoeba sentences within `band`
+    of `level`, deterministic by sentence id, after skipping the first `skip`
+    clean sentences (so successive passes get fresh material).  Each bundle is a
+    JapaneseText whose url is `tatoeba://reader/<level>/<first id>`.  Only
+    sentences the heuristic parser turns into a clean (explicit subject + verb)
+    event are kept -- a reader is made of sentences Noise can actually read."""
+    clean = _tatoeba_clean_pool(level, band, network, _lines=_lines)[skip:]
+    readers = []
+    for i in range(0, len(clean) - per_reader + 1, per_reader):
+        chunk = clean[i:i + per_reader]
+        first = chunk[0][0]
+        readers.append(JapaneseText(
+            title=f"やさしい文集 lv{level:.1f} #{first}",
+            url=f"tatoeba://reader/{level:.1f}/{first}",
+            text="\n".join(s for _, s in chunk)))
+        if len(readers) >= n_readers:
+            break
+    return readers
+
+
 def main() -> None:
     import json
     for story in fetch_kernel():

@@ -50,6 +50,7 @@ class JapaneseReaderTest(unittest.TestCase):
             "AOZORA_AUTHORS": reader.corpus.AOZORA_AUTHORS,
             "aozora_author_works": reader.corpus.aozora_author_works,
             "fetch_aozora": reader.corpus.fetch_aozora,
+            "tatoeba_readers": reader.corpus.tatoeba_readers,
         }
         titles = tuple(b.title for b in self._books)
         reader.corpus.kernel_titles = lambda *a, **k: titles
@@ -57,6 +58,7 @@ class JapaneseReaderTest(unittest.TestCase):
         reader.corpus.AOZORA_AUTHORS = {}
         reader.corpus.aozora_author_works = lambda *a, **k: []
         reader.corpus.fetch_aozora = lambda *a, **k: None
+        reader.corpus.tatoeba_readers = lambda *a, **k: []       # offline
 
     def tearDown(self):
         for k, v in self._orig.items():

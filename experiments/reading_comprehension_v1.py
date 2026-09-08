@@ -218,8 +218,16 @@ class ComprehensionModel:
 
     def predict_protagonist(self, first_events: list[dict], candidates: list[str]) -> str:
         # from the OPENING alone, name the entity the story is about: the one that
-        # recurs most across the first few events (subject or object).
-        return _story_protagonist(first_events)
+        # recurs most across the first few events (subject or object).  When a
+        # fixed candidate list is given (the caregiver's multiple choice), return
+        # the member it best matches.
+        guess = _story_protagonist(first_events)
+        if not candidates:
+            return guess
+        for c in candidates:
+            if _entities_match(guess, c):
+                return c
+        return candidates[0]
 
 
 def _entities_match(a: str, b: str) -> bool:
@@ -350,6 +358,27 @@ def book_comprehension(events: list[dict], model: "ComprehensionModel | None",
                       "coherence": coherence,
                       "retell_fidelity": retell_fidelity,
                       "known_word_coverage": round(coverage, 3)}}
+
+
+def sentence_reader_comprehension(events: list[dict], known_words: set[str]) -> dict:
+    """A Tatoeba reader is a bundle of unrelated simple sentences -- no
+    protagonist, no narrative order.  "Understood" here = turned each sentence
+    into a coherent (who did what) event, in words it knows."""
+    ev = [e for e in events if e.get("verb")]
+    if len(ev) < 3:
+        return {"score": 0.0, "reason": "too few events", "tests": {}}
+    parse_quality = sum(1 for e in ev
+                        if e.get("subject") and e.get("subject_explicit")) / len(ev)
+    from japanese_retell_v1 import retelling_coherence
+    coherence = retelling_coherence(ev)
+    slots = {w for e in ev for w in (e.get("subject"), e.get("obj")) if w}
+    coverage = sum(w in known_words for w in slots) / max(1, len(slots))
+    score = round(0.45 * parse_quality + 0.35 * coherence + 0.20 * coverage, 3)
+    return {"score": score,
+            "tests": {"parse_quality": round(parse_quality, 3),
+                      "coherence": round(coherence, 3),
+                      "known_word_coverage": round(coverage, 3),
+                      "sentences": len(ev)}}
 
 
 # --- vocabulary use-test -------------------------------------------------

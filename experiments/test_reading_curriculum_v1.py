@@ -266,6 +266,21 @@ class ReadingCurriculumTest(unittest.TestCase):
         self.assertEqual(by_title["Easy"], "in_rotation")
         self.assertEqual(by_title["Hard"], "shelved_above_level")
 
+    def test_a_tatoeba_reader_is_graded_by_the_sentence_scorer(self):
+        cur = rc.empty_curriculum()
+        rc.register_books(cur, [{"title": "やさしい文集", "url": "tatoeba://reader/2.0/1",
+                                 "source": "tatoeba", "license": "CC-BY-2.0-FR",
+                                 "text": SIMPLE, "event_count": 3, "verbs": []}], cycle=1)
+        bid = next(iter(cur["shelf"]))
+        self.assertEqual(cur["shelf"][bid]["source"], "tatoeba")
+        self.assertEqual(cur["shelf"][bid]["license"], "CC-BY-2.0-FR")
+        clean = _self([{"subject": s, "verb": v, "obj": "", "subject_explicit": True}
+                       for s, v in [("ねこ", "ねむる"), ("とり", "とぶ"), ("いぬ", "はしる"),
+                                    ("こども", "わらう")]])
+        r = rc.record_reading(cur, bid, clean, cycle=2)
+        # scored, and by the sentence scorer (no model needed, no narrative)
+        self.assertIsNotNone(r["comprehension"])
+
     def test_a_stuck_book_is_shelved_but_retried_as_a_last_resort(self):
         cur = rc.empty_curriculum()
         rc.register_books(cur, [book("A", "a", SIMPLE), book("B", "b", SIMPLE)], cycle=1)

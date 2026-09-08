@@ -211,6 +211,7 @@ def register_books(curriculum: dict, books: list[dict], cycle: int) -> int:
         in_reach = est <= curriculum["level"] + LEVEL_STEP
         curriculum["shelf"][bid] = {
             "title": book["title"], "url": book["url"], "source": book.get("source", ""),
+            "license": book.get("license", ""),
             "text": book.get("text", ""),
             "difficulty": difficulty, "estimated_level": est,
             "schema": _schema_signature(book.get("verbs", [])),
@@ -552,6 +553,11 @@ def record_reading(curriculum: dict, book_id: str, events: list[dict],
                 "times_read": book["times_read"], "book_level": book["estimated_level"]}
     if comprehension is not None:
         score = comprehension
+    elif book.get("source") == "tatoeba":
+        # a Tatoeba reader is a bundle of unrelated sentences -- graded by parse
+        # quality + vocabulary, not by narrative comprehension
+        from reading_comprehension_v1 import sentence_reader_comprehension
+        score = sentence_reader_comprehension(events, _known_set(curriculum))["score"]
     else:
         # the picture-book graduation score (who / coherent / retell / vocab) is
         # model-independent; `model` only enriches the diagnostic `tests`.

@@ -173,6 +173,28 @@ class ReadingComprehensionTest(unittest.TestCase):
                 uniform += sum(c) / 3
         self.assertGreater(learned, uniform)
 
+    def test_predict_protagonist_stays_within_a_given_candidate_list(self):
+        # the caregiver does options.index(predict_protagonist(...)) -- it must
+        # never return an entity outside the candidate list
+        model = rcp.ComprehensionModel().fit([s["events"] for s in structured_stories(n=20)])
+        events = [{"subject": "おれ", "verb": "いく", "obj": ""},
+                  {"subject": "おれ", "verb": "みる", "obj": ""}]
+        options = ["きつね", "たぬき", "うさぎ"]
+        self.assertIn(model.predict_protagonist(events, options), options)
+        self.assertEqual(model.predict_protagonist(events, []), "おれ")
+
+    def test_sentence_reader_comprehension_grades_by_parse_quality_and_vocab(self):
+        clean = [{"subject": s, "verb": v, "obj": "", "subject_explicit": True}
+                 for s, v in [("ねこ", "ねむる"), ("とり", "とぶ"), ("いぬ", "はしる"),
+                              ("こども", "わらう"), ("はな", "さく")]]
+        broken = [{"subject": "", "verb": v, "obj": "", "subject_explicit": False}
+                  for v in ("だ", "です", "する", "ない", "う")]
+        good = rcp.sentence_reader_comprehension(clean, {"ねこ", "とり", "いぬ", "こども", "はな"})
+        bad = rcp.sentence_reader_comprehension(broken, set())
+        self.assertGreater(good["score"], bad["score"])
+        self.assertEqual(good["tests"]["parse_quality"], 1.0)
+        self.assertLess(bad["tests"]["parse_quality"], 0.5)
+
     def test_consequence_is_a_probability_not_a_hit_rate(self):
         model = rcp.ComprehensionModel().fit([s["events"] for s in structured_stories(n=80)])
         t = rcp.book_comprehension(structured_stories(n=1, seed=5)[0]["events"], model, set())["tests"]

@@ -52,6 +52,8 @@ FETCH_COOLDOWN = 4           # cycles to wait between shelf-widening fetches
 AOZORA_LEVEL_MARGIN = 1.0   # skip Aozora works more than this above the reading
                             # level -- padding the shelf with books the reader
                             # cannot handle is what stalled it (was 3.0)
+TATOEBA_MAX_LEVEL = 4.0     # above this the parser handles literary prose well
+                            # enough that sentence drills add little
 AOZORA_WORKS_PER_AUTHOR = 10
 
 
@@ -168,12 +170,34 @@ def _fetch_more_books(cur: dict, cycle: int) -> int:
                     fetched.append(story)
             if len(fetched) >= FETCH_TARGET or not budget_left():
                 break
+
+    # Tatoeba graded readers: bundles of short, clean, single-clause sentences.
+    # The Aozora/wikisource corpus is literary prose the parser mangles; Tatoeba
+    # sentences it can actually read, so they build vocabulary and let the level
+    # rise on a solid footing.  Pulled only near picture-book level and only when
+    # the narrative sources came up short.
+    tatoeba = []
+    if len(fetched) < FETCH_TARGET and budget_left() and level <= TATOEBA_MAX_LEVEL:
+        skip = cur.get("_tatoeba_cursor", 0)
+        try:
+            tatoeba = corpus.tatoeba_readers(round(level, 1), n_readers=FETCH_TARGET - len(fetched),
+                                             skip=skip, network=4)
+        except Exception:
+            tatoeba = []
+        tatoeba = [t for t in tatoeba if t.url not in have]
+        cur["_tatoeba_cursor"] = skip + len(tatoeba) * 20
+
     books = []
     for s in fetched:
         evs = _events_of(s.text)                  # parsed here only to estimate difficulty
         books.append({"title": s.title, "url": s.url, "source": "ja", "text": s.text,
                       "event_count": len(evs), "events": evs,
                       "verbs": [e.get("verb", "") for e in evs]})
+    for s in tatoeba:
+        evs = _events_of(s.text)
+        books.append({"title": s.title, "url": s.url, "source": "tatoeba", "text": s.text,
+                      "license": corpus.TATOEBA_LICENSE, "event_count": len(evs),
+                      "events": evs, "verbs": [e.get("verb", "") for e in evs]})
     added = curriculum.register_books(cur, books, cycle)
     # NOTE: a fetched-but-unread book does NOT get its events written to the
     # shared events store.  Its events enter the store only when Noise actually
@@ -337,9 +361,13 @@ def run_once(runtime: Path) -> dict:
     # only an explicit `heuristic_self` stamp is Noise's own experience).
     real = set(events_store)
     heur_store = {bid: _heuristic_only(ev) for bid, ev in events_store.items()}
+    # Tatoeba readers are sentence bundles, not narratives -- they feed
+    # vocabulary and the RNN but never the narrative comprehension / retelling
+    # benchmarks (no protagonist, no order to recover).
     all_stories = [{"url": cur["shelf"][bid]["url"], "events": ev}
                    for bid, ev in heur_store.items()
-                   if bid in cur["shelf"] and len(ev) >= 3]
+                   if bid in cur["shelf"] and len(ev) >= 3
+                   and cur["shelf"][bid].get("source") != "tatoeba"]
     # the RNN's cumulative training ledger (collections it has EVER trained on):
     # a collection here can never be moved into a held-out tier.
     rnn_ever_trained_cols = set(
