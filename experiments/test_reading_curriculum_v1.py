@@ -121,6 +121,19 @@ class ReadingCurriculumTest(unittest.TestCase):
                                     for b in cur["shelf"].values()), 1)
         self.assertEqual(rc.reset_level_for_new_parser(cur, cycle=10)["reset"], False)
 
+    def test_parser_bump_does_not_drop_below_an_earned_floor(self):
+        import japanese_event_v1 as jevent
+        cur = rc.empty_curriculum()
+        rc.register_books(cur, [book("easy", "e", SIMPLE)], cycle=1)
+        cur["level"] = 3.0
+        cur["floor_level"] = 3.0                 # a real advance reached level 3
+        cur["level_parser_version"] = jevent.PARSER_VERSION - 1
+        for b in cur["shelf"].values():
+            b["estimated_level"] = 2.0
+        # easiest book is 2.0 but the earned floor is 3.0 -> no reset below it
+        self.assertFalse(rc.reset_level_for_new_parser(cur, cycle=9)["reset"])
+        self.assertEqual(cur["level"], 3.0)
+
     def test_rereading_the_same_book_does_not_inflate_word_book_counts(self):
         cur = rc.empty_curriculum()
         rc.register_books(cur, [book("A", "a", SIMPLE)], cycle=1)

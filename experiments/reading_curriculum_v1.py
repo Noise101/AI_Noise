@@ -496,10 +496,11 @@ def recompute_level_from_stories(curriculum: dict, cycle: int) -> dict:
 
 
 def reset_level_for_new_parser(curriculum: dict, cycle: int) -> dict:
-    """One-off when the parser version moves: the level was inflated by the old
-    extractor's over-generous scoring, so drop it back to the easiest real book
-    and re-walk the corpus from there.  Graduated books stay graduated (retention
-    checks re-test them); everything else re-shelves against the new level."""
+    """One-off when the parser version moves: re-shelve the corpus against the
+    new parser.  Parser upgrades now IMPROVE extraction, so an earned level
+    (`floor_level`, set by a real advance) is NOT surrendered -- the re-walk only
+    lowers the level to the easiest available book if that is still above the
+    floor.  Graduated books stay graduated (retention checks re-test them)."""
     from japanese_event_v1 import PARSER_VERSION
     if curriculum.get("level_parser_version", 0) >= PARSER_VERSION:
         return {"reset": False}
@@ -508,12 +509,13 @@ def reset_level_for_new_parser(curriculum: dict, cycle: int) -> dict:
             if not b.get("scaffolded") and b["status"] != "graduated"]
     if not real:
         return {"reset": False}
-    target = round(max(1.0, min(real)) * 2) / 2
+    floor = curriculum.get("floor_level") or 1.0
+    target = max(floor, round(max(1.0, min(real)) * 2) / 2)
     if target >= curriculum["level"]:
         return {"reset": False}
     old = curriculum["level"]
     curriculum["level"] = target
-    curriculum["floor_level"] = target           # re-walk: the old earned floor is dropped too
+    curriculum["floor_level"] = target
     curriculum["graduated_since_advance"] = 0
     curriculum["level_history"].append(
         {"cycle": cycle, "level": target,
