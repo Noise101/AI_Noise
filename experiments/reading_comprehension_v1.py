@@ -117,47 +117,78 @@ class ComprehensionModel:
         return self
 
     # --- learned back-off language model over verbs ------------------------
-    def _components(self, p2: str, p1: str, v: str) -> tuple[float, float, float]:
+    @staticmethod
+    def _count_tables(seqs: list[list[str]]):
+        tri: dict = defaultdict(Counter)
+        bi: dict = defaultdict(Counter)
+        uni: Counter = Counter()
+        for vb in seqs:
+            for i, v in enumerate(vb):
+                uni[v] += 1
+                if i >= 1:
+                    bi[vb[i - 1]][v] += 1
+                if i >= 2:
+                    tri[(vb[i - 2], vb[i - 1])][v] += 1
+        return tri, bi, uni
+
+    def _components(self, p2, p1, v, tables=None):
         """Trigram, bigram, unigram probabilities of `v` (add-1 smoothed uni)."""
-        tri = self.verb_prior2.get((p2, p1))
+        tri_t, bi_t, uni_c, uni_total, vocab = (
+            tables if tables is not None
+            else (self.verb_prior2, self.verb_next, self.verb_freq,
+                  self._uni_total, self._vocab_size))
+        tri = tri_t.get((p2, p1))
         p_tri = tri[v] / sum(tri.values()) if tri and sum(tri.values()) else 0.0
-        bi = self.verb_next.get(p1)
+        bi = bi_t.get(p1)
         p_bi = bi[v] / sum(bi.values()) if bi and sum(bi.values()) else 0.0
-        p_uni = (self.verb_freq.get(v, 0) + 1) / (self._uni_total + self._vocab_size)
+        p_uni = (uni_c.get(v, 0) + 1) / (uni_total + vocab)
         return p_tri, p_bi, p_uni
 
     def _fit_backoff(self, seqs: list[list[str]]) -> None:
-        if len(seqs) < 4:
+        """Deleted interpolation: the n-gram tables used to SCORE the validation
+        stories are built only from the OTHER stories, so lambda cannot reward a
+        trigram just because the validation story was also in the training count.
+        Falls back to pure unigram if the learned mix does not beat it."""
+        if len(seqs) < 8:
             return
-        cut = max(1, len(seqs) // 4)
-        val = [(vb[i - 2], vb[i - 1], vb[i]) for vb in seqs[:cut]
-               for i in range(2, len(vb))]
-        if not val:
+        cut = max(2, len(seqs) // 4)
+        val_seqs, fit_seqs = seqs[:cut], seqs[cut:]
+        tri_t, bi_t, uni_c = self._count_tables(fit_seqs)
+        tables = (tri_t, bi_t, uni_c, max(1, sum(uni_c.values())), max(1, len(uni_c)))
+        val = [(vb[i - 2], vb[i - 1], vb[i]) for vb in val_seqs for i in range(2, len(vb))]
+        if len(val) < 20:
             return
-        # gradient ascent on validation log-likelihood over softmax(logits)
+        comps_all = [self._components(p2, p1, v, tables) for p2, p1, v in val]
+
+        def loglik(lam):
+            tot = 0.0
+            for c in comps_all:
+                mix = lam[0] * c[0] + lam[1] * c[1] + lam[2] * c[2]
+                tot += math.log(mix) if mix > 0 else -50.0
+            return tot / len(comps_all)
+
         logits = [0.0, 0.0, 0.0]
-        lr = 0.5
-        for _ in range(120):
+        for _ in range(150):
             m = max(logits)
             ex = [math.exp(x - m) for x in logits]
             s = sum(ex)
             lam = [e / s for e in ex]
             grad = [0.0, 0.0, 0.0]
-            for p2, p1, v in val:
-                comps = self._components(p2, p1, v)
-                mix = lam[0] * comps[0] + lam[1] * comps[1] + lam[2] * comps[2]
+            for c in comps_all:
+                mix = lam[0] * c[0] + lam[1] * c[1] + lam[2] * c[2]
                 if mix <= 0:
                     continue
+                mixed = lam[0] * c[0] + lam[1] * c[1] + lam[2] * c[2]
                 for k in range(3):
-                    # d/dlogit_k of log(sum lam_j c_j), lam = softmax(logits)
-                    dlam_k = lam[k] * (comps[k] - (lam[0] * comps[0] + lam[1] * comps[1] + lam[2] * comps[2]))
-                    grad[k] += dlam_k / mix
+                    grad[k] += lam[k] * (c[k] - mixed) / mix
             for k in range(3):
-                logits[k] += lr * grad[k] / len(val)
+                logits[k] += 0.5 * grad[k] / len(comps_all)
         m = max(logits)
         ex = [math.exp(x - m) for x in logits]
         s = sum(ex)
-        self.lam = tuple(e / s for e in ex)
+        learned = tuple(e / s for e in ex)
+        # honest floor: never adopt weights that lose to the plain unigram
+        self.lam = learned if loglik(learned) > loglik((0.0, 0.0, 1.0)) else (0.0, 0.0, 1.0)
 
     def verb_prob(self, prior_verbs: list[str], v: str) -> float:
         p2 = prior_verbs[-2] if len(prior_verbs) >= 2 else ""
