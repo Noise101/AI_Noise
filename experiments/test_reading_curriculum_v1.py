@@ -240,6 +240,32 @@ class ReadingCurriculumTest(unittest.TestCase):
         rc.migrate_reading_state(cur, store, fake_extract)         # already v3 -> no-op
         self.assertEqual(cur["known_words"], snap)
 
+    def test_books_far_above_the_level_are_not_dragged_in_the_loop_idles(self):
+        cur = rc.empty_curriculum()
+        cur["level"] = 2.0
+        rc.register_books(cur, [book("Easy", "e", SIMPLE)], cycle=1)
+        easy_id = next(iter(cur["shelf"]))
+        cur["shelf"][easy_id]["status"] = "graduated"          # already read
+        rc.register_books(cur, [book("Hard1", "h1", HARDER), book("Hard2", "h2", HARDER)], cycle=2)
+        for b in cur["shelf"].values():
+            if b["title"].startswith("Hard"):
+                self.assertEqual(b["status"], "shelved_above_level")
+        # nothing within reach -> idle honestly rather than fake-read a novel
+        self.assertIsNone(rc.select_next_book(cur))
+        self.assertEqual(rc.summary(cur)["readable_unread"], 0)
+
+    def test_parser_bump_files_stuck_books_by_level_not_all_into_rotation(self):
+        cur = rc.empty_curriculum()
+        cur["level"] = 2.0
+        rc.register_books(cur, [book("Easy", "e", SIMPLE), book("Hard", "h", HARDER)], cycle=1)
+        for b in cur["shelf"].values():
+            b.update(status="shelved_stuck", times_read=6, parser_version=1)
+            b["estimated_level"] = 2.0 if b["title"] == "Easy" else 4.0
+        rc.reevaluate_stale_parses(cur)
+        by_title = {b["title"]: b["status"] for b in cur["shelf"].values()}
+        self.assertEqual(by_title["Easy"], "in_rotation")
+        self.assertEqual(by_title["Hard"], "shelved_above_level")
+
     def test_a_stuck_book_is_shelved_but_retried_as_a_last_resort(self):
         cur = rc.empty_curriculum()
         rc.register_books(cur, [book("A", "a", SIMPLE), book("B", "b", SIMPLE)], cycle=1)

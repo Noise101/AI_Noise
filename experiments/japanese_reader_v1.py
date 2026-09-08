@@ -49,7 +49,9 @@ SHELF_LOW_WATER = 4           # in-rotation books below this -> fetch more
 FETCH_BUDGET = 20           # network requests per shelf-widening pass
 FETCH_TARGET = 10           # books to add per pass
 FETCH_COOLDOWN = 4           # cycles to wait between shelf-widening fetches
-AOZORA_LEVEL_MARGIN = 3.0   # skip Aozora works this far above the reading level
+AOZORA_LEVEL_MARGIN = 1.0   # skip Aozora works more than this above the reading
+                            # level -- padding the shelf with books the reader
+                            # cannot handle is what stalled it (was 3.0)
 AOZORA_WORKS_PER_AUTHOR = 10
 
 

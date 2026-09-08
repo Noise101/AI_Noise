@@ -287,7 +287,7 @@ def score_retelling(original_events: list[dict], retold_text: str) -> dict:
 # built from the same training corpus?  This removes the structural shortcut in
 # v1, where an outer loop generated each event and concatenated them in input
 # order (so "ordered" input always beat "shuffled" input regardless of the RNN).
-EVAL_REGIME = "narrative_order_recovery_v3"   # v3: anchor streak + candidate checkpoints (re-audit #6)
+EVAL_REGIME = "narrative_order_recovery_v4"   # v4: re-frozen on parser v6 events
 SCORING_VERSION = 2
 BASELINE_DEFINITION = "verb_position_from_training_corpus"
 BENCH_SALT = "retell:nor:v2"

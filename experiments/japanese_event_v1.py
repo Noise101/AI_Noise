@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 #        った defaults to る; single-kanji topic は
 #   5 -> compound verbs (〜ておる, 〜ながら), copula ではなかった, ことができる,
 #        んだ -> ぶ/む/ぬ, 考える/思う in the table; adverbs out of the subject slot
-PARSER_VERSION = 5
+PARSER_VERSION = 6      # v6: conjunctions / sentence adverbs rejected as subjects
 
 # character classes
 HIRAGANA = r"ぁ-ゖゝゞ"
@@ -84,13 +84,31 @@ CONNECTIVES = {"そして", "それから", "すると", "しかし", "けれど
                "いろいろ", "だんだん", "そっと", "しずかに", "きゅうに", "にわかに",
                "しばらく", "まもなく", "すっかり", "ちっとも", "とうとう", "しまいに",
                "いきなり", "だいぶ", "もっと", "ずいぶん", "たいそう", "たいへん"}
+# Conjunctions, sentence adverbs, connective fragments and (historical-kana)
+# variants that the case scanner otherwise admits as a bare topic / subject --
+# e.g. 「けれども、…」 splits into topic "けれど" + particle も.  A token here can
+# never be the SUBJECT of an event; it is dropped (the dropped topic threads
+# through instead).  Only unambiguous function words -- nothing that is also a
+# common noun (heat, water, morning...).
+NON_SUBJECT = {
+    "けれど", "けど", "だけど", "だが", "しかも", "それに", "つまり", "だから",
+    "それで", "そこで", "ですから", "および", "または", "あるいは", "ないし",
+    "もし", "もしも", "たとえ", "まるで", "ちょうど", "やはり", "やっぱり",
+    "きっと", "たぶん", "おそらく", "まさか", "けっして", "ぜひ", "どうか",
+    "なぜ", "なぜなら", "どうして", "いったい", "はたして", "せっかく",
+    "こう", "そう", "ああ", "どう",
+    "たうたう", "とうとう", "しまひに", "だんだんに", "そのうち", "やうやう",
+}
 # body parts / faculties: in a 「Xは Yが <state>」 sensation clause (おなかがすく,
 # のどがかわく, あたまがいたい) the が-noun Y is part of the predicate, not the
 # agent -- the experiencer is the dropped topic.  Taking Y as the subject and
 # threading it forward is how "おなか" ends up "saying" things three clauses later.
 PREDICATE_GA_NOUNS = frozenset({
     "おなか", "はら", "のど", "むね", "せなか", "こし", "あたま",
-    "きもち", "きぶん", "からだ"})
+    "きもち", "きぶん", "からだ",
+    # formal / idiomatic nouns that head a set phrase (しかたがない, わけがない,
+    # しようがない) -- the が-noun is not an agent
+    "しかた", "しよう", "わけ", "はず", "しょう"})
 # common nouns that embed a particle character -- protect them from the scanner
 PROTECTED_NOUN_HEADS = ("もも", "おに", "かに", "とり", "にわ", "には虫", "きのこ",
                         "はな", "はた", "はし", "はこ", "もり", "こども", "ともだち",
@@ -405,14 +423,15 @@ def _split_particles(clause: str, known_words: "set[str] | None" = None) -> list
                 # word-internal).  「いっぴきも」「だれも」: quantifier/deixis + も
                 # is "even", not a topic.
                 single_kanji = run == 1 and bool(_KANJI_KATA.match(cleaned))
-                if cleaned not in NON_TOPIC_NOUNS and not COUNTER_WORD.match(cleaned):
+                if (cleaned not in NON_TOPIC_NOUNS and cleaned not in NON_SUBJECT
+                        and not COUNTER_WORD.match(cleaned)):
                     for particle, need in (("は", 1 if single_kanji else 2), ("も", 3)):
                         if clause.startswith(particle, i) and run >= need:
                             matched, seen_topic = particle, True
                             break
             if matched:
                 noun = _strip_modifier(_clean_noun(current))
-                if noun and noun not in CONNECTIVES:
+                if noun and noun not in CONNECTIVES and noun not in NON_SUBJECT:
                     out.append((noun, matched))
                 current = ""
                 i += len(matched)
@@ -442,9 +461,9 @@ def _assemble_event(pairs: "list[tuple[str, str]]", verb: str, verb_conf: float,
             # agent -- keep it as a role and let the dropped topic be the subject
             roles.setdefault("が", noun)
             suppressed_ga = True
-        elif particle in SUBJECT_MARKERS and not subject:
+        elif particle in SUBJECT_MARKERS and not subject and noun not in NON_SUBJECT:
             subject = noun
-        elif particle in OBJECT_MARKERS and not obj:
+        elif particle in OBJECT_MARKERS and not obj and noun not in NON_SUBJECT:
             obj = noun
         else:
             roles.setdefault(particle, noun)
@@ -508,7 +527,8 @@ def _bare_topic(clause: str) -> str | None:
     if not bare:
         return None
     topic = _strip_modifier(_clean_noun(bare.group(1)))
-    if _noun_ok(bare.group(1)) and topic not in CONNECTIVES and topic not in NON_TOPIC_NOUNS:
+    if (_noun_ok(bare.group(1)) and topic not in CONNECTIVES
+            and topic not in NON_TOPIC_NOUNS and topic not in NON_SUBJECT):
         return topic
     return ""                                    # a topic-shaped clause, but not an entity
 
@@ -523,7 +543,8 @@ def _last_np_before(text: str) -> str:
                 if marker != want:
                     continue
                 noun = _strip_modifier(_clean_noun(noun))
-                if _noun_ok(noun) and noun not in CONNECTIVES and noun not in NON_TOPIC_NOUNS:
+                if (_noun_ok(noun) and noun not in CONNECTIVES
+                        and noun not in NON_TOPIC_NOUNS and noun not in NON_SUBJECT):
                     return noun
     return ""
 

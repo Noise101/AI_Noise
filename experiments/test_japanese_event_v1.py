@@ -62,6 +62,18 @@ class JapaneseEventTest(unittest.TestCase):
                                "とてもかなしみました。")
         self.assertNotIn("いっぴき", [e.subject for e in events])
 
+    def test_conjunction_keredo_is_not_read_as_a_subject(self):
+        # 「けれども、…」 used to split into topic "けれど" + particle も and then
+        # thread through the story as its subject.
+        events = extract_story(
+            "あひるさんは がっこうへ いきました。"
+            "けれども、しかたがないので、その ようふくを きて いきました。"
+            "けれども、がまんしました。")
+        subs = [e.subject for e in events]
+        self.assertNotIn("けれど", subs)
+        self.assertNotIn("しかた", subs)
+        self.assertIn("あひるさん", subs)
+
     def test_multi_clause_sentence_recovers_the_buried_subject_and_main_verb(self):
         # the が-marked subject sits mid-sentence behind a relative clause, the
         # main verb is three fragments later -- the old per-fragment parser got

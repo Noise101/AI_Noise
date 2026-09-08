@@ -418,12 +418,22 @@ def reevaluate_stale_parses(curriculum: dict) -> list[str]:
     their ids so the caller can drop their cached events for a fresh reading.
     Graduated books keep their standing; their comprehension history is kept."""
     from japanese_event_v1 import PARSER_VERSION
+    reach = curriculum["level"] + LEVEL_STEP
     reset = []
     for bid, b in curriculum["shelf"].items():
+        if b["status"] == "graduated":
+            continue
+        # a book more than a mild stretch above the level is parked as
+        # `shelved_above_level` (not read) whatever its history -- including one
+        # left `in_rotation` by the old "never idle" selector.
+        if b["status"] in ("in_rotation", "shelved_stuck", "unparsable") \
+                and b["estimated_level"] > reach:
+            b["status"] = "shelved_above_level"
+            b["shelved_at_level"] = b["estimated_level"]
+            continue
         if (b.get("status") in ("shelved_stuck", "unparsable")
                 and b.get("parser_version", 0) < PARSER_VERSION):
             b["status"] = "in_rotation"
-            b["shelved_at_level"] = None
             b["times_read"] = 0
             b["parser_version"] = PARSER_VERSION      # don't loop on it next cycle
             reset.append(bid)
@@ -467,22 +477,21 @@ def select_next_book(curriculum: dict) -> str | None:
     rotation = [(bid, b) for bid, b in curriculum["shelf"].items()
                 if b["status"] == "in_rotation"]
     if not rotation:
-        # never idle: pull the closest shelved-above book as a stretch read
-        # (the caller should also request more books at this level)
+        # A book more than one LEVEL_STEP above the reader is NOT read -- the
+        # developmental goal is to read books the reader can actually handle and
+        # let the level rise on graduations.  Only a MILD stretch (<= level +
+        # LEVEL_STEP) is admitted; a shelved_stuck book at/below the level gets
+        # another attempt (parser upgrades, grown vocabulary).  Otherwise idle
+        # honestly -- the caller fetches more and, failing that, there is simply
+        # nothing readable yet.
+        reach = level + LEVEL_STEP
         stretch = [(bid, b) for bid, b in curriculum["shelf"].items()
-                   if b["status"] == "shelved_above_level"]
-        if stretch:
-            bid, b = min(stretch, key=lambda item: item[1]["estimated_level"])
-            b["status"] = "in_rotation"
-            return bid
-        # otherwise give a shelved_stuck book another attempt rather than idling
-        # or dropping the level -- fresh eyes (parser upgrades, grown vocabulary)
-        stuck = [(bid, b) for bid, b in curriculum["shelf"].items()
-                 if b["status"] == "shelved_stuck"]
-        if not stuck:
+                   if b["status"] in ("shelved_above_level", "shelved_stuck")
+                   and b["estimated_level"] <= reach]
+        if not stretch:
             return None
-        bid, b = min(stuck, key=lambda item: (item[1].get("last_read_cycle") or 0,
-                                              item[1]["estimated_level"]))
+        bid, b = min(stretch, key=lambda item: (item[1].get("last_read_cycle") or 0,
+                                                item[1]["estimated_level"]))
         b["status"], b["times_read"] = "in_rotation", 0
         return bid
 
@@ -659,6 +668,11 @@ def summary(curriculum: dict) -> dict:
     words = curriculum["known_words"]
     graduated = [b for b in curriculum["shelf"].values() if b["status"] == "graduated"]
     recent = [b["comprehension_history"][-1] for b in graduated if b["comprehension_history"]][-10:]
+    reach = curriculum["level"] + LEVEL_STEP
+    readable_unread = sum(1 for b in curriculum["shelf"].values()
+                          if b["status"] in ("in_rotation", "shelved_stuck")
+                          and b["estimated_level"] <= reach)
+    last_grad = max((b.get("graduated_cycle", 0) for b in graduated), default=0)
     return {
         "level": curriculum["level"],
         "milestone": current_milestone(curriculum["level"]),
@@ -677,4 +691,7 @@ def summary(curriculum: dict) -> dict:
         "graduated_since_advance": curriculum.get("graduated_since_advance", 0),
         "mean_recent_comprehension": round(sum(recent) / len(recent), 3) if recent else None,
         "level_advances": len(curriculum["level_history"]) - 1,
+        "readable_unread": readable_unread,
+        "last_graduation_cycle": last_grad,
+        "cycles_since_graduation": max(0, curriculum.get("cycle", 0) - last_grad) if last_grad else None,
     }
