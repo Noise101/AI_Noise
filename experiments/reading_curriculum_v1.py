@@ -59,7 +59,10 @@ GRADUATE_COMPREHENSION = 0.75      # a book is "understood" at/above this
 # under the old definition get one fresh reading under the new one.
 GRADUATION_SCORER_VERSION = 2      # v2: picture-book score (book_comprehension for
                                   # all readers, was _self_consistency when cold)
-ADVANCE_COMPREHENSION = 0.80       # mean over recent graduates to raise the level
+# the picture-book score tops out around 0.85 for a perfect read (protagonist +
+# coherence + retell + coverage), so "comfortably above the graduate bar" is
+# ~0.77, not the 0.80 the old (0.9-capable) formula used.
+ADVANCE_COMPREHENSION = 0.77       # mean over recent graduates to raise the level
 STALL_COMPREHENSION_DROP = 0.15    # recent comprehension this far below -> pause advancement
 MAX_REREADS = 6                    # rereads before a stuck book is shelved
 GRADUATES_TO_ADVANCE = 4           # graduated books at the band before advancing
@@ -624,10 +627,14 @@ def maybe_advance_level(curriculum: dict, cycle: int) -> dict:
                           f"{len(ungraduated_band)} still in rotation"}
     recent_scores = [b["comprehension_history"][-1] for b in graduated_band[-GRADUATES_TO_ADVANCE:]]
     mean_recent = sum(recent_scores) / len(recent_scores)
-    # a recent drop on current-band material pauses advancement
+    # a recent drop on current-band material pauses advancement -- but only for a
+    # book that was ONCE understood (max score >= the graduate bar) and is now
+    # scoring low.  A book that never graduated (e.g. its opening never
+    # establishes a protagonist) scoring 0.4 is not "comprehension dropped".
     in_rotation_recent = [b["comprehension_history"][-1] for b in curriculum["shelf"].values()
                           if b["status"] == "in_rotation" and b["comprehension_history"]
-                          and abs(b["estimated_level"] - curriculum["level"]) <= LEVEL_STEP]
+                          and abs(b["estimated_level"] - curriculum["level"]) <= LEVEL_STEP
+                          and max(b["comprehension_history"]) >= GRADUATE_COMPREHENSION]
     if in_rotation_recent and sum(in_rotation_recent) / len(in_rotation_recent) < (
             ADVANCE_COMPREHENSION - STALL_COMPREHENSION_DROP):
         return {"advanced": False, "reason": "comprehension on current band dropped"}

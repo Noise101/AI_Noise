@@ -286,6 +286,21 @@ class ReadingCurriculumTest(unittest.TestCase):
         self.assertTrue(adv["advanced"])
         self.assertEqual(cur["level"], 2.5)
 
+    def test_a_never_understood_book_does_not_pause_advancement(self):
+        cur = rc.empty_curriculum()
+        cur["level"] = 2.0
+        rc.register_books(cur, [book(f"G{i}", f"g{i}", SIMPLE) for i in range(4)]
+                          + [book("Unscoreable", "u", SIMPLE)], cycle=1)
+        for b in cur["shelf"].values():
+            b["estimated_level"] = 2.0
+            if b["title"] == "Unscoreable":
+                # in rotation, read several times, never near the graduate bar
+                b["status"], b["times_read"] = "in_rotation", 4
+                b["comprehension_history"] = [0.4, 0.42, 0.41, 0.43]
+            else:
+                b["status"], b["comprehension_history"] = "graduated", [0.82]
+        self.assertTrue(rc.maybe_advance_level(cur, cycle=2)["advanced"])
+
     def test_a_book_being_re_read_does_not_pin_the_level(self):
         cur = rc.empty_curriculum()
         cur["level"] = 2.0
