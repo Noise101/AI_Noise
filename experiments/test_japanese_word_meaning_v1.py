@@ -28,6 +28,13 @@ class WordMeaningTest(unittest.TestCase):
         self.assertFalse(wm._is_content("こと"))
         self.assertTrue(wm._is_content("きつね"))
 
+    def test_a_particle_glued_to_a_pronoun_is_stripped(self):
+        self.assertEqual(wm._norm("とかれ"), "かれ")          # と + 彼 (dialogue)
+        self.assertEqual(wm._norm("とわたし"), "わたし")
+        self.assertFalse(wm._is_content("とかれ"))            # -> かれ -> pronoun -> dropped
+        self.assertEqual(wm._norm("きつね"), "きつね")
+        self.assertEqual(wm._norm("とけい"), "とけい")        # 時計 keeps its と
+
     def test_held_out_split_is_deterministic(self):
         a = {w: wm._held_out(w) for w in ("きつね", "からす", "ぶどう", "つき", "うみ")}
         b = {w: wm._held_out(w) for w in ("きつね", "からす", "ぶどう", "つき", "うみ")}

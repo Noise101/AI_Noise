@@ -1812,6 +1812,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                 report["japanese_reading"] = {k: reading_status.get(k) for k in
                                               ("cycle", "books_fetched", "reading", "level_advance",
                                                "curriculum", "comprehension", "retelling", "sequence",
+                                               "word_meaning",
                                                "caregiver", "caregiver_questions", "llm_scaffold_totals",
                                                "aided_reading", "schema_migration", "self_vs_aided", "aided_store", "provenance", "sequence_retirement_log", "sequence_ever_trained_fingerprint", "sequence_boundary_fingerprint", "sequence_ever_trained_collections")}
             except Exception as reading_error:  # isolate the parallel loop

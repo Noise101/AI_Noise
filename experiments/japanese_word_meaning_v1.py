@@ -66,8 +66,18 @@ _GENUS = re.compile(
     r"(?:である|です|。|のこと|を指す|の(?:一種|総称|名))")
 
 
+_GLUED_PARTICLE = re.compile(r"^(と|て|は|も|に|を|が|で|の|や)([一-鿿゠-ヿぁ-ゟ]{2,})$")
+
+
 def _norm(w: str) -> str:
-    return (w or "").strip()
+    w = (w or "").strip()
+    # the parser glues a quotative/comitative particle to a following PRONOUN in
+    # dialogue ("と彼" -> "とかれ", "とわたし").  Strip it only then -- real nouns
+    # like とけい(時計) / となり(隣) keep their と.
+    m = _GLUED_PARTICLE.match(w)
+    if m and m.group(2) in _STOP:
+        return m.group(2)
+    return w
 
 
 def _is_content(w: str) -> bool:
@@ -177,8 +187,9 @@ def _observe(state: dict, stories: list[dict]) -> None:
                 continue
             for slot in ("subject", "obj"):
                 if _is_content(e.get(slot)):
-                    ent[e[slot]] += 1
-            toks += [t for t in (e.get("subject"), e.get("obj"), e.get("verb")) if _is_content(t)]
+                    ent[_norm(e[slot])] += 1
+            toks += [_norm(t) for t in (e.get("subject"), e.get("obj"), e.get("verb"))
+                     if _is_content(t)]
         for i, w in enumerate(toks):
             near = toks[max(0, i - 4):i] + toks[i + 1:i + 5]
             ctx.setdefault(w, Counter()).update(x for x in near if x != w)
