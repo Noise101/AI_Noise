@@ -69,13 +69,17 @@ class JapaneseCorpusTest(unittest.TestCase):
         self.assertTrue(KERNEL_SEED)
         self.assertEqual(len(KERNEL_SEED), len(set(KERNEL_SEED)))
 
-    def test_kernel_titles_offline_falls_back_to_the_seed(self):
-        orig = jc.aesop_kernel
+    def test_kernel_titles_offline_falls_back_to_the_seeds(self):
+        orig_a, orig_s = jc.aesop_kernel, jc.school_reader_titles
         jc.aesop_kernel = lambda *a, **k: ()
+        jc.school_reader_titles = lambda *a, **k: jc._SCHOOL_READER_SEED
         try:
-            self.assertEqual(kernel_titles(), KERNEL_SEED)
+            titles = kernel_titles()
+            for t in KERNEL_SEED + jc._SCHOOL_READER_SEED:
+                self.assertIn(t, titles)
+            self.assertLess(len(titles), 12)         # still a small bootstrap set
         finally:
-            jc.aesop_kernel = orig
+            jc.aesop_kernel, jc.school_reader_titles = orig_a, orig_s
 
     def test_strip_section_headings_drops_a_leading_title_line(self):
         from japanese_corpus_v1 import _strip_section_headings
@@ -85,6 +89,10 @@ class JapaneseCorpusTest(unittest.TestCase):
         # a normal sentence is not stripped
         keep = "わたしは山へ行った。\n木を切った。"
         self.assertEqual(_strip_section_headings(keep), keep)
+
+    def test_modernise_folds_kyujitai_to_shinjitai(self):
+        self.assertEqual(_modernise("國語の學校へ來た。" * 3),
+                         "国語の学校へ来た。" * 3)
 
     def test_sentence_level_rises_with_kanji_and_length(self):
         self.assertLess(_sentence_level("ねこがねむる。"), _sentence_level("彼は複雑な問題を解決した。"))

@@ -321,10 +321,13 @@ def book_comprehension(events: list[dict], model: "ComprehensionModel | None",
     else:
         ordering = 0.5
 
-    # protagonist: from the first 3 events alone, name who the story is about;
-    # score against the whole-story answer (fuzzy entity match).  Model-free.
+    # protagonist: from the OPENING (first ~third of the story, min 4 events),
+    # name who it is about; score against the whole-story answer (fuzzy match).
+    # Model-free.  A wider opening window is robust to parser noise in the first
+    # sentence or two.
     true_protagonist = _story_protagonist(events)
-    predicted_protagonist = _story_protagonist(events[:3])
+    opening = events[:max(4, len(events) // 3)]
+    predicted_protagonist = _story_protagonist(opening)
     protagonist = 1.0 if _entities_match(predicted_protagonist, true_protagonist) else 0.0
 
     coverage = (sum(w in known_words for w in {e.get("subject") for e in events} |

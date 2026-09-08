@@ -88,8 +88,37 @@ def aesop_kernel(limit: int = 40) -> tuple[str, ...]:
     return tuple(p["title"] for p in data.get("query", {}).get("allpages", []))
 
 
+# Standalone national-reader stories on ja.wikisource (Category:国定教科書) that
+# are genuine graded elementary material -- short narratives, roughly level 2-3.
+_SCHOOL_READER_SEED = ("初等科國語 一/電車", "汽車 (アサヒ読本)", "久田船長",
+                       "初等科國語 三/濱田彌兵衛")
+
+
+def school_reader_titles(limit: int = 30) -> tuple[str, ...]:
+    """Pages in Category:国定教科書 -- the prewar national elementary readers.
+    Prefer the 國語 readers (not 國史 history) and the lower grades."""
+    params = urllib.parse.urlencode({
+        "action": "query", "list": "categorymembers", "cmtitle": "Category:国定教科書",
+        "cmnamespace": 0, "cmlimit": limit, "cmtype": "page",
+        "format": "json", "formatversion": 2})
+    try:
+        data = _get_json(f"{API}?{params}")
+    except (NetworkBudgetExceeded, Exception):
+        return _SCHOOL_READER_SEED
+    def grade(t: str) -> int:
+        for g, n in (("一", 1), ("二", 2), ("三", 3), ("四", 4),
+                     ("五", 5), ("六", 6), ("七", 7), ("八", 8)):
+            if f"國語 {g}/" in t or f"國語{g}/" in t:
+                return n
+        return 4
+    titles = [m["title"] for m in data.get("query", {}).get("categorymembers", [])
+              if "國史" not in m["title"] and "憲法" not in m["title"]]
+    titles.sort(key=grade)
+    return tuple(dict.fromkeys(_SCHOOL_READER_SEED + tuple(titles)))
+
+
 def kernel_titles(limit: int = 40) -> tuple[str, ...]:
-    return KERNEL_SEED + aesop_kernel(limit)
+    return KERNEL_SEED + aesop_kernel(limit) + school_reader_titles()
 
 
 # Back-compat: callers that still read corpus.KERNEL directly get the seed only.
@@ -109,6 +138,12 @@ _KATA = re.compile(r"[ァ-ヶ]")
 # a kanji or before an inflection), never to the は / へ particles.
 _OLD_KANA_TABLE = str.maketrans({"ゐ": "い", "ゑ": "え", "ヰ": "イ", "ヱ": "エ",
                                  "ゔ": "ぶ"})
+# 旧字体 -> 新字体: common kyūjitai in pre-1946 texts (国定教科書, older Aozora
+# cards).  Folded so the parser's vocabulary and the RNN see one script.
+_KYUJITAI_OLD = "國來學會觀廣圓兒澤濱樂讀聲晝賣對舊眞氣拂惠應歸當團圖縣靜藝廳假缺齒醫邊鐵驛發稱續戀螢濟參號單點禮營勞區收萬與實黨轉體莊藏經"
+_KYUJITAI_NEW = "国来学会観広円児沢浜楽読声昼売対旧真気払恵応帰当団図県静芸庁仮欠歯医辺鉄駅発称続恋蛍済参号単点礼営労区収万与実党転体荘蔵経"
+assert len(_KYUJITAI_OLD) == len(_KYUJITAI_NEW)
+_KYUJITAI = str.maketrans(_KYUJITAI_OLD, _KYUJITAI_NEW)
 _OLD_KANA_SUB = [
     (re.compile(r"くわ"), "か"), (re.compile(r"ぐわ"), "が"),
     (re.compile(r"ぢ"), "じ"), (re.compile(r"づ"), "ず"),
@@ -156,7 +191,7 @@ def _modernise(text: str) -> str:
     kata, hira = len(_KATA.findall(text)), len(_HIRA.findall(text))
     if kata >= 12 and kata > hira * 1.3:
         text = _KATA.sub(lambda m: chr(ord(m.group()) - 0x60), text)
-    return _dekana(text)
+    return _dekana(text.translate(_KYUJITAI))
 
 
 @dataclass

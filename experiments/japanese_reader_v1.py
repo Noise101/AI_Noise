@@ -247,7 +247,7 @@ def run_once(runtime: Path) -> dict:
     # cache, put books it had set aside back in rotation, and re-walk from the
     # easiest level.
     from japanese_event_v1 import PARSER_VERSION
-    CORPUS_VERSION = 4                            # bump when _modernise / cleaning changes
+    CORPUS_VERSION = 5                            # bump when _modernise / cleaning changes
     if cur.get("corpus_version", 0) < CORPUS_VERSION:
         for b in cur["shelf"].values():
             if b.get("text"):
