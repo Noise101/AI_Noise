@@ -110,6 +110,27 @@ def _within_reach(text: str, level: float) -> bool:
     return est <= level + AOZORA_LEVEL_MARGIN
 
 
+def _rnn_corpus(cur: dict, forbidden_cols: set[str]) -> dict[str, str]:
+    """The character RNN's training text: the RAW published text of every book
+    Noise has READ -- including books the heuristic parser could not break into
+    events (`shelved_stuck`).  The RNN needs characters, not a parse, and gating
+    its corpus on parser success is why it sat at 723K chars while 169 read books
+    went unused.  Raw text is reading *input*, not an interpretation, so the
+    `heuristic_self` provenance filter does not apply here.  What DOES still
+    apply: every collection feeding a comprehension / retelling SELECTION / FINAL
+    / RESERVE snapshot is kept out -- a source must never sit in both a capability
+    test set and the model tested on it."""
+    texts: dict[str, str] = {}
+    for book in cur.get("shelf", {}).values():
+        text = book.get("text") or ""
+        if not text or not curriculum.book_was_read(book):
+            continue
+        if jb.collection(book["url"]) in forbidden_cols:
+            continue
+        texts[book["url"]] = texts.get(book["url"], "") + text
+    return texts
+
+
 def _fetch_more_books(cur: dict, cycle: int) -> int:
     """Widen the shelf: verified Aesop/folktale kernel first, then Aozora
     children's authors -- level-gated, paced, small batches."""
@@ -326,17 +347,17 @@ def run_once(runtime: Path) -> dict:
     retell_forbidden = retell.forbidden_training_collections(
         prev_retell, all_stories, ever_trained_collections=rnn_ever_trained_cols, cycle=cycle)
 
-    # character RNN over the sentences of the books Noise has READ.  Every
-    # collection that feeds a comprehension or retelling SELECTION / FINAL / RESERVE
-    # snapshot is kept out of the RNN's training text -- a source must never sit in
-    # both a capability test set and the model that is tested on it.
+    # character RNN over the RAW TEXT of every book Noise has READ -- including
+    # books the heuristic parser could not break into events (`shelved_stuck`):
+    # the RNN needs characters, not a parse, and gating its corpus on parser
+    # success is why it sat at 723K chars while 169 read books went unused.  Raw
+    # published text is reading *input*, not an interpretation, so the
+    # `heuristic_self` provenance filter does not apply here.  What DOES still
+    # apply: every collection feeding a comprehension / retelling SELECTION /
+    # FINAL / RESERVE snapshot is kept out -- a source must never sit in both a
+    # capability test set and the model tested on it.
     forbidden_cols = comp_forbidden | retell_forbidden
-    seq_texts: dict[str, str] = {}
-    for bid, ev in heur_store.items():
-        if bid in real and ev and bid in cur["shelf"] \
-                and jb.collection(cur["shelf"][bid]["url"]) not in forbidden_cols:
-            url = cur["shelf"][bid]["url"]
-            seq_texts[url] = seq_texts.get(url, "") + "".join(e.get("sentence", "") for e in ev)
+    seq_texts = _rnn_corpus(cur, forbidden_cols)
     training_context = {
         "regime": sequence.TRAINING_REGIME,
         "parser_version": PARSER_VERSION,

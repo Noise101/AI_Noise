@@ -127,12 +127,27 @@ class JapaneseSequenceTest(unittest.TestCase):
 
     def test_a_semantic_boundary_change_retires_the_model(self):
         r1 = self._clean_state()
-        ctx2 = self._ctx(); ctx2["parser_version"] = 99          # a real semantic change
-        r2 = js.train_and_evaluate(learnable_texts(40), r1, train_seconds=30, max_steps=60,
-                                   training_context=ctx2)
+        # a change to a semantic training rule (here the vocabulary method) makes
+        # the old weights meaningless -> retire.  Since v3 the parser version is
+        # NOT in the boundary (the RNN trains on raw text), so it is tested via a
+        # rule that still matters.
+        import unittest.mock
+        with unittest.mock.patch.object(js, "VOCAB_METHOD", "some_other_vocab_method"):
+            r2 = js.train_and_evaluate(learnable_texts(40), r1, train_seconds=30, max_steps=60,
+                                       training_context=self._ctx())
         self.assertEqual(r2["reset_reason"], "training_boundary_changed")
         self.assertLess(r2["steps_trained"], r1["steps_trained"])
         self.assertEqual(r2["parent_model_fingerprint"], r1["model_fingerprint"])
+
+    def test_a_parser_version_change_does_NOT_retire_the_raw_text_rnn(self):
+        # v3: the RNN trains on raw book text, so a parser upgrade cannot
+        # invalidate it -- this used to be a spurious-retirement path.
+        r1 = self._clean_state()
+        ctx2 = self._ctx(); ctx2["parser_version"] = 99
+        r2 = js.train_and_evaluate(learnable_texts(40), r1, train_seconds=30, max_steps=60,
+                                   training_context=ctx2)
+        self.assertIsNone(r2["reset_reason"])
+        self.assertGreater(r2["steps_trained"], r1["steps_trained"])
 
     def test_a_provenance_policy_change_retires_the_model(self):
         r1 = self._clean_state()
@@ -164,19 +179,41 @@ class JapaneseSequenceTest(unittest.TestCase):
         self.assertFalse(r.get("beats_char_baseline"))
         self.assertEqual(len(r["retirement_log"]), 1)
 
-    def test_a_compatible_predecessor_regime_migrates_without_retiring(self):
+    def test_an_incompatible_regime_change_retires_and_archives(self):
+        # v2 -> v3 is a real representation + corpus change: NOT a compatible
+        # predecessor.  The 11.3M-step v2 model (worse than a frequency table) is
+        # archived, and training restarts clean.
         r1 = self._clean_state()
-        legacy_v1 = {"state": r1["state"], "steps_trained": 356583, "model_fingerprint": "keepme",
-                     "training_regime": "jseq_clean_v1",
-                     "training_data_fingerprint": {"training_sources": [
-                         {"url": u, "text_hash": h} for u, h in r1["ever_trained_sources"].items()],
-                         "boundary_fingerprint": "OLD"}}
-        r2 = js.train_and_evaluate(learnable_texts(40), legacy_v1, train_seconds=30, max_steps=60,
+        legacy_v2 = {"state": r1["state"], "steps_trained": 11_300_000,
+                     "model_fingerprint": "oldv2", "training_regime": "jseq_clean_v2",
+                     "ever_trained_sources": dict(r1["ever_trained_sources"]),
+                     "significant_streak": 3}
+        r2 = js.train_and_evaluate(learnable_texts(40), legacy_v2, train_seconds=30, max_steps=60,
                                    training_context=self._ctx())
+        self.assertEqual(r2["reset_reason"], "training_regime_changed:jseq_clean_v2->jseq_clean_v3")
+        self.assertEqual(r2["contamination_status"], "retired_replaced")
+        self.assertLess(r2["steps_trained"], 1000)
+        self.assertEqual(r2["retired_model"]["retired_steps_trained"], 11_300_000)
+        self.assertTrue(r2["retired_model"]["retired_state"])
+        self.assertEqual(r2["training_regime"], "jseq_clean_v3")
+
+    def test_a_compatible_predecessor_regime_migrates_without_retiring(self):
+        # the in-place migration path still exists for future compatible bumps;
+        # exercise it by declaring v2 compatible for the duration of the test.
+        import unittest.mock
+        r1 = self._clean_state()
+        legacy = {"state": r1["state"], "steps_trained": 356583, "model_fingerprint": "keepme",
+                  "training_regime": "jseq_clean_v2",
+                  "training_data_fingerprint": {"training_sources": [
+                      {"url": u, "text_hash": h} for u, h in r1["ever_trained_sources"].items()],
+                      "boundary_fingerprint": "OLD"}}
+        with unittest.mock.patch.object(js, "COMPATIBLE_PREDECESSOR_REGIMES", ("jseq_clean_v2",)):
+            r2 = js.train_and_evaluate(learnable_texts(40), legacy, train_seconds=30, max_steps=60,
+                                       training_context=self._ctx())
         self.assertIsNone(r2["reset_reason"])
         self.assertTrue(r2["boundary_migrated"])
         self.assertGreaterEqual(r2["steps_trained"], 356583)
-        self.assertEqual(r2["training_regime"], "jseq_clean_v2")
+        self.assertEqual(r2["training_regime"], "jseq_clean_v3")
 
     def test_training_data_fingerprint_is_auditable(self):
         r = self._clean_state()
@@ -188,9 +225,46 @@ class JapaneseSequenceTest(unittest.TestCase):
             self.assertIn(k, tdf)
         self.assertEqual(len(tdf["ever_trained_sources"]), tdf["ever_trained_source_count"])
         # the boundary fingerprint does NOT depend on the dynamic forbidden list
+        # nor (since v3) on the parser version
         b1 = js.boundary_fingerprint({"parser_version": 5, "forbidden_collections": ["a"]})
-        b2 = js.boundary_fingerprint({"parser_version": 5, "forbidden_collections": ["a", "b", "c"]})
+        b2 = js.boundary_fingerprint({"parser_version": 99, "forbidden_collections": ["a", "b", "c"]})
         self.assertEqual(b1, b2)
+
+    # --- v3: OOV chars map to UNK instead of skipping the training window ------
+    def test_build_vocab_always_includes_unk(self):
+        vocab = js.build_vocab({"u": "あいうえお。" * 10})
+        self.assertIn(js.UNK, vocab)
+        self.assertEqual(js.unk_index(vocab), vocab.index(js.UNK))
+
+    def test_a_window_with_a_rare_char_still_trains(self):
+        # a 200-char vocab used to skip any window touching a rare kanji; with UNK
+        # the window contributes a real gradient step.
+        vocab = sorted("むかしあおじいん。やま") + [js.UNK]
+        model = js.TinyRNN(vocab, unk_index=js.unk_index(vocab))
+        before = [row[:] for row in model.Why]
+        loss = model.train_step("むかし驫驫あじいさん。" + "あ" * 40, js.LEARNING_RATE)
+        self.assertGreater(loss, 0.0)
+        self.assertNotEqual(model.Why, before)
+
+    def test_oov_positions_are_scored_via_unk_not_dropped(self):
+        vocab = sorted("あいうえお。") + [js.UNK]
+        model = js.TinyRNN(vocab, unk_index=js.unk_index(vocab))
+        bpc, n = model.bits_per_char("あ驫あ驫あ。")     # 2 rare chars
+        self.assertEqual(n, 5)                            # every transition counted
+        self.assertGreater(bpc, 0.0)
+
+    def test_english_tinyrnn_unchanged_when_no_unk_index(self):
+        from sequence_model_v1 import TinyRNN as EnRNN
+        model = EnRNN(sorted("the quick brown fox. "))
+        self.assertIsNone(model._idx("Z"))               # OOV -> None, as before
+        self.assertEqual(model.train_step("Zzz the fox. ", 0.02), 0.0)   # window skipped
+
+    def test_held_out_split_has_a_min_eval_sources_floor(self):
+        r = js.train_and_evaluate(learnable_texts(40), {}, train_seconds=30, max_steps=40,
+                                  training_context=self._ctx())
+        self.assertGreaterEqual(len(r["benchmark"]["held_out_collections"]), js.MIN_EVAL_SOURCES)
+        # the per-source eval cap must leave room to actually score that many
+        self.assertGreaterEqual(r["held_out_sources_evaluated"], js.MIN_EVAL_SOURCES)
 
 
 if __name__ == "__main__":

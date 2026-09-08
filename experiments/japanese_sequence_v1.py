@@ -33,7 +33,12 @@ from sequence_model_v1 import TinyRNN, HIDDEN, SEQ_LEN, LEARNING_RATE
 
 VERSION = 1
 BENCHMARK_SALT = "japanese-sequence-benchmark:v1"
-VOCAB_CAP = 200
+VOCAB_CAP = 600
+# Out-of-vocabulary sentinel.  Every char the frozen vocab does not cover maps
+# here instead of being dropped -- otherwise `train_step` skips any 49-char
+# window that contains a single rare kanji, which on literary Japanese is most
+# of them (that is why 11.3M "steps" moved the held-out loss nowhere).
+UNK = "�"
 
 # --- training identity ------------------------------------------------------
 # re-audit #5 gave the RNN a training identity; re-audit #6 fixes it: the
@@ -46,17 +51,23 @@ VOCAB_CAP = 200
 # collection, or an already-trained source's text changes / disappears.  The
 # character benchmark itself is DIAGNOSTIC only (re-audit #6 P2-1): it no longer
 # claims a confirmed capability.
-TRAINING_REGIME = "jseq_clean_v2"          # v2: boundary excludes forbidden_collections
+# v3 (2026-09-08): OOV chars map to UNK instead of skipping the window; vocab cap
+# 200 -> 600; RNN trains on the RAW text of every book Noise has read (not only
+# parser-extracted sentences).  The weights and the meaning of "trained on this
+# text" both change, so v2 is NOT a compatible predecessor -- the v2 model (3.5
+# bits/char worse than a frequency table after 11.3M no-op steps) is archived.
+TRAINING_REGIME = "jseq_clean_v3"
 # regimes whose weights transfer to the current one unchanged (only the identity
 # bookkeeping was fixed): migrate in place, never retire for the code change.
-COMPATIBLE_PREDECESSOR_REGIMES = ("jseq_clean_v1",)
-SPLIT_POLICY_VERSION = "jseq_split_v1"     # bump if _split's held-out algorithm changes
+COMPATIBLE_PREDECESSOR_REGIMES = ()
+SPLIT_POLICY_VERSION = "jseq_split_v2"     # held-out now has a MIN_EVAL_SOURCES floor
 PROVENANCE_POLICY = "fail_closed_heuristic_self_v1"
 NORMALISATION_VERSION = 1
-VOCAB_METHOD = "freq_capped_top200_min3"
+VOCAB_METHOD = "freq_capped_top600_min3_unk"
 MIN_TRAIN_CHARS = 3000
 MIN_EVAL_CHARS = 1500
-MAX_EVAL_CHARS = 20000
+MAX_EVAL_CHARS = 20000            # total pure-Python eval budget per cycle
+MAX_EVAL_CHARS_PER_SOURCE = 2000  # so >= MIN_EVAL_SOURCES documents fit in it
 MIN_EVAL_SOURCES = 6
 SIGNIFICANCE_Z = 3.0
 DEFAULT_TRAIN_SECONDS = 6.0
@@ -98,7 +109,10 @@ def _norm_hash(text: str) -> str:
 def boundary_fingerprint(ctx: dict) -> str:
     """The SEMANTIC training rules whose change makes old weights meaningless.
     Deliberately does NOT include the (dynamic) forbidden-collection list -- that
-    grows as the corpus grows and is enforced per-cycle instead."""
+    grows as the corpus grows and is enforced per-cycle instead.  Since v3 the
+    RNN trains on RAW book text, so the parser version is no longer part of its
+    boundary either (a parser change cannot invalidate a character model that
+    never saw the parser's output)."""
     payload = json.dumps({
         "training_regime": TRAINING_REGIME,
         "split_policy_version": SPLIT_POLICY_VERSION,
@@ -106,7 +120,6 @@ def boundary_fingerprint(ctx: dict) -> str:
         "vocab_cap": VOCAB_CAP, "vocab_method": VOCAB_METHOD,
         "normalisation_version": NORMALISATION_VERSION,
         "provenance_policy": ctx.get("provenance_policy", PROVENANCE_POLICY),
-        "parser_version": ctx.get("parser_version"),
         "read_only_training": bool(ctx.get("read_only", True)),
     }, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
@@ -198,7 +211,13 @@ def build_vocab(texts: dict[str, str]) -> list[str]:
     for text in texts.values():
         chars.update(text)
     common = [ch for ch, n in chars.most_common(VOCAB_CAP) if n >= 3]
-    return sorted(common) or sorted({ch for t in texts.values() for ch in t})[:VOCAB_CAP]
+    common = sorted(common) or sorted({ch for t in texts.values() for ch in t})[:VOCAB_CAP]
+    # UNK always present so `unk_index` is valid and every char is representable.
+    return sorted(set(common) | {UNK})
+
+
+def unk_index(vocab: list[str]) -> int | None:
+    return vocab.index(UNK) if UNK in vocab else None
 
 
 def _split(texts: dict[str, str], previous: dict) -> tuple[set[str], set[str]]:
@@ -208,7 +227,12 @@ def _split(texts: dict[str, str], previous: dict) -> tuple[set[str], set[str]]:
     else:
         collections = sorted({collection_key(u) for u in texts},
                              key=lambda c: hashlib.sha256(f"{BENCHMARK_SALT}:{c}".encode()).hexdigest())
-        held = set(collections[:max(1, len(collections) // 5)])
+        # ~1/4 held out, but never fewer than MIN_EVAL_SOURCES once there are
+        # enough collections to spare them while keeping a real training set.
+        want = max(len(collections) // 4, MIN_EVAL_SOURCES)
+        if len(collections) - want < MIN_EVAL_SOURCES:
+            want = max(1, len(collections) // 5)
+        held = set(collections[:want])
     return ({u for u in texts if collection_key(u) not in held},
             {u for u in texts if collection_key(u) in held})
 
@@ -315,7 +339,7 @@ def train_and_evaluate(raw_texts: dict[str, str], previous: dict | None = None,
                 "steps_trained": previous.get("steps_trained", 0)}
 
     vocab = previous.get("state", {}).get("vocab") or build_vocab(texts)
-    model = TinyRNN(vocab, previous.get("state"))
+    model = TinyRNN(vocab, previous.get("state"), unk_index=unk_index(vocab))
     rng = random.Random(previous.get("steps_trained", 0) + 1)
 
     windows: list[str] = []
@@ -335,23 +359,39 @@ def train_and_evaluate(raw_texts: dict[str, str], previous: dict | None = None,
         steps += 1
     steps_trained = previous.get("steps_trained", 0) + steps
 
+    # order-0 baseline over the SAME symbol set the model sees: every training
+    # char outside the vocab folds into UNK, so the baseline is scored on the
+    # identical UNK-mapped stream (otherwise it would be measured on an easier,
+    # OOV-free subset than the model).
+    vocab_set = set(vocab)
+    _unk = unk_index(vocab)
     base_counts = Counter()
     for url in train_urls:
-        base_counts.update(texts[url])
+        for ch in texts[url]:
+            base_counts[ch if ch in vocab_set else UNK] += 1
     base_total = sum(base_counts.values()) or 1
     log_base = {ch: math.log(max(base_counts.get(ch, 0.5) / base_total, 1e-12)) for ch in vocab}
+    _log_unk = log_base.get(UNK, math.log(1e-12))
+
+    def _mapped(ch: str) -> str:
+        return ch if ch in vocab_set else (UNK if _unk is not None else ch)
 
     per_source: list[float] = []
     model_nll = base_nll = evaluated = 0.0
     for url in sorted(held_urls):
         if evaluated >= MAX_EVAL_CHARS:
             break
-        text = texts[url][:MAX_EVAL_CHARS]
+        # cap PER SOURCE, not just in total, so MIN_EVAL_SOURCES independent
+        # documents fit inside the pure-Python eval budget.
+        text = texts[url][:MAX_EVAL_CHARS_PER_SOURCE]
         m_bpc, n = model.bits_per_char(text)
         if n < 40:
             continue
-        b_nll = sum(-log_base.get(ch, math.log(1e-12))
-                    for a, ch in zip(text, text[1:]) if a in model.index and ch in model.index)
+        b_nll = 0.0
+        for a, ch in zip(text, text[1:]):
+            if _unk is None and (a not in vocab_set or ch not in vocab_set):
+                continue
+            b_nll += -log_base.get(_mapped(ch), _log_unk)
         b_bpc = b_nll / n / math.log(2)
         per_source.append(b_bpc - m_bpc)
         model_nll += m_bpc * n

@@ -352,8 +352,8 @@ def free_retell(rnn_state: dict | None, events: list[dict], total_length: int | 
     """
     if not rnn_state or not rnn_state.get("vocab") or not events:
         return ""
-    from japanese_sequence_v1 import TinyRNN, generate
-    model = TinyRNN(rnn_state["vocab"], rnn_state)
+    from japanese_sequence_v1 import TinyRNN, generate, unk_index
+    model = TinyRNN(rnn_state["vocab"], rnn_state, unk_index=unk_index(rnn_state["vocab"]))
     triples = sorted({(e.get("subject") or "", e.get("verb") or "", e.get("obj") or "")
                       for e in events if e.get("verb")})
     cue = "、".join(t for s, v, o in triples for t in ((s, o, v) if o else (s, v)) if t)[:80]
@@ -412,8 +412,8 @@ def _order_recovery(events: list[dict], scorer, mean_pos: dict) -> "tuple[float,
 
 
 def _rnn_scorer(rnn_state: dict):
-    from japanese_sequence_v1 import TinyRNN
-    model = TinyRNN(rnn_state["vocab"], rnn_state)
+    from japanese_sequence_v1 import TinyRNN, unk_index
+    model = TinyRNN(rnn_state["vocab"], rnn_state, unk_index=unk_index(rnn_state["vocab"]))
 
     def score(text: str) -> float:
         bpc, n = model.bits_per_char(text)

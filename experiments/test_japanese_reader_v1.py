@@ -112,6 +112,25 @@ class JapaneseReaderTest(unittest.TestCase):
         events = reader._read(self.runtime / reader.EVENTS_FILE)
         self.assertNotEqual(events.get(stuck), [{"subject": "x", "verb": "stale", "obj": ""}])
 
+    def test_rnn_corpus_uses_raw_text_of_read_books_including_shelved_stuck(self):
+        reader.run_once(self.runtime)
+        cur = reader._read(self.runtime / reader.CURRICULUM_FILE)
+        # a read book the parser could not break down: raw text, no events
+        stuck = next(bid for bid in cur["shelf"])
+        cur["shelf"][stuck].update(status="shelved_stuck", times_read=6,
+                                   text="ぜんぶかなでかかれたはなし。" * 20)
+        corpus = reader._rnn_corpus(cur, set())
+        self.assertIn(cur["shelf"][stuck]["url"], corpus)
+        self.assertIn("ぜんぶかなでかかれたはなし", corpus[cur["shelf"][stuck]["url"]])
+        # a forbidden collection is still excluded
+        forbidden = {reader.jb.collection(cur["shelf"][stuck]["url"])}
+        self.assertNotIn(cur["shelf"][stuck]["url"], reader._rnn_corpus(cur, forbidden))
+        # an unread (only fetched) book contributes nothing
+        for bid, b in cur["shelf"].items():
+            if not reader.curriculum.book_was_read(b):
+                self.assertNotIn(b["url"], reader._rnn_corpus(cur, set()))
+                break
+
     def test_fetched_but_unread_books_do_not_enter_the_events_store(self):
         # a book that was only fetched (registered on the shelf) must not appear
         # in reading-events.json until Noise actually reads it

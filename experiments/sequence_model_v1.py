@@ -100,10 +100,15 @@ def _randn(rows: int, cols: int, scale: float, rng: random.Random) -> list[list[
 
 
 class TinyRNN:
-    def __init__(self, vocab: list[str], state: dict | None = None):
+    def __init__(self, vocab: list[str], state: dict | None = None,
+                 unk_index: int | None = None):
         self.vocab = vocab
         self.V = len(vocab)
         self.index = {ch: i for i, ch in enumerate(vocab)}
+        # When set, characters outside the vocabulary map to this index instead of
+        # being dropped.  Left None (the English default) `_idx` returns None and
+        # callers skip the position, exactly as before.
+        self.unk_index = unk_index
         if state and state.get("vocab") == vocab and state.get("Whh"):
             self.Wxh = state["Wxh"]
             self.Whh = state["Whh"]
@@ -117,6 +122,12 @@ class TinyRNN:
             self.Why = _randn(self.V, HIDDEN, 0.1, rng)
             self.bh = [0.0] * HIDDEN
             self.by = [0.0] * self.V
+
+    def _idx(self, ch: str) -> int | None:
+        i = self.index.get(ch)
+        if i is None:
+            return self.unk_index
+        return i
 
     def state(self) -> dict:
         return {"vocab": self.vocab, "Wxh": self.Wxh, "Whh": self.Whh,
@@ -150,8 +161,8 @@ class TinyRNN:
         total_nll = 0.0
         n = 0
         for a, b in zip(text, text[1:]):
-            xi = self.index.get(a)
-            yi = self.index.get(b)
+            xi = self._idx(a)
+            yi = self._idx(b)
             if xi is None or yi is None:
                 h = [0.0] * HIDDEN
                 continue
@@ -162,7 +173,7 @@ class TinyRNN:
 
     def train_step(self, text: str, lr: float) -> float:
         text = text[:SEQ_LEN + 1]
-        indices = [self.index.get(ch) for ch in text]
+        indices = [self._idx(ch) for ch in text]
         if any(i is None for i in indices) or len(indices) < 2:
             return 0.0
         hs = [[0.0] * HIDDEN]
@@ -238,7 +249,7 @@ class TinyRNN:
         prime = normalise(prime) or " "
         last = None
         for ch in prime:
-            xi = self.index.get(ch)
+            xi = self._idx(ch)
             if xi is None:
                 continue
             h, probs = self._step(xi, h)
