@@ -286,6 +286,24 @@ class ReadingCurriculumTest(unittest.TestCase):
         self.assertTrue(adv["advanced"])
         self.assertEqual(cur["level"], 2.5)
 
+    def test_a_book_being_re_read_does_not_pin_the_level(self):
+        cur = rc.empty_curriculum()
+        cur["level"] = 2.0
+        rc.register_books(cur, [book(f"G{i}", f"g{i}", SIMPLE) for i in range(4)]
+                          + [book("Retry", "r", SIMPLE)], cycle=1)
+        for b in cur["shelf"].values():
+            b["estimated_level"] = 2.0
+            if b["title"] == "Retry":
+                b["status"], b["times_read"] = "in_rotation", 3   # re-read, not fresh
+                b["comprehension_history"] = [0.7, 0.71, 0.72]
+            else:
+                b["status"], b["comprehension_history"] = "graduated", [0.85]
+        self.assertTrue(rc.maybe_advance_level(cur, cycle=2)["advanced"])
+        # but a FRESH (unread) band book still blocks
+        cur["level"] = 2.0
+        cur["shelf"][rc._book_id("r", "Retry")]["times_read"] = 0
+        self.assertFalse(rc.maybe_advance_level(cur, cycle=3)["advanced"])
+
     def test_a_tatoeba_reader_is_graded_by_the_sentence_scorer(self):
         cur = rc.empty_curriculum()
         rc.register_books(cur, [{"title": "やさしい文集", "url": "tatoeba://reader/2.0/1",
