@@ -101,7 +101,8 @@ def _randn(rows: int, cols: int, scale: float, rng: random.Random) -> list[list[
 
 class TinyRNN:
     def __init__(self, vocab: list[str], state: dict | None = None,
-                 unk_index: int | None = None):
+                 unk_index: int | None = None,
+                 hidden: int | None = None, seq_len: int | None = None):
         self.vocab = vocab
         self.V = len(vocab)
         self.index = {ch: i for i, ch in enumerate(vocab)}
@@ -109,18 +110,24 @@ class TinyRNN:
         # being dropped.  Left None (the English default) `_idx` returns None and
         # callers skip the position, exactly as before.
         self.unk_index = unk_index
+        # hidden size / BPTT window: default to the module constants (English);
+        # a caller may pass larger values for a fresh model.  A loaded state keeps
+        # whatever size it was trained at (read back from the bias vector).
+        self.L = seq_len or SEQ_LEN
         if state and state.get("vocab") == vocab and state.get("Whh"):
             self.Wxh = state["Wxh"]
             self.Whh = state["Whh"]
             self.Why = state["Why"]
             self.bh = state["bh"]
             self.by = state["by"]
+            self.H = len(self.bh)
         else:
+            self.H = hidden or HIDDEN
             rng = random.Random(1234)
-            self.Wxh = _randn(HIDDEN, self.V, 0.1, rng)
-            self.Whh = _randn(HIDDEN, HIDDEN, 0.1, rng)
-            self.Why = _randn(self.V, HIDDEN, 0.1, rng)
-            self.bh = [0.0] * HIDDEN
+            self.Wxh = _randn(self.H, self.V, 0.1, rng)
+            self.Whh = _randn(self.H, self.H, 0.1, rng)
+            self.Why = _randn(self.V, self.H, 0.1, rng)
+            self.bh = [0.0] * self.H
             self.by = [0.0] * self.V
 
     def _idx(self, ch: str) -> int | None:
@@ -134,18 +141,18 @@ class TinyRNN:
                 "Why": self.Why, "bh": self.bh, "by": self.by}
 
     def _step(self, x_index: int, h_prev: list[float]) -> tuple[list[float], list[float]]:
-        h = [0.0] * HIDDEN
-        for i in range(HIDDEN):
+        h = [0.0] * self.H
+        for i in range(self.H):
             acc = self.bh[i] + self.Wxh[i][x_index]
             whh_i = self.Whh[i]
-            for j in range(HIDDEN):
+            for j in range(self.H):
                 acc += whh_i[j] * h_prev[j]
             h[i] = math.tanh(acc)
         y = [0.0] * self.V
         for k in range(self.V):
             acc = self.by[k]
             why_k = self.Why[k]
-            for i in range(HIDDEN):
+            for i in range(self.H):
                 acc += why_k[i] * h[i]
             y[k] = acc
         m = max(y)
@@ -157,14 +164,14 @@ class TinyRNN:
     def bits_per_char(self, text: str) -> tuple[float, int]:
         if len(text) < 2:
             return 0.0, 0
-        h = [0.0] * HIDDEN
+        h = [0.0] * self.H
         total_nll = 0.0
         n = 0
         for a, b in zip(text, text[1:]):
             xi = self._idx(a)
             yi = self._idx(b)
             if xi is None or yi is None:
-                h = [0.0] * HIDDEN
+                h = [0.0] * self.H
                 continue
             h, probs = self._step(xi, h)
             total_nll += -math.log(max(probs[yi], 1e-12))
@@ -172,11 +179,11 @@ class TinyRNN:
         return (total_nll / n / math.log(2)) if n else 0.0, n
 
     def train_step(self, text: str, lr: float) -> float:
-        text = text[:SEQ_LEN + 1]
+        text = text[:self.L + 1]
         indices = [self._idx(ch) for ch in text]
         if any(i is None for i in indices) or len(indices) < 2:
             return 0.0
-        hs = [[0.0] * HIDDEN]
+        hs = [[0.0] * self.H]
         ps: list[list[float]] = []
         loss = 0.0
         for t in range(len(indices) - 1):
@@ -184,12 +191,12 @@ class TinyRNN:
             hs.append(h)
             ps.append(probs)
             loss += -math.log(max(probs[indices[t + 1]], 1e-12))
-        dWxh = _zeros(HIDDEN, self.V)
-        dWhh = _zeros(HIDDEN, HIDDEN)
-        dWhy = _zeros(self.V, HIDDEN)
-        dbh = [0.0] * HIDDEN
+        dWxh = _zeros(self.H, self.V)
+        dWhh = _zeros(self.H, self.H)
+        dWhy = _zeros(self.V, self.H)
+        dbh = [0.0] * self.H
         dby = [0.0] * self.V
-        dh_next = [0.0] * HIDDEN
+        dh_next = [0.0] * self.H
         for t in range(len(indices) - 2, -1, -1):
             probs = ps[t]
             target = indices[t + 1]
@@ -201,50 +208,50 @@ class TinyRNN:
                 if dyk:
                     dby[k] += dyk
                     dWhy_k = dWhy[k]
-                    for i in range(HIDDEN):
+                    for i in range(self.H):
                         dWhy_k[i] += dyk * h[i]
             dh = list(dh_next)
-            for i in range(HIDDEN):
+            for i in range(self.H):
                 acc = 0.0
                 for k in range(self.V):
                     acc += self.Why[k][i] * dy[k]
                 dh[i] += acc
-            draw = [dh[i] * (1.0 - h[i] * h[i]) for i in range(HIDDEN)]
+            draw = [dh[i] * (1.0 - h[i] * h[i]) for i in range(self.H)]
             h_prev = hs[t]
             xi = indices[t]
-            for i in range(HIDDEN):
+            for i in range(self.H):
                 dbh[i] += draw[i]
                 dWxh[i][xi] += draw[i]
                 dWhh_i = dWhh[i]
-                for j in range(HIDDEN):
+                for j in range(self.H):
                     dWhh_i[j] += draw[i] * h_prev[j]
-            dh_next = [0.0] * HIDDEN
-            for j in range(HIDDEN):
+            dh_next = [0.0] * self.H
+            for j in range(self.H):
                 acc = 0.0
-                for i in range(HIDDEN):
+                for i in range(self.H):
                     acc += self.Whh[i][j] * draw[i]
                 dh_next[j] = acc
 
         def clip(value: float) -> float:
             return max(-GRAD_CLIP, min(GRAD_CLIP, value))
 
-        for i in range(HIDDEN):
+        for i in range(self.H):
             self.bh[i] -= lr * clip(dbh[i])
             for x in range(self.V):
                 if dWxh[i][x]:
                     self.Wxh[i][x] -= lr * clip(dWxh[i][x])
-            for j in range(HIDDEN):
+            for j in range(self.H):
                 self.Whh[i][j] -= lr * clip(dWhh[i][j])
         for k in range(self.V):
             self.by[k] -= lr * clip(dby[k])
-            for i in range(HIDDEN):
+            for i in range(self.H):
                 self.Why[k][i] -= lr * clip(dWhy[k][i])
         return loss / max(1, len(indices) - 1)
 
     def sample(self, prime: str, length: int = 120, temperature: float = 0.8,
                rng: random.Random | None = None) -> str:
         rng = rng or random.Random()
-        h = [0.0] * HIDDEN
+        h = [0.0] * self.H
         out = []
         prime = normalise(prime) or " "
         last = None

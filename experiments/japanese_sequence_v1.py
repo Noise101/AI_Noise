@@ -29,7 +29,14 @@ from collections import Counter, defaultdict
 
 import urllib.parse
 
-from sequence_model_v1 import TinyRNN, HIDDEN, SEQ_LEN, LEARNING_RATE
+from sequence_model_v1 import TinyRNN, SEQ_LEN, LEARNING_RATE
+
+# The Japanese char model gets more capacity than the English default (hidden 24)
+# -- v3 converged at ~5.8 bits/char against a 7.1 baseline and plateaued, so the
+# 24-unit hidden state is the ceiling.  Pure-Python, so this ~doubles the per-step
+# cost; the worker cycle absorbs it.
+JA_HIDDEN = 48
+HIDDEN = JA_HIDDEN                     # what this module's fingerprints record
 
 VERSION = 1
 BENCHMARK_SALT = "japanese-sequence-benchmark:v1"
@@ -52,11 +59,11 @@ UNK = "�"
 # character benchmark itself is DIAGNOSTIC only (re-audit #6 P2-1): it no longer
 # claims a confirmed capability.
 # v3 (2026-09-08): OOV chars map to UNK instead of skipping the window; vocab cap
-# 200 -> 600; RNN trains on the RAW text of every book Noise has read (not only
-# parser-extracted sentences).  The weights and the meaning of "trained on this
-# text" both change, so v2 is NOT a compatible predecessor -- the v2 model (3.5
-# bits/char worse than a frequency table after 11.3M no-op steps) is archived.
-TRAINING_REGIME = "jseq_clean_v3"
+# 200 -> 600; RNN trains on the RAW text of every book Noise has read.
+# v4 (2026-09-08): hidden state 24 -> 48 (v3 plateaued at ~5.8 bits/char).  The
+# weight matrices change shape, so v3 is NOT a compatible predecessor -- the v3
+# model is archived and training restarts clean at the larger capacity.
+TRAINING_REGIME = "jseq_clean_v4"
 # regimes whose weights transfer to the current one unchanged (only the identity
 # bookkeeping was fixed): migrate in place, never retire for the code change.
 COMPATIBLE_PREDECESSOR_REGIMES = ()
@@ -66,8 +73,9 @@ NORMALISATION_VERSION = 1
 VOCAB_METHOD = "freq_capped_top600_min3_unk"
 MIN_TRAIN_CHARS = 3000
 MIN_EVAL_CHARS = 1500
-MAX_EVAL_CHARS = 20000            # total pure-Python eval budget per cycle
-MAX_EVAL_CHARS_PER_SOURCE = 2000  # so >= MIN_EVAL_SOURCES documents fit in it
+MAX_EVAL_CHARS = 15000            # total pure-Python eval budget per cycle
+                                 # (lower with hidden 48 -- eval is O(chars*H*V))
+MAX_EVAL_CHARS_PER_SOURCE = 1500  # so >= MIN_EVAL_SOURCES documents fit in it
 MIN_EVAL_SOURCES = 6
 SIGNIFICANCE_Z = 3.0
 DEFAULT_TRAIN_SECONDS = 6.0
@@ -339,7 +347,8 @@ def train_and_evaluate(raw_texts: dict[str, str], previous: dict | None = None,
                 "steps_trained": previous.get("steps_trained", 0)}
 
     vocab = previous.get("state", {}).get("vocab") or build_vocab(texts)
-    model = TinyRNN(vocab, previous.get("state"), unk_index=unk_index(vocab))
+    model = TinyRNN(vocab, previous.get("state"), unk_index=unk_index(vocab),
+                    hidden=JA_HIDDEN)
     rng = random.Random(previous.get("steps_trained", 0) + 1)
 
     windows: list[str] = []
@@ -487,7 +496,7 @@ def generate(model: TinyRNN, prime: str, length: int = 120,
              temperature: float = 0.8, rng: random.Random | None = None) -> str:
     """Sampling loop that keeps Japanese text (TinyRNN.sample normalises to ASCII)."""
     rng = rng or random.Random(0)
-    h = [0.0] * HIDDEN
+    h = [0.0] * model.H
     last = None
     for ch in normalise(prime) or "むかし":
         xi = model.index.get(ch)

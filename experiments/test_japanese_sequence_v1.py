@@ -58,6 +58,15 @@ class JapaneseSequenceTest(unittest.TestCase):
         second = js.train_and_evaluate(learnable_texts(60), first, train_seconds=30, max_steps=100)
         self.assertEqual(set(second["benchmark"]["held_out_collections"]), held)
 
+    def test_japanese_model_has_more_capacity_than_the_english_default(self):
+        from sequence_model_v1 import HIDDEN as EN_HIDDEN
+        r = self._clean_state()
+        self.assertEqual(len(r["state"]["bh"]), js.JA_HIDDEN)
+        self.assertGreater(js.JA_HIDDEN, EN_HIDDEN)
+        # a loaded state keeps its own size regardless of JA_HIDDEN
+        m = js.TinyRNN(r["state"]["vocab"], r["state"])
+        self.assertEqual(m.H, js.JA_HIDDEN)
+
     def test_generate_returns_japanese_characters(self):
         model = js.TinyRNN(sorted("むかしあおじいん。やまへ行きました"))
         out = js.generate(model, "むかし", length=20)
@@ -190,12 +199,12 @@ class JapaneseSequenceTest(unittest.TestCase):
                      "significant_streak": 3}
         r2 = js.train_and_evaluate(learnable_texts(40), legacy_v2, train_seconds=30, max_steps=60,
                                    training_context=self._ctx())
-        self.assertEqual(r2["reset_reason"], "training_regime_changed:jseq_clean_v2->jseq_clean_v3")
+        self.assertEqual(r2["reset_reason"], f"training_regime_changed:jseq_clean_v2->{js.TRAINING_REGIME}")
         self.assertEqual(r2["contamination_status"], "retired_replaced")
         self.assertLess(r2["steps_trained"], 1000)
         self.assertEqual(r2["retired_model"]["retired_steps_trained"], 11_300_000)
         self.assertTrue(r2["retired_model"]["retired_state"])
-        self.assertEqual(r2["training_regime"], "jseq_clean_v3")
+        self.assertEqual(r2["training_regime"], js.TRAINING_REGIME)
 
     def test_a_compatible_predecessor_regime_migrates_without_retiring(self):
         # the in-place migration path still exists for future compatible bumps;
@@ -213,7 +222,7 @@ class JapaneseSequenceTest(unittest.TestCase):
         self.assertIsNone(r2["reset_reason"])
         self.assertTrue(r2["boundary_migrated"])
         self.assertGreaterEqual(r2["steps_trained"], 356583)
-        self.assertEqual(r2["training_regime"], "jseq_clean_v3")
+        self.assertEqual(r2["training_regime"], js.TRAINING_REGIME)
 
     def test_training_data_fingerprint_is_auditable(self):
         r = self._clean_state()
