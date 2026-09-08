@@ -38,11 +38,11 @@ MIN_TEST_STORIES = 8
 MIN_TRAIN_STORIES = 20
 
 
-EVAL_REGIME = "tiered_frozen_v2"     # v2: anchor streak + candidate checkpoints (re-audit #6)
-SCORING_VERSION = 2
-BASELINE_DEFINITION = "per_story_frequency_next_verb"
+EVAL_REGIME = "tiered_frozen_v3"     # v3: learned back-off + proper-scoring consequence
+SCORING_VERSION = 3                  # consequence is now predictive probability, not a 0/1 hit
+BASELINE_DEFINITION = "per_story_unigram_next_verb_probability"
 BENCH_SALT = "comprehension:tiered:v1"
-MODEL_CONFIG = "verb_next+prior2+position+first_verb_protagonist"
+MODEL_CONFIG = "learned_backoff(tri+bi+uni)+position+first_verb_protagonist"
 SIGNIFICANT_TRAIN_GROWTH = 1.4       # selection must stay significant across this
                                     # much train growth before a final may open
 
@@ -86,8 +86,12 @@ class ComprehensionModel:
         self.verb_freq: Counter = Counter()
         self.first_verb_protagonist = 0
         self.stories = 0
+        # learned interpolation weights for the trigram / bigram / unigram
+        # back-off (fit on a held-out slice of the training stories).
+        self.lam = (1 / 3, 1 / 3, 1 / 3)
 
     def fit(self, stories: list[list[dict]]) -> "ComprehensionModel":
+        seqs = []
         for events in stories:
             if len(events) < 3:
                 continue
@@ -97,6 +101,7 @@ class ComprehensionModel:
             protagonist = Counter(subjects).most_common(1)[0][0]
             if subjects[0] == protagonist:
                 self.first_verb_protagonist += 1
+            seqs.append(verbs)
             for i, v in enumerate(verbs):
                 self.verb_freq[v] += 1
                 self.verb_position[v].append(i / max(1, len(verbs) - 1))
@@ -106,7 +111,62 @@ class ComprehensionModel:
                     self.verb_prior2[(verbs[i - 2], verbs[i - 1])][v] += 1
         self._fallback = self.verb_freq.most_common(1)[0][0] if self.verb_freq else ""
         self._mean_pos = {v: sum(p) / len(p) for v, p in self.verb_position.items() if p}
+        self._vocab_size = max(1, len(self.verb_freq))
+        self._uni_total = max(1, sum(self.verb_freq.values()))
+        self._fit_backoff(seqs)
         return self
+
+    # --- learned back-off language model over verbs ------------------------
+    def _components(self, p2: str, p1: str, v: str) -> tuple[float, float, float]:
+        """Trigram, bigram, unigram probabilities of `v` (add-1 smoothed uni)."""
+        tri = self.verb_prior2.get((p2, p1))
+        p_tri = tri[v] / sum(tri.values()) if tri and sum(tri.values()) else 0.0
+        bi = self.verb_next.get(p1)
+        p_bi = bi[v] / sum(bi.values()) if bi and sum(bi.values()) else 0.0
+        p_uni = (self.verb_freq.get(v, 0) + 1) / (self._uni_total + self._vocab_size)
+        return p_tri, p_bi, p_uni
+
+    def _fit_backoff(self, seqs: list[list[str]]) -> None:
+        if len(seqs) < 4:
+            return
+        cut = max(1, len(seqs) // 4)
+        val = [(vb[i - 2], vb[i - 1], vb[i]) for vb in seqs[:cut]
+               for i in range(2, len(vb))]
+        if not val:
+            return
+        # gradient ascent on validation log-likelihood over softmax(logits)
+        logits = [0.0, 0.0, 0.0]
+        lr = 0.5
+        for _ in range(120):
+            m = max(logits)
+            ex = [math.exp(x - m) for x in logits]
+            s = sum(ex)
+            lam = [e / s for e in ex]
+            grad = [0.0, 0.0, 0.0]
+            for p2, p1, v in val:
+                comps = self._components(p2, p1, v)
+                mix = lam[0] * comps[0] + lam[1] * comps[1] + lam[2] * comps[2]
+                if mix <= 0:
+                    continue
+                for k in range(3):
+                    # d/dlogit_k of log(sum lam_j c_j), lam = softmax(logits)
+                    dlam_k = lam[k] * (comps[k] - (lam[0] * comps[0] + lam[1] * comps[1] + lam[2] * comps[2]))
+                    grad[k] += dlam_k / mix
+            for k in range(3):
+                logits[k] += lr * grad[k] / len(val)
+        m = max(logits)
+        ex = [math.exp(x - m) for x in logits]
+        s = sum(ex)
+        self.lam = tuple(e / s for e in ex)
+
+    def verb_prob(self, prior_verbs: list[str], v: str) -> float:
+        p2 = prior_verbs[-2] if len(prior_verbs) >= 2 else ""
+        p1 = prior_verbs[-1] if prior_verbs else ""
+        c = self._components(p2, p1, v)
+        return self.lam[0] * c[0] + self.lam[1] * c[1] + self.lam[2] * c[2]
+
+    def unigram_prob(self, v: str) -> float:
+        return (self.verb_freq.get(v, 0) + 1) / (self._uni_total + self._vocab_size)
 
     def predict_next_verb(self, prior_verbs: list[str]) -> str:
         if len(prior_verbs) >= 2:
@@ -149,13 +209,22 @@ def book_comprehension(events: list[dict], model: ComprehensionModel,
     verbs = [e["verb"] for e in events]
     subjects = [e.get("subject", "") for e in events]
 
-    # consequence: predict each event's verb from the prior ones
+    # consequence: predict each event's verb from the prior ones.
+    #  - `consequence` / `consequence_baseline`: the 0/1 argmax hit rate the
+    #    curriculum's per-book score uses (unchanged).
+    #  - `consequence_prob` / `_baseline`: the probability the LEARNED back-off
+    #    model / the unigram assign to the true next verb -- a proper scoring
+    #    rule that moves smoothly with training (the capability benchmark).
+    trials = max(1, len(verbs) - 2)
     hits = sum(1 for i in range(2, len(verbs))
                if model.predict_next_verb(verbs[:i]) == verbs[i])
-    trials = max(1, len(verbs) - 2)
     consequence = hits / trials
     baseline_verb = model._fallback
     consequence_baseline = sum(1 for i in range(2, len(verbs)) if baseline_verb == verbs[i]) / trials
+    probs = [model.verb_prob(verbs[:i], verbs[i]) for i in range(2, len(verbs))]
+    uni = [model.unigram_prob(verbs[i]) for i in range(2, len(verbs))]
+    consequence_prob = sum(probs) / trials
+    consequence_prob_baseline = sum(uni) / trials
 
     # ordering: shuffle, ask the model to reorder, score against the true order
     rng = random.Random(_story_key("".join(verbs)))
@@ -186,6 +255,8 @@ def book_comprehension(events: list[dict], model: ComprehensionModel,
     return {"score": score,
             "tests": {"consequence": round(consequence, 3),
                       "consequence_baseline": round(consequence_baseline, 3),
+                      "consequence_prob": round(consequence_prob, 4),
+                      "consequence_prob_baseline": round(consequence_prob_baseline, 4),
                       "ordering": round(ordering, 3),
                       "protagonist": protagonist,
                       "coherence": coherence,
@@ -304,20 +375,26 @@ def _measure(test_stories: list[dict], model: "ComprehensionModel", known: set) 
     n = len(per)
     if not n:
         return None
-    mc = sum(t["consequence"] for t in per) / n
-    mcb = sum(t["consequence_baseline"] for t in per) / n
+    # the capability signal is the LEARNED model's predictive probability of the
+    # true next verb vs the unigram's -- a proper scoring rule (SCORING_VERSION 3)
+    mc = sum(t["consequence_prob"] for t in per) / n
+    mcb = sum(t["consequence_prob_baseline"] for t in per) / n
     mo = sum(t["ordering"] for t in per) / n
     mp = sum(t["protagonist"] for t in per) / n
-    gains = [t["consequence"] - t["consequence_baseline"] for t in per]
+    gains = [t["consequence_prob"] - t["consequence_prob_baseline"] for t in per]
     mg = sum(gains) / n
     var = sum((g - mg) ** 2 for g in gains) / max(1, n - 1)
     se = math.sqrt(var / n) if var > 0 else 0.0
     z = mg / se if se > 0 else (99.0 if mg > 0 else 0.0)
     p = round(0.5 * math.erfc(z / math.sqrt(2)), 6) if z > 0 else 1.0
-    return {"n": n, "consequence": round(mc, 3), "consequence_baseline": round(mcb, 3),
+    # hit-rate view kept for the dashboard (not the significance signal)
+    hit = sum(t["consequence"] for t in per) / n
+    lift = max(0.0, min(1.0, (mc - mcb) / max(mcb, 1e-6)))   # relative gain over unigram
+    return {"n": n, "consequence": round(mc, 4), "consequence_baseline": round(mcb, 4),
             "consequence_gain": round(mg, 4), "z": round(z, 2), "p_one_sided": p,
+            "consequence_hit_rate": round(hit, 3),
             "ordering": round(mo, 3), "protagonist": round(mp, 3),
-            "comprehension_score": round(0.5 * mc + 0.3 * mo + 0.2 * mp, 3),
+            "comprehension_score": round(0.5 * lift + 0.3 * mo + 0.2 * mp, 3),
             "significant": z >= SIGNIFICANCE_Z and n >= MIN_TEST_STORIES}
 
 

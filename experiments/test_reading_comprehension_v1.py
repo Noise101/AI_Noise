@@ -22,13 +22,16 @@ def structured_stories(n=120, seed=1):
 
 
 def unstructured_stories(n=120, seed=2):
+    # genuinely structureless: verbs drawn i.i.d. WITH replacement, so there is
+    # no succession / position / co-occurrence signal for a model to learn.
     rng = random.Random(seed)
     animals = ["きつね", "うさぎ", "たぬき", "ねこ", "いぬ", "くま"]
     verbs = ["みつける", "ほしくなる", "ちかづく", "しっぱいする", "かんがえる",
              "きめる", "はしる", "ねむる"]
     return [{"url": f"http://n/{i}",
-             "events": [{"subject": rng.choice(animals), "verb": v, "obj": "", "confidence": 0.9}
-                        for v in rng.sample(verbs, 6)]}
+             "events": [{"subject": rng.choice(animals), "verb": rng.choice(verbs),
+                         "obj": "", "confidence": 0.9}
+                        for _ in range(6)]}
             for i in range(n)]
 
 
@@ -151,6 +154,31 @@ class ReadingComprehensionTest(unittest.TestCase):
         self.assertEqual(r["regime_reset_from"], "tiered_frozen_v1")
         self.assertFalse(r["capability_confirmed"])
         self.assertFalse(r["capability_confirmed_ever"])
+
+    def test_learned_backoff_is_fit_deterministically_and_beats_uniform_weights(self):
+        train = [s["events"] for s in structured_stories(n=100, seed=1)]
+        m1 = rcp.ComprehensionModel().fit(train)
+        m2 = rcp.ComprehensionModel().fit(train)
+        self.assertEqual(m1.lam, m2.lam)                      # deterministic fit
+        self.assertNotEqual(round(m1.lam[0], 3), round(1 / 3, 3))  # actually moved off uniform
+        # on held-out structured stories the learned mixture assigns higher
+        # probability to the true next verb than a fixed uniform mixture does
+        held = structured_stories(n=20, seed=99)
+        learned = uniform = 0.0
+        for s in held:
+            vb = [e["verb"] for e in s["events"]]
+            for i in range(2, len(vb)):
+                c = m1._components(vb[i - 2], vb[i - 1], vb[i])
+                learned += m1.lam[0] * c[0] + m1.lam[1] * c[1] + m1.lam[2] * c[2]
+                uniform += sum(c) / 3
+        self.assertGreater(learned, uniform)
+
+    def test_consequence_is_a_probability_not_a_hit_rate(self):
+        model = rcp.ComprehensionModel().fit([s["events"] for s in structured_stories(n=80)])
+        t = rcp.book_comprehension(structured_stories(n=1, seed=5)[0]["events"], model, set())["tests"]
+        self.assertIn("consequence_prob", t)
+        self.assertGreater(t["consequence_prob"], t["consequence_prob_baseline"])
+        self.assertLessEqual(t["consequence_prob"], 1.0)
 
     def test_unstructured_stories_do_not_beat_the_baseline(self):
         report = rcp.evaluate_comprehension(unstructured_stories(), {})

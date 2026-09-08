@@ -563,7 +563,7 @@ def render_status(runtime: Path) -> str:
              f"→ {s.get('reading', {}).get('status', '-')} "
              f"comp={s.get('reading', {}).get('comprehension')}",
              f"理解(固定) : score={comp.get('comprehension_score')} "
-             f"帰結={comp.get('consequence')}/基準{comp.get('consequence_baseline')} "
+             f"帰結確率={comp.get('consequence')}/unigram{comp.get('consequence_baseline')} "
              f"z={comp.get('consequence_z')} 基準超え={comp.get('beats_baseline')} "
              f"傾向={comp.get('comprehension_trend')}",
              f"再話(固定) : 生成利得={ret.get('generation_gain')}（往復診断={ret.get('roundtrip_fidelity')}）"
