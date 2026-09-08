@@ -59,6 +59,9 @@ GRADUATE_COMPREHENSION = 0.75      # a book is "understood" at/above this
 # under the old definition get one fresh reading under the new one.
 GRADUATION_SCORER_VERSION = 2      # v2: picture-book score (book_comprehension for
                                   # all readers, was _self_consistency when cold)
+# bumped when the LEVEL semantics change -- the level is re-walked to the
+# evidence.  v1: only graduated STORIES (never Tatoeba readers) set the level.
+LEVEL_POLICY_VERSION = 1
 # the picture-book score tops out around 0.85 for a perfect read (protagonist +
 # coherence + retell + coverage), so "comfortably above the graduate bar" is
 # ~0.77, not the 0.80 the old (0.9-capable) formula used.
@@ -458,6 +461,40 @@ def reevaluate_stale_parses(curriculum: dict) -> list[str]:
     return reset
 
 
+def recompute_level_from_stories(curriculum: dict, cycle: int) -> dict:
+    """One-off (LEVEL_POLICY_VERSION): the level had been inflated by graduated
+    Tatoeba readers (sentence bundles).  Re-walk it down to where graduated
+    STORIES actually sit."""
+    if curriculum.get("level_policy_version", 0) >= LEVEL_POLICY_VERSION:
+        return {"reset": False}
+    curriculum["level_policy_version"] = LEVEL_POLICY_VERSION
+    story_levels = sorted(
+        b["estimated_level"] for b in curriculum["shelf"].values()
+        if b["status"] == "graduated" and b.get("source") != "tatoeba"
+        and b["comprehension_history"]
+        and b["comprehension_history"][-1] >= GRADUATE_COMPREHENSION)
+    # the level the 2nd-hardest genuinely-understood story sits at (need >= 2 for
+    # evidence), rounded down to a 0.5 step; floor 2.0
+    target = 2.0 if len(story_levels) < 2 else max(
+        2.0, round((story_levels[-2] - 0.25) * 2) / 2)
+    target = min(target, curriculum["level"])          # only lower here
+    if target >= curriculum["level"]:
+        return {"reset": False}
+    old = curriculum["level"]
+    curriculum["level"] = target
+    curriculum["floor_level"] = target
+    curriculum["graduated_since_advance"] = 0
+    curriculum["level_history"].append(
+        {"cycle": cycle, "level": target,
+         "reason": f"level policy v{LEVEL_POLICY_VERSION}: re-walk to story evidence (was {old})"})
+    for b in curriculum["shelf"].values():
+        if (b["status"] in ("in_rotation", "shelved_stuck", "unparsable")
+                and b["estimated_level"] > target + LEVEL_STEP):
+            b["status"] = "shelved_above_level"
+            b["shelved_at_level"] = b["estimated_level"]
+    return {"reset": True, "from": old, "to": target}
+
+
 def reset_level_for_new_parser(curriculum: dict, cycle: int) -> dict:
     """One-off when the parser version moves: the level was inflated by the old
     extractor's over-generous scoring, so drop it back to the easiest real book
@@ -607,8 +644,16 @@ def record_reading(curriculum: dict, book_id: str, events: list[dict],
 def maybe_advance_level(curriculum: dict, cycle: int) -> dict:
     at_band = [b for b in curriculum["shelf"].values()
                if abs(b["estimated_level"] - curriculum["level"]) <= LEVEL_STEP]
+    # The LEVEL is a claim about what Noise can READ (connected narrative).  Only
+    # graduated STORIES advance it -- never Tatoeba readers (bundles of unrelated
+    # sentences: they build vocabulary, but parsing simple sentences at some
+    # difficulty is not the same as reading a story at that level), and never a
+    # book far below the current level (a level-1.8 graduate is no evidence for
+    # level 3.0).
     graduated_band = [b for b in at_band
-                      if b["status"] == "graduated" and b["comprehension_history"]]
+                      if b["status"] == "graduated" and b["comprehension_history"]
+                      and b.get("source") != "tatoeba"
+                      and b["estimated_level"] >= curriculum["level"] - 0.25]
     # Only FRESH unread material at the band blocks advancement.  A book being
     # re-read (times_read >= 1) has already been assessed -- it must not pin the
     # level forever, and the loop always has ~1 book in rotation.  Tatoeba

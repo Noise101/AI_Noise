@@ -260,6 +260,7 @@ def run_once(runtime: Path) -> dict:
     for bid in curriculum.reevaluate_stale_parses(cur):
         events_store.pop(bid, None)
     curriculum.reset_level_for_new_parser(cur, cycle)
+    curriculum.recompute_level_from_stories(cur, cycle)
 
     # one-off, idempotent: rebuild difficulty + known_words from heuristic events
     # and return any aid-graduated book for re-evaluation
