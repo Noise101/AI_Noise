@@ -100,6 +100,37 @@ class ReasoningTest(unittest.TestCase):
         self.assertEqual(cog._infer_genus(wm, "こま", allow_belief=True), "生き物")
 
 
+class HypothesisTest(unittest.TestCase):
+    def test_several_hypotheses_are_generated_never_one(self):
+        wm = {"beliefs": {"はこ": _belief("生き物", conf=0.6),      # wrong belief
+                          "つくえ": _belief("道具"), "いす": _belief("道具")},
+              "contexts": {"はこ": {"つくえ": 5, "いす": 4}}, "profiles": {}}
+        store = {"b": _events([("だれか", "つくる", "はこ"), ("だれか", "はこぶ", "はこ")])}
+        hyps = cog.generate_hypotheses("はこ", wm, store, [])
+        genera = {h["genus"] for h in hyps}
+        self.assertGreaterEqual(len(genera), 2)                 # not fixed on one answer
+        self.assertIn("道具", genera)                            # handled -> a thing
+
+    def test_counterevidence_breaks_a_creature_hypothesis_for_a_never_agent(self):
+        wm = {"beliefs": {}, "contexts": {},
+              "profiles": {"はこ": {"subj": 0, "obj": 9, "subj_verbs": {}, "obj_verbs": {"つくる": 9}}}}
+        ce = cog.seek_counterevidence({"genus": "生き物", "confidence": 0.6}, "はこ", wm, {})
+        self.assertTrue(ce["counters"])
+        self.assertLess(ce["surviving_confidence"], 0.6)
+
+    def test_deliberation_overrides_a_belief_the_evidence_contradicts(self):
+        wm = {"beliefs": {"てつ": _belief("生き物", conf=0.6)},   # wrong: 鉄 is a thing
+              "contexts": {},
+              "profiles": {"てつ": {"subj": 0, "obj": 7, "subj_verbs": {},
+                                    "obj_verbs": {"もつ": 7}}}}
+        prob = {"type": "genus_recall", "concept": "てつ", "options": list(cog.COARSE),
+                "gold": "道具", "grade": "coarse", "prompt": "「てつ」は？"}
+        direct = cog.solve(prob, wm, [], [], {}, deliberate=False)
+        delib = cog.solve(prob, wm, [], [], {}, deliberate=True)
+        self.assertEqual(direct["answer"], "生き物")             # trusts the wrong belief
+        self.assertNotEqual(delib["answer"], "生き物")           # deliberation catches it
+
+
 class ExperienceTest(unittest.TestCase):
     def test_experience_records_star_fields_and_a_correction(self):
         state = {"version": cog.VERSION, "rules": [], "experiences": [], "corrections_index": {}}

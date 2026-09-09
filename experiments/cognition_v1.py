@@ -383,27 +383,44 @@ def generate_problems(ctx: CognitiveContext, rules: list[dict], limit: int) -> l
 # 6. reasoning -- explicit retrieve / match / compose, step by step
 # --------------------------------------------------------------------------
 def solve(problem: dict, wm: dict, rules: list[dict], corrections: list[str],
-          heur_store: dict | None = None, compose: bool = False) -> dict:
+          heur_store: dict | None = None, compose: bool = False,
+          deliberate: bool = False) -> dict:
     steps: list[str] = []
     t, concept = problem["type"], problem.get("concept", "")
     rules_by_id = {r["rule_id"]: r for r in rules}
     answer, conf = "わからない", 0.0
     ab = not compose      # compose mode: derive genus from neighbours, not lookup
+    hs = heur_store or {}
 
     if corrections:
         steps.append(f"past correction: {corrections[0]}")
+
+    def classify(word: str) -> str:
+        g = _infer_genus(wm, word, allow_belief=ab)
+        if not deliberate:
+            return g
+        # deliberate: hypotheses -> counter-evidence -> best survivor.  Use it
+        # when there is no direct answer, or when the direct answer is itself
+        # contradicted by the evidence (don't trust a wrong belief).
+        if g and not _contradicted(g, word, wm, hs, steps):
+            return g
+        dg, _dc = deliberate_genus(word, wm, hs, rules, steps)
+        return dg or g
 
     if t == "genus_recall":
         b = (wm.get("beliefs") or {}).get(concept, {})
         steps.append(f"lookup belief[{concept}] -> {b.get('genus') or '?'} (understood={b.get('understood')})")
         if b.get("understood"):
             answer, conf = b.get("genus", ""), round(float(b.get("confidence", 0.5)), 3)
+        if deliberate and (not b.get("understood") or _contradicted(answer, concept, wm, hs, steps)):
+            g, gc = deliberate_genus(concept, wm, hs, rules, steps)
+            answer, conf = (g, gc) if g else ("わからない", 0.0)
 
     elif t == "odd_one_out":
         # classify every option, then name the one whose genus is the minority
         cls = {}
         for opt in problem["options"]:
-            og = _infer_genus(wm, opt, allow_belief=ab)
+            og = classify(opt)
             cls[opt] = og
             steps.append(f"classify {opt} -> {og or '?'}")
         buckets: dict[str, list[str]] = defaultdict(list)
@@ -418,7 +435,7 @@ def solve(problem: dict, wm: dict, rules: list[dict], corrections: list[str],
 
     elif t == "common_property":
         a, bword = concept, problem.get("other", "")
-        ga, gb = _infer_genus(wm, a, allow_belief=ab), _infer_genus(wm, bword, allow_belief=ab)
+        ga, gb = classify(a), classify(bword)
         steps.append(f"genus[{a}]={ga or '?'}  genus[{bword}]={gb or '?'}")
         if ga and gb and _compatible(ga, gb):
             answer = ga if ga == gb else "生き物"
@@ -460,6 +477,16 @@ def _canon_class(g: str) -> str:
     return "生き物" if g == "人" else g
 
 
+def _contradicted(genus: str, word: str, wm: dict, heur_store: dict, steps: list[str]) -> bool:
+    if not genus:
+        return False
+    ce = seek_counterevidence({"genus": _canon_class(genus), "confidence": 0.6}, word, wm, heur_store)
+    if ce["counters"]:
+        steps.append(f"{word}={genus} contradicted: {ce['counters'][0]}")
+        return True
+    return False
+
+
 def _infer_genus(wm: dict, word: str, allow_belief: bool = True) -> str:
     """Belief genus if Noise understands the word (and `allow_belief`);
     otherwise compose it from the genera of its understood neighbours.  The
@@ -475,6 +502,170 @@ def _infer_genus(wm: dict, word: str, allow_belief: bool = True) -> str:
     if votes:
         return votes.most_common(1)[0][0]
     return b.get("genus", "") if (b and allow_belief) else ""
+
+
+# --------------------------------------------------------------------------
+# 3. hypotheses  +  4. counter-evidence  (used only when direct reasoning stalls)
+# --------------------------------------------------------------------------
+# a morphological hint is LOW evidence -- a suffix, not authority
+_MORPH_HINTS = (
+    (("器", "具", "機", "刀", "筒", "鏡", "杖", "笛", "鈴", "鍬", "車", "船", "服", "衣",
+      "帽子", "靴", "傘", "鉄砲", "貨", "金"), "道具"),
+    (("山", "川", "海", "湖", "島", "森", "林", "村", "町", "国", "橋", "寺", "宮", "門",
+      "庭", "畑", "野原", "坂", "道", "院", "駅", "校"), "場所"),
+    (("鳥", "犬", "猫", "狐", "狸", "熊", "鹿", "兎", "馬", "牛", "羊", "虫", "魚", "猿",
+      "狼", "獅子", "象", "蛇", "蛙", "亀"), "生き物"),
+    (("さん", "君", "氏", "王", "姫", "僧", "侍", "師", "翁", "嬢", "娘", "息子",
+      "父", "母", "兄", "姉", "夫", "妻", "者"), "人"),
+    (("料理", "菓子", "飯", "汁", "酒", "茶", "パン", "肉", "果"), "食べ物"),
+)
+# perception / speech / feeling / eating -- needs a mind.  NOT motion (走/歩/飛):
+# a train moves too.  NOT 鳴 (鳴る = an object ringing).
+_ANIMATE_HINT = ("見", "みる", "聞", "きく", "言", "いう", "話", "はなす", "食べ", "たべ",
+                 "飲", "のむ", "泣", "なく", "笑", "わら", "思", "おもう", "考", "かんが",
+                 "寝", "ねる", "答", "こたえ", "逃", "にげ", "遊", "あそ", "怒", "おこ")
+_HANDLE_HINT = ("つく", "作", "持", "使", "つか", "投げ", "取", "とる", "買", "売",
+                "こわ", "壊", "割", "切", "ひらく", "開", "しめ", "運", "置", "拾",
+                "引", "掴", "にぎ", "握", "かつ", "担", "はく", "着", "かぶ")
+
+
+def _handled(verb: str) -> bool:
+    v = _norm(verb)
+    return any(h in v for h in _HANDLE_HINT)
+
+
+def _morph_genus(word: str) -> str:
+    for keys, g in _MORPH_HINTS:
+        if any(k in word for k in keys):
+            return g
+    return ""
+
+
+def generate_hypotheses(word: str, wm: dict, heur_store: dict, rules: list[dict]) -> list[dict]:
+    """Several independent guesses at `word`'s coarse class -- never fix on one."""
+    hyps: list[dict] = []
+    seen = set()
+
+    def add(genus, basis, conf, check):
+        g = _canon_class(genus)
+        if g in COARSE and g not in seen:
+            seen.add(g)
+            hyps.append({"genus": g, "basis": basis, "confidence": round(conf, 3), "check": check})
+
+    b = (wm.get("beliefs") or {}).get(word) or {}
+    if b.get("understood"):
+        add(b.get("genus", ""), ["belief"], min(0.7, float(b.get("confidence", 0.5))),
+            "does the word act like this class in the stories?")
+    nv = _infer_genus(wm, word, allow_belief=False)
+    if nv:
+        add(nv, ["understood neighbours"], 0.45, "do most neighbours really share this class?")
+    mg = _morph_genus(word)
+    if mg:
+        add(mg, ["morphology"], 0.3, "is the suffix actually meaningful here?")
+    # rule-based: word is the object of a handling verb -> a thing
+    for bid, evs in list(heur_store.items())[:120]:
+        for e in evs:
+            if _norm(e.get("obj")) == word and _handled(_norm(e.get("verb"))):
+                add("道具", [f"handled in {bid}"], 0.35, "is it ever an agent too?")
+                break
+        if "道具" in seen:
+            break
+    return hyps
+
+
+def _usage(word: str, wm: dict, heur_store: dict) -> tuple[int, int, bool]:
+    """(times as subject, times as object, ever did an animate action).
+    Prefer word_meaning's accumulated `profiles`; fall back to the events."""
+    prof = (wm.get("profiles") or {}).get(word)
+    if prof:
+        sv = prof.get("subj_verbs", {})
+        animate = any(any(h in v for h in _ANIMATE_HINT) for v in sv)
+        return int(prof.get("subj", 0)), int(prof.get("obj", 0)), animate
+    subj = obj = 0
+    animate = False
+    for evs in list(heur_store.values())[:180]:
+        for e in evs:
+            v = _norm(e.get("verb"))
+            if _norm(e.get("subject")) == word:
+                subj += 1
+                if any(h in v for h in _ANIMATE_HINT):
+                    animate = True
+            if _norm(e.get("obj")) == word:
+                obj += 1
+    return subj, obj, animate
+
+
+def seek_counterevidence(hyp: dict, word: str, wm: dict, heur_store: dict) -> dict:
+    """Actively try to break the hypothesis -- not confirm it (user #4)."""
+    g, counters = hyp["genus"], []
+    subj, obj, animate = _usage(word, wm, heur_store)
+    if g in ("生き物", "人"):
+        # a creature acts; if the word is only ever acted upon, that is evidence against
+        if obj >= 3 and subj == 0:
+            counters.append(f"{word} は常に対象で、一度も動作主でない（{obj}回）")
+        elif subj >= 2 and not animate:
+            counters.append(f"{word} は主語だが生き物的な行動をしない")
+    if g in ("道具", "場所", "食べ物", "自然物"):
+        if animate:
+            counters.append(f"{word} は生き物的な行動をする")
+    nb = Counter(_canon_class(_genus(wm, n)) for n in _neighbours(wm, word)
+                 if _understood(wm, n) and _genus(wm, n))
+    if nb and len(nb) > 1:                       # a mixed neighbourhood, not a clean one
+        top, k = nb.most_common(1)[0]
+        if top != g and k >= 4 and k >= 2 * nb.get(g, 0):
+            counters.append(f"近傍語の多数（{k}）は「{top}」")
+    surviving = round(hyp["confidence"] * (0.35 ** len(counters)), 3)
+    return {"counters": counters, "surviving_confidence": surviving}
+
+
+class HypothesisGen(CognitiveModule):
+    """#3 -- several independent guesses for the focus concept's class."""
+    name = "hypothesis"
+
+    def process(self, ctx: CognitiveContext) -> CognitiveContext:
+        if ctx.concept:
+            hs = generate_hypotheses(ctx.concept, ctx.wm, ctx.heur_store, [])
+            ctx.trace(f"hypotheses({ctx.concept}): "
+                      + ", ".join(f"{h['genus']}@{h['confidence']}" for h in hs))
+        return ctx
+
+
+class CounterSearch(CognitiveModule):
+    """#4 -- try to break each hypothesis, not confirm it."""
+    name = "counter"
+
+    def process(self, ctx: CognitiveContext) -> CognitiveContext:
+        if ctx.concept:
+            for h in generate_hypotheses(ctx.concept, ctx.wm, ctx.heur_store, []):
+                ce = seek_counterevidence(h, ctx.concept, ctx.wm, ctx.heur_store)
+                if ce["counters"]:
+                    ctx.trace(f"counter {ctx.concept}={h['genus']}: {ce['counters'][0]}")
+        return ctx
+
+
+def deliberate_genus(word: str, wm: dict, heur_store: dict, rules: list[dict],
+                     steps: list[str]) -> tuple[str, float]:
+    """Generate hypotheses, break each against the evidence, take the best
+    survivor.  Returns ('', 0.0) if nothing survives -- an honest 'わからない'."""
+    hyps = generate_hypotheses(word, wm, heur_store, rules)
+    if not hyps:
+        steps.append(f"deliberate({word}): no hypothesis")
+        return "", 0.0
+    scored = []
+    for h in hyps:
+        ce = seek_counterevidence(h, word, wm, heur_store)
+        steps.append(f"H {word}={h['genus']} (conf {h['confidence']}, {','.join(h['basis'])}) "
+                     f"-> counters {len(ce['counters'])} -> {ce['surviving_confidence']}")
+        scored.append((ce["surviving_confidence"], len(ce["counters"]), h["genus"]))
+    scored.sort(reverse=True)
+    best_conf, best_counters, best_g = scored[0]
+    if best_conf < 0.12 or best_counters:
+        steps.append("no hypothesis survives the counter-evidence -> unresolved")
+        return "", 0.0
+    if len(scored) > 1 and abs(scored[0][0] - scored[1][0]) < 0.05 and scored[0][2] != scored[1][2]:
+        steps.append("two hypotheses survive equally -> unresolved")
+        return "", 0.0
+    return best_g, best_conf
 
 
 # --------------------------------------------------------------------------
@@ -611,7 +802,7 @@ def run_cognitive_cycle(cycle: int, wm_state: dict, heur_store: dict, shelf: dic
         for p in ctx.problems:
             p.setdefault("book_id", just_read or "")
             corr = corrections_for(state, p["type"], ctx.concept_genus)
-            sol = solve(p, wm_state, state["rules"], corr, heur_store)
+            sol = solve(p, wm_state, state["rules"], corr, heur_store, deliberate=True)
             correct = _grade(p, sol["answer"])
             ev = self_evaluate(p, sol, ctx.retrieved, wm_state)
             record_experience(state, p, sol, correct, ev, cycle)
