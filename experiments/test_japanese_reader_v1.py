@@ -178,6 +178,27 @@ class JapaneseReaderTest(unittest.TestCase):
         kept = reader._heuristic_only(mixed)
         self.assertEqual([e["verb"] for e in kept], ["a"])
 
+    def test_vocab_fuel_tops_up_tatoeba_regardless_of_level_and_respects_cooldown(self):
+        made = []
+
+        def fake_readers(level, n_readers=6, skip=0, **k):
+            out = [FakeText(f"drill{skip}_{i}", f"tatoeba://reader/x/{skip}_{i}",
+                            "犬が道を走る。子供が水を飲む。") for i in range(n_readers)]
+            made.append((skip, len(out)))
+            return out
+
+        reader.corpus.tatoeba_readers = fake_readers
+        cur = {"cycle": 500, "level": 6.0, "shelf": {},        # well above TATOEBA_MAX_LEVEL
+               "_tatoeba_cursor": 0, "known_words": {}}
+        added = reader._maybe_fetch_vocab_fuel(cur, 500)
+        self.assertEqual(added, reader.VOCAB_FUEL_ACTIVE)       # fuelled despite level 6.0
+        self.assertEqual(cur["_vocab_fuel_cycle"], 500)
+        self.assertGreater(cur["_tatoeba_cursor"], 0)           # cursor advanced -> fresh next time
+        self.assertEqual(reader._maybe_fetch_vocab_fuel(cur, 503), 0)   # cooldown
+        # once enough unread fuel is on the shelf, stop
+        cur["_vocab_fuel_cycle"] = -999
+        self.assertEqual(reader._maybe_fetch_vocab_fuel(cur, 520), 0)
+
     def test_caregiver_batch_does_not_crash_when_no_book_is_selectable(self):
         # regression: `model` is only bound inside `if book_id:`, but the
         # caregiver batch reads it -- no selectable book must not raise

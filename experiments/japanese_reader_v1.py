@@ -57,6 +57,8 @@ AOZORA_LEVEL_MARGIN = 1.0   # skip Aozora works more than this above the reading
 TATOEBA_MAX_LEVEL = 4.0     # above this the parser handles literary prose well
                             # enough that sentence drills add little
 TATOEBA_READERS_PER_LEVEL = 6   # once this many exist near the level, stop
+VOCAB_FUEL_COOLDOWN = 8      # cycles between word-meaning fuel top-ups
+VOCAB_FUEL_ACTIVE = 6       # unread Tatoeba readers to keep on the shelf as fuel
                             # fetching so the band can drain and the level rise
 AOZORA_WORKS_PER_AUTHOR = 10
 
@@ -216,6 +218,44 @@ def _fetch_more_books(cur: dict, cycle: int) -> int:
     return added
 
 
+def _maybe_fetch_vocab_fuel(cur: dict, cycle: int) -> int:
+    """Keep a small rolling supply of fresh Tatoeba readers on the shelf --
+    the corpus's only *renewable* source of concrete common nouns, which
+    `japanese_word_meaning` needs and the finite Aozora shelf cannot give.
+
+    Independent of the reading level and the narrative shelf state: Tatoeba
+    readers are excluded from every narrative benchmark and (since a4ca7ca)
+    can no longer inflate the level, so there is no reason to gate this on
+    level.  Runs on its own cooldown; the `_tatoeba_cursor` advances so the
+    material is always new."""
+    if cycle - cur.get("_vocab_fuel_cycle", -999) < VOCAB_FUEL_COOLDOWN:
+        return 0
+    tat = [b for b in cur["shelf"].values() if b.get("source") == "tatoeba"]
+    unread = [b for b in tat
+              if b["status"] in ("in_rotation", "shelved_stuck", "shelved_above_level")
+              and b.get("times_read", 0) == 0]
+    if len(unread) >= VOCAB_FUEL_ACTIVE:
+        return 0
+    cur["_vocab_fuel_cycle"] = cycle
+    have = {b["url"] for b in cur["shelf"].values()}
+    skip = cur.get("_tatoeba_cursor", 0)
+    want = VOCAB_FUEL_ACTIVE - len(unread)
+    try:
+        readers = corpus.tatoeba_readers(round(cur["level"], 1), n_readers=want,
+                                         skip=skip, network=3)
+    except Exception:
+        return 0
+    readers = [r for r in readers if r.url not in have]
+    cur["_tatoeba_cursor"] = skip + max(len(readers), want) * 20
+    if not readers:
+        return 0
+    books = [{"title": r.title, "url": r.url, "source": "tatoeba",
+              "license": corpus.TATOEBA_LICENSE, "text": r.text,
+              "event_count": len(_events_of(r.text)), "events": _events_of(r.text),
+              "verbs": []} for r in readers]
+    return curriculum.register_books(cur, books, cycle)
+
+
 _events_path: Path | None = None
 
 
@@ -294,6 +334,9 @@ def run_once(runtime: Path) -> dict:
         # NB: _fetch_more_books no longer writes events (unread books stay out of
         # the store), so do NOT reload events_store here -- that would discard the
         # in-memory changes migrate_reading_state just made this cycle.
+    # renewable concrete-noun fuel for word meaning, independent of the narrative
+    # shelf: the Aozora shelf is finite and, once read, word meaning stops growing.
+    fetched += _maybe_fetch_vocab_fuel(cur, cycle)
 
     book_id = curriculum.retention_check_due(cur, cycle) or curriculum.select_next_book(cur)
     reading = {"status": "no_book"}
