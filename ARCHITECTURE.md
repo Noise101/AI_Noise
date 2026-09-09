@@ -66,7 +66,32 @@ literature), **Japanese Wikisource** (`イソップ童話集` + folktales), and 
 into graded "readers"). See `experiments/ATTRIBUTION.md`. Tatoeba readers carry
 `source: "tatoeba"`: they build vocabulary and character-model text but are **kept
 out of the narrative benchmarks** (`evaluate_comprehension`, `evaluate_retelling`)
-and graded by parse quality, not narrative comprehension.
+and graded by parse quality, not narrative comprehension. `japanese_word_meaning_v1`
+(distributional, not narrative) *does* read the Tatoeba bundles — they are Noise's
+own `heuristic_self` events and the corpus's richest source of concrete common nouns.
+
+### Word meaning as a revisable belief (`japanese_word_meaning_v1`)
+
+Every word's meaning is a belief with a confidence and a source trail (`beliefs[w]`),
+folded onto a small closed coarse ontology (生き物 / 道具 / 場所 / …).
+
+- **Testimony** — a ja.wiktionary / ja.wikipedia genus, and (when a local model is
+  up) its answer to *one* closed-set discrimination question — enters the belief at
+  a **capped weight** (`TESTIMONY_CAP`, currently 0.35). It is a hypothesis, held
+  provisionally, and by invariant 10 it can never on its own make a word "understood"
+  or satisfy any gate. Held-out test words are never researched and never asked.
+- **Evidence** — Noise's own reading: how the word is *used* (acts under its own
+  power → creature; only ever handled → thing; a destination → place) and the
+  classes of the co-occurring words it *already understands*. Evidence is what
+  moves confidence past the testimony cap and what a word must have before it
+  counts as "understood".
+- **Revision** — the belief is recomputed each cycle; when reading evidence
+  outweighs an earlier testimony-only genus the belief flips and the change is
+  kept in `revisions`. Counter-evidence can always demote "understood" (invariant 8).
+- **Capability (frozen, held-out)** — does the belief machinery put a held-out
+  word (genus-validated, concrete) in the right coarse class more often than naive
+  co-occurrence propagation? One-sided significance over per-word gains; it is a
+  measure of Noise's own inference, not of agreement with any source.
 
 ## Predict within the event, not the next event
 

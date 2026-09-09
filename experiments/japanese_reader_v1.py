@@ -378,6 +378,21 @@ def run_once(runtime: Path) -> dict:
                    for bid, ev in heur_store.items()
                    if bid in cur["shelf"] and len(ev) >= 3
                    and cur["shelf"][bid].get("source") != "tatoeba"]
+    # word meaning is distributional, not narrative -- it DOES want the Tatoeba
+    # sentence bundles: they are Noise's own reading (heuristic_self events) and
+    # the corpus's richest source of concrete common nouns.  Graduated readers
+    # are pruned from events_store on a parser bump and never re-selected, so
+    # re-parse any short read book that is missing (its own heuristic parse of a
+    # text it genuinely read is legitimate `heuristic_self` experience).
+    wm_stories = [{"url": cur["shelf"][bid]["url"], "events": ev}
+                  for bid, ev in heur_store.items()
+                  if bid in cur["shelf"] and len(ev) >= 3]
+    for bid, b in cur["shelf"].items():
+        if (bid not in heur_store and curriculum.book_was_read(b)
+                and b.get("text") and len(b["text"]) < 4000):
+            evs = _heuristic_only(_events_of(corpus._modernise(b["text"])))
+            if len(evs) >= 3:
+                wm_stories.append({"url": b["url"], "events": evs})
     # the RNN's cumulative training ledger (collections it has EVER trained on):
     # a collection here can never be moved into a held-out tier.
     rnn_ever_trained_cols = set(
@@ -437,7 +452,7 @@ def run_once(runtime: Path) -> dict:
     prev_wm = _read(runtime / WORD_MEANING_FILE)
     try:
         wm_report = word_meaning.learn_and_evaluate(
-            all_stories, prev_wm, cycle, known_words=curriculum._known_set(cur))
+            wm_stories, prev_wm, cycle, known_words=curriculum._known_set(cur))
     except Exception as exc:                      # never let it break the reader
         wm_report = {**(prev_wm or {}), "status": "error", "error": repr(exc)}
     _write(runtime / WORD_MEANING_FILE, wm_report)
@@ -492,6 +507,8 @@ def run_once(runtime: Path) -> dict:
         "curriculum": curriculum.summary(cur),
         "word_meaning": {k: wm_report.get(k) for k in
                          ("status", "vocab", "researched_count", "taxonomy_size",
+                          "belief_count", "understood_count", "understood_rate",
+                          "corrections", "llm_status", "llm_asked_count",
                           "test_words", "measured", "mean_gain", "z",
                           "significant_now", "capability_confirmed",
                           "sample_explanations")},

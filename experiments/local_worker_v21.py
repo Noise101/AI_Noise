@@ -350,10 +350,14 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
         cap = "確定" if wm.get("capability_confirmed") else (
             "有意" if wm.get("significant_now") else "未確定")
         lines.append(
-            f"語の意味（説明で判定・診断）: 分類辞書 {wm.get('taxonomy_size')}語／調査 "
-            f"{wm.get('researched_count')}語／held-out {wm.get('test_words')}語 "
-            f"利得 {wm.get('mean_gain')} z={wm.get('z')}（{cap}）"
-            + "（ja.wiktionary/wikipedia CC-BY-SA から学習、定義は保存しない）")
+            f"語の意味（信念・改訂式）: 信念 {wm.get('belief_count')}語／理解 "
+            f"{wm.get('understood_count')}語／改訂 {wm.get('corrections')}回／調査 "
+            f"{wm.get('researched_count')}語・LLM質問 {wm.get('llm_asked_count')}語"
+            f"（{wm.get('llm_status')}）")
+        lines.append(
+            f"  held-out {wm.get('test_words')}語 正答率 {wm.get('understood_rate')}／"
+            f"素朴共起比の利得 {wm.get('mean_gain')} z={wm.get('z')}（{cap}）"
+            + "（証言は上限重みで信念化、独自の読解証拠のみが「理解」を成立させる）")
         for gloss in (wm.get("sample_explanations") or [])[:2]:
             lines.append(f"  例: {gloss}")
     if seq.get("held_out_bits_per_char") is not None:
