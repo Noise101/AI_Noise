@@ -58,7 +58,10 @@ TATOEBA_MAX_LEVEL = 4.0     # above this the parser handles literary prose well
                             # enough that sentence drills add little
 TATOEBA_READERS_PER_LEVEL = 6   # once this many exist near the level, stop
 VOCAB_FUEL_COOLDOWN = 8      # cycles between word-meaning fuel top-ups
-VOCAB_FUEL_ACTIVE = 6       # unread Tatoeba readers to keep on the shelf as fuel
+VOCAB_FUEL_FRESH = 4        # fresh Tatoeba readers pulled per top-up
+VOCAB_FUEL_BUFFER = 16     # fuel reader texts kept in the rolling buffer
+VOCAB_FUEL_LEVELS = (2.5, 3.0, 3.5, 4.0)   # Tatoeba levels rich in concrete nouns
+VOCAB_FUEL_BAND = 0.6
                             # fetching so the band can drain and the level rise
 AOZORA_WORKS_PER_AUTHOR = 10
 
@@ -218,42 +221,50 @@ def _fetch_more_books(cur: dict, cycle: int) -> int:
     return added
 
 
-def _maybe_fetch_vocab_fuel(cur: dict, cycle: int) -> int:
-    """Keep a small rolling supply of fresh Tatoeba readers on the shelf --
-    the corpus's only *renewable* source of concrete common nouns, which
-    `japanese_word_meaning` needs and the finite Aozora shelf cannot give.
+def _refresh_vocab_fuel(cur: dict, cycle: int) -> int:
+    """Keep a small rolling buffer of fresh Tatoeba reader texts for word
+    meaning -- the corpus's only *renewable* source of concrete common nouns,
+    which the finite Aozora shelf cannot give.
 
-    Independent of the reading level and the narrative shelf state: Tatoeba
-    readers are excluded from every narrative benchmark and (since a4ca7ca)
-    can no longer inflate the level, so there is no reason to gate this on
-    level.  Runs on its own cooldown; the `_tatoeba_cursor` advances so the
-    material is always new."""
+    The buffer feeds `japanese_word_meaning` ONLY (see `wm_stories`): the texts
+    never enter the shelf, `events_store`, graduation, the RNN or any narrative
+    benchmark.  Reading a sentence for its vocabulary is still Noise's own
+    reading -- the events are parsed here and stamped `heuristic_self` -- but it
+    is not a curriculum "reading", so it cannot move the level or a benchmark.
+    Runs on its own cooldown; rotates Tatoeba level pools with per-pool cursors
+    so the material is always new, wrapping a pool when it runs out."""
     if cycle - cur.get("_vocab_fuel_cycle", -999) < VOCAB_FUEL_COOLDOWN:
         return 0
-    tat = [b for b in cur["shelf"].values() if b.get("source") == "tatoeba"]
-    unread = [b for b in tat
-              if b["status"] in ("in_rotation", "shelved_stuck", "shelved_above_level")
-              and b.get("times_read", 0) == 0]
-    if len(unread) >= VOCAB_FUEL_ACTIVE:
-        return 0
     cur["_vocab_fuel_cycle"] = cycle
-    have = {b["url"] for b in cur["shelf"].values()}
-    skip = cur.get("_tatoeba_cursor", 0)
-    want = VOCAB_FUEL_ACTIVE - len(unread)
-    try:
-        readers = corpus.tatoeba_readers(round(cur["level"], 1), n_readers=want,
-                                         skip=skip, network=3)
-    except Exception:
+    idx = cur.get("_vocab_fuel_level_idx", 0)
+    cursors = cur.setdefault("_vocab_fuel_cursors", {})
+    buf = cur.get("_vocab_fuel_texts", [])
+    seen = {t[:40] for t in buf}
+    fresh = []
+    for step in range(len(VOCAB_FUEL_LEVELS)):
+        lvl = VOCAB_FUEL_LEVELS[(idx + step) % len(VOCAB_FUEL_LEVELS)]
+        key = f"{lvl:.1f}"
+        skip = cursors.get(key, 0)
+        got = []
+        for attempt_skip in (skip, 0) if skip else (skip,):
+            try:
+                got = corpus.tatoeba_readers(lvl, n_readers=VOCAB_FUEL_FRESH,
+                                             per_reader=20, band=VOCAB_FUEL_BAND,
+                                             skip=attempt_skip, network=3)
+            except Exception:
+                got = []
+            if got:
+                cursors[key] = (attempt_skip or 0) + len(got) * 20
+                break
+            cursors[key] = 0
+        fresh = [r.text for r in got if r.text[:40] not in seen]
+        if fresh:
+            cur["_vocab_fuel_level_idx"] = (idx + step + 1) % len(VOCAB_FUEL_LEVELS)
+            break
+    if not fresh:
         return 0
-    readers = [r for r in readers if r.url not in have]
-    cur["_tatoeba_cursor"] = skip + max(len(readers), want) * 20
-    if not readers:
-        return 0
-    books = [{"title": r.title, "url": r.url, "source": "tatoeba",
-              "license": corpus.TATOEBA_LICENSE, "text": r.text,
-              "event_count": len(_events_of(r.text)), "events": _events_of(r.text),
-              "verbs": []} for r in readers]
-    return curriculum.register_books(cur, books, cycle)
+    cur["_vocab_fuel_texts"] = (buf + fresh)[-VOCAB_FUEL_BUFFER:]
+    return len(fresh)
 
 
 _events_path: Path | None = None
@@ -335,8 +346,9 @@ def run_once(runtime: Path) -> dict:
         # the store), so do NOT reload events_store here -- that would discard the
         # in-memory changes migrate_reading_state just made this cycle.
     # renewable concrete-noun fuel for word meaning, independent of the narrative
-    # shelf: the Aozora shelf is finite and, once read, word meaning stops growing.
-    fetched += _maybe_fetch_vocab_fuel(cur, cycle)
+    # shelf: the Aozora shelf is finite and, once read, word meaning stops
+    # growing.  This only tops up a text buffer consumed by `wm_stories` below.
+    _refresh_vocab_fuel(cur, cycle)
 
     book_id = curriculum.retention_check_due(cur, cycle) or curriculum.select_next_book(cur)
     reading = {"status": "no_book"}
@@ -436,6 +448,12 @@ def run_once(runtime: Path) -> dict:
             evs = _heuristic_only(_events_of(corpus._modernise(b["text"])))
             if len(evs) >= 3:
                 wm_stories.append({"url": b["url"], "events": evs})
+    # renewable concrete-noun fuel: Tatoeba reader texts Noise parsed itself,
+    # for word meaning only -- never a shelf book, never a benchmark story.
+    for i, text in enumerate(cur.get("_vocab_fuel_texts", [])):
+        evs = _heuristic_only(_events_of(corpus._modernise(text)))
+        if len(evs) >= 3:
+            wm_stories.append({"url": f"vocab-fuel://{i}", "events": evs})
     # the RNN's cumulative training ledger (collections it has EVER trained on):
     # a collection here can never be moved into a held-out tier.
     rnn_ever_trained_cols = set(
