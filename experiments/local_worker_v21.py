@@ -360,6 +360,24 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
             + "（証言は上限重みで信念化、独自の読解証拠のみが「理解」を成立させる）")
         for gloss in (wm.get("sample_explanations") or [])[:2]:
             lines.append(f"  例: {gloss}")
+    cg = reading_status.get("cognition", {}) or {}
+    if cg.get("status") in ("ran", "no_concept"):
+        pr = reading_status.get("cognition_probe", {}) or {}
+        lines.append(
+            f"認知ループ（知識→能力）: 規則 {cg.get('rules_total')}（再利用可 {cg.get('rules_reusable')}）"
+            f"／経験 {cg.get('experiences_total')}／誤り再発率 {cg.get('repeated_failure_rate')}")
+        if pr.get("status") == "measured":
+            lines.append(
+                f"  凍結能力プローブ: 導出率 {pr.get('latest_derive_rate')}"
+                f"（初回 {pr.get('first_derive_rate')}、差 {pr.get('before_after_gain')}、{pr.get('trend')}）"
+                f" lift {pr.get('latest_lift')}／{pr.get('problem_count')}問")
+        elif pr.get("status") in ("building", "waiting"):
+            lines.append(f"  凍結能力プローブ: 準備中（{pr.get('have', 0)}/{pr.get('need', 0)}問、"
+                         "具体語彙の蓄積待ち）")
+        se = cg.get("sample_experience")
+        if se:
+            lines.append(f"  例: {se.get('situation','')[:40]} → {se.get('result','')}"
+                         f"／次: {se.get('correction','')[:50]}")
     if seq.get("held_out_bits_per_char") is not None:
         rlog = reading_status.get("sequence_retirement_log") or []
         lines.append(f"日本語文字RNN（診断のみ・能力判定に不使用）: "
@@ -1816,7 +1834,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                 report["japanese_reading"] = {k: reading_status.get(k) for k in
                                               ("cycle", "books_fetched", "reading", "level_advance",
                                                "curriculum", "comprehension", "retelling", "sequence",
-                                               "word_meaning",
+                                               "word_meaning", "cognition", "cognition_probe",
                                                "caregiver", "caregiver_questions", "llm_scaffold_totals",
                                                "aided_reading", "schema_migration", "self_vs_aided", "aided_store", "provenance", "sequence_retirement_log", "sequence_ever_trained_fingerprint", "sequence_boundary_fingerprint", "sequence_ever_trained_collections")}
             except Exception as reading_error:  # isolate the parallel loop

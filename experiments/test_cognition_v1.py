@@ -1,0 +1,150 @@
+import unittest
+
+import cognition_v1 as cog
+
+
+def _belief(genus, understood=True, conf=0.7):
+    return {"genus": genus, "understood": understood, "confidence": conf,
+            "support": {}, "sources": [], "revisions": [], "last_cycle": 1}
+
+
+WM = {
+    "beliefs": {
+        "きつね": _belief("生き物"), "からす": _belief("生き物"), "うさぎ": _belief("生き物"),
+        "つくえ": _belief("道具"), "いす": _belief("道具"),
+        "やま": _belief("場所"),
+        "ふね": _belief("道具", conf=0.4),          # not confident enough for the pool
+    },
+    "contexts": {
+        "きつね": {"からす": 4, "ぶどう": 3, "つくえ": 1},
+        "つくえ": {"いす": 5, "きつね": 1},
+    },
+    "entities": {"きつね": 20, "つくえ": 8},
+}
+
+
+def _events(rows):
+    return [{"subject": s, "verb": v, "obj": o, "provenance": "heuristic_self"} for s, v, o in rows]
+
+
+STORE = {
+    "b1": _events([("きつね", "はしる", ""), ("きつね", "たべる", "ぶどう"),
+                   ("からす", "とぶ", ""), ("うさぎ", "たべる", "くさ")]),
+    "b2": _events([("きつね", "たべる", "にく"), ("うさぎ", "はねる", ""),
+                   ("きつね", "ほえる", ""), ("からす", "たべる", "むし")]),
+    "b3": _events([("つくえ", "こわれる", ""), ("だれか", "つくる", "つくえ")]),
+}
+SHELF = {"b1": {"title": "話1"}, "b2": {"title": "話2"}, "b3": {"title": "話3"}}
+
+
+class AbstractionTest(unittest.TestCase):
+    def test_genus_triples_seen_in_several_books_become_rules(self):
+        state = {"version": cog.VERSION, "rules": []}
+        cog._abstract_rules(state, STORE, WM, cycle=5)
+        forms = {r["verb"]: r for r in state["rules"]}
+        self.assertIn("たべる", forms)                       # 生き物 が たべる, in b1 and b2
+        self.assertGreaterEqual(forms["たべる"]["support"], 2)
+        # vacuous verbs never make a rule
+        self.assertNotIn("いる", forms)
+        self.assertNotIn("ある", forms)
+
+    def test_a_failed_transfer_adds_a_counterexample_and_can_weaken_a_rule(self):
+        state = {"version": cog.VERSION, "rules": [
+            {"rule_id": "r1", "form": "「生き物」がとぶ", "subject_genus": "生き物",
+             "verb": "とぶ", "object_genus": "", "support": 9, "books": ["x"],
+             "confidence": 0.8, "counterexamples": [], "status": "reusable"}]}
+        prob = {"pid": "p", "type": "property_transfer", "level": 4, "concept": "きつね",
+                "rule_id": "r1", "gold": "はしる", "options": ["とぶ", "はしる"], "grade": "exact",
+                "prompt": "?"}
+        for _ in range(3):
+            cog.record_experience(state, prob, {"answer": "とぶ", "confidence": 0.5, "steps": ["rule r1"]},
+                                  correct=False, evaluation={"notes": [], "sufficient_basis": True,
+                                                             "contradiction": False}, cycle=7)
+        r = state["rules"][0]
+        self.assertGreaterEqual(len(r["counterexamples"]), 3)
+        self.assertEqual(r["status"], "weakened")
+
+
+class ReasoningTest(unittest.TestCase):
+    def test_odd_one_out_names_the_minority_class(self):
+        prob = {"type": "odd_one_out", "concept": "きつね",
+                "options": ["きつね", "からす", "つくえ"], "gold": "つくえ", "grade": "exact",
+                "prompt": "?"}
+        sol = cog.solve(prob, WM, [], [])
+        self.assertEqual(sol["answer"], "つくえ")
+
+    def test_common_property_derives_the_shared_genus(self):
+        prob = {"type": "common_property", "concept": "つくえ", "other": "いす",
+                "options": ["道具", "生き物", "場所"], "gold": "道具", "grade": "coarse", "prompt": "?"}
+        sol = cog.solve(prob, WM, [], [])
+        self.assertEqual(sol["answer"], "道具")
+
+    def test_event_recall_reads_the_next_verb_from_stored_events(self):
+        prob = {"type": "event_recall", "concept": "きつね", "book_id": "b1",
+                "options": ["たべる", "とぶ"], "gold": "たべる", "grade": "exact", "prompt": "?"}
+        sol = cog.solve(prob, WM, [], [], heur_store=STORE)
+        self.assertEqual(sol["answer"], "たべる")
+
+    def test_unknown_when_nothing_supports_an_answer(self):
+        prob = {"type": "genus_recall", "concept": "みずうみ", "options": list(cog.COARSE),
+                "gold": "場所", "grade": "coarse", "prompt": "?"}
+        sol = cog.solve(prob, WM, [], [])
+        self.assertEqual(sol["answer"], "わからない")
+        self.assertEqual(sol["confidence"], 0.0)
+
+    def test_compose_mode_ignores_the_targets_own_belief(self):
+        wm = {"beliefs": {**WM["beliefs"], "こま": _belief("生き物")},   # wrong belief
+              "contexts": {"こま": {"つくえ": 5, "いす": 4}}}
+        # compose: infer こま from its道具 neighbours, not its (wrong) belief
+        self.assertEqual(cog._infer_genus(wm, "こま", allow_belief=False), "道具")
+        self.assertEqual(cog._infer_genus(wm, "こま", allow_belief=True), "生き物")
+
+
+class ExperienceTest(unittest.TestCase):
+    def test_experience_records_star_fields_and_a_correction(self):
+        state = {"version": cog.VERSION, "rules": [], "experiences": [], "corrections_index": {}}
+        prob = {"pid": "p1", "type": "common_property", "level": 3, "concept": "きつね",
+                "gold": "生き物", "options": ["生き物"], "grade": "coarse", "prompt": "共通は？"}
+        rec = cog.record_experience(state, prob, {"answer": "道具", "confidence": 0.3,
+                                                  "steps": ["belief[きつね]=生き物"]},
+                                    correct=False, evaluation={"notes": ["x"], "sufficient_basis": True,
+                                                               "contradiction": False}, cycle=3)
+        for f in ("situation", "thought", "action", "result", "evaluation", "correction"):
+            self.assertIn(f, rec)
+        self.assertIn("wrong", rec["result"])
+        self.assertTrue(cog.corrections_for(state, "common_property", "生き物"))
+
+    def test_repeated_failure_is_flagged(self):
+        state = {"version": cog.VERSION, "rules": [], "experiences": [], "corrections_index": {}}
+        prob = {"pid": "p", "type": "odd_one_out", "level": 2, "concept": "き",
+                "gold": "A", "options": ["A", "B"], "grade": "exact", "prompt": "?"}
+        sol = {"answer": "B", "confidence": 0.2, "steps": ["classify ..."]}
+        ev = {"notes": [], "sufficient_basis": True, "contradiction": False}
+        r1 = cog.record_experience(state, prob, sol, correct=False, evaluation=ev, cycle=1)
+        r2 = cog.record_experience(state, prob, sol, correct=False, evaluation=ev, cycle=2)
+        self.assertFalse(r1["repeated_failure"])
+        self.assertTrue(r2["repeated_failure"])
+
+
+class LoopTest(unittest.TestCase):
+    def test_full_cycle_runs_and_round_trips(self):
+        r1 = cog.run_cognitive_cycle(1, WM, STORE, SHELF, "b1", None)
+        self.assertEqual(r1["status"], "ran")
+        self.assertGreater(r1["rules_total"], 0)
+        r2 = cog.run_cognitive_cycle(2, WM, STORE, SHELF, "b2", dict(r1))
+        self.assertEqual(r2["version"], cog.VERSION)
+        self.assertGreaterEqual(r2["experiences_total"], r1["experiences_total"])
+        self.assertIn("repeated_failure_rate", r2)
+
+    def test_disabled_by_env(self):
+        import os
+        os.environ["AI_NOISE_COGNITION"] = "0"
+        try:
+            self.assertFalse(cog.enabled())
+        finally:
+            del os.environ["AI_NOISE_COGNITION"]
+        self.assertTrue(cog.enabled())
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -33,6 +33,8 @@ import japanese_sequence_v1 as sequence
 import japanese_word_meaning_v1 as word_meaning
 import caregiver_v1 as caregiver
 import reading_llm_v1 as reading_llm
+import cognition_v1 as cognition
+import capability_probe_v1 as capability_probe
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RUNTIME = ROOT / ".local"
@@ -42,6 +44,8 @@ COMPREHENSION_FILE = "reading-comprehension.json"
 RETELL_FILE = "reading-retelling.json"
 SEQUENCE_FILE = "reading-sequence.json"
 WORD_MEANING_FILE = "reading-word-meaning.json"
+COGNITION_FILE = "cognition-state.json"
+PROBE_FILE = "cognition-probe.json"
 CAREGIVER_FILE = "caregiver.json"
 AIDED_FILE = "reading-aided.json"          # evidence-0 aided readings (diagnostic store)
 STATUS_FILE = "reading-status.json"
@@ -518,6 +522,23 @@ def run_once(runtime: Path) -> dict:
         wm_report = {**(prev_wm or {}), "status": "error", "error": repr(exc)}
     _write(runtime / WORD_MEANING_FILE, wm_report)
 
+    # knowledge -> capability loop: retrieve -> abstract -> generate a problem ->
+    # reason -> self-evaluate -> store the attempt.  Measured by a FROZEN probe,
+    # not by rule count.  AI_NOISE_COGNITION=0 turns it off.
+    cog_report = _read(runtime / COGNITION_FILE)
+    probe_report = _read(runtime / PROBE_FILE)
+    if cognition.enabled():
+        try:
+            cog_report = cognition.run_cognitive_cycle(
+                cycle=cycle, wm_state=wm_report, heur_store=heur_store,
+                shelf=cur["shelf"], just_read=book_id, previous=cog_report)
+            probe_report = capability_probe.maybe_run(
+                cycle, wm_report, heur_store, cur["shelf"], cog_report, probe_report)
+        except Exception as exc:                  # isolate: a failure never stalls reading
+            cog_report = {**(cog_report or {}), "status": "error", "error": repr(exc)}
+        _write(runtime / COGNITION_FILE, cog_report)
+        _write(runtime / PROBE_FILE, probe_report)
+
     # a free-generation retelling of the book just read, conditioned ONLY on the
     # event representation Noise formed (no gold text, no LLM rephrasing)
     if book_id and seq_report.get("state") and heuristic:
@@ -573,6 +594,15 @@ def run_once(runtime: Path) -> dict:
                           "test_words", "measured", "mean_gain", "z",
                           "significant_now", "capability_confirmed",
                           "sample_explanations")},
+        "cognition": {k: (cog_report or {}).get(k) for k in
+                      ("status", "concept", "rules_total", "rules_reusable",
+                       "experiences_total", "problems_this_cycle", "correct_this_cycle",
+                       "live_solve_rate", "repeated_failure_rate", "by_level",
+                       "sample_experience")},
+        "cognition_probe": {k: (probe_report or {}).get(k) for k in
+                            ("status", "frozen_at", "problem_count", "first_derive_rate",
+                             "latest_derive_rate", "latest_lift", "before_after_gain",
+                             "trend", "latest_by_level")},
         "comprehension": {k: comp_report.get(k) for k in
                           ("status", "comprehension_score", "consequence",
                            "consequence_baseline", "consequence_z", "beats_baseline",

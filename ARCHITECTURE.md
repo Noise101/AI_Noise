@@ -93,6 +93,39 @@ folded onto a small closed coarse ontology (生き物 / 道具 / 場所 / …).
   co-occurrence propagation? One-sided significance over per-word gains; it is a
   measure of Noise's own inference, not of agreement with any source.
 
+### Knowledge → capability loop (`cognition_v1`, `capability_probe_v1`)
+
+Reading accumulates knowledge; this loop turns it into problem-solving.
+`AI_NOISE_COGNITION=0` disables it. Each reading cycle, over one concept from
+the book just read:
+
+1. **retrieve** — the concept's belief, the book's events mentioning it, and
+   its understood neighbours (semantic, ranked by relevance).
+2. **abstract** — `(subject_genus, verb, object_genus)` triples seen in ≥2
+   books become rules with support / counterexamples; a failed application
+   weakens a rule (invariant 8). Vacuous verbs (ある/いる/なる/する/…) never form a rule.
+3. **generate** — problems it can auto-grade from its own verified data:
+   `event_recall` (next verb in a book), `genus_recall`, `odd_one_out` /
+   `common_property` (genus combination), `property_transfer` (predict an
+   action from a cross-book rule — provably near-flat on this corpus, kept as
+   an honest diagnostic).
+4. **reason** — explicit retrieve / classify / compose steps, recorded; no LLM
+   (invariants 10, 13). `わからない` when nothing supports an answer.
+5. **self-evaluate** — was knowledge used? does the answer contradict a belief?
+   is confidence calibrated? (This is not the correctness grade.)
+6. **experience** — a Situation / Thought / Action / Result / Evaluation /
+   Correction record, success and failure alike; the next attempt at a similar
+   problem reads the Correction. Repeated failures are flagged.
+
+**Capability is the frozen probe, not the rule count** (invariant 16).
+`capability_probe_v1` freezes ~10–40 genus-combination problems whose **gold is
+the independent ja.wiktionary genus** (from word_meaning's already-fetched
+gists — no network), keeping only ones the frequency baseline gets wrong. Every
+`PROBE_INTERVAL` cycles the current reasoner re-attempts the frozen set; the
+recorded `derive_rate` / `lift` / trend say whether reasoning over the growing
+belief graph is getting better. It starts small and grows as the Tatoeba fuel
+adds concrete vocabulary.
+
 ## Predict within the event, not the next event
 
 The parsed corpus (isolated `subject|verb|object` clauses from real 19th-century
