@@ -447,7 +447,9 @@ def _observe(state: dict, stories: list[dict]) -> None:
 
 def _entity_vocab(state: dict, known_words: "set[str] | None") -> list[str]:
     """Word-like tokens that appeared as a subject/object at least twice -- the
-    things worth having a meaning for.  Ordered most-read first."""
+    things worth having a meaning for.  `known_words` (curriculum coverage plus,
+    from the reader, the Tatoeba vocab-fuel tokens) restricts the pool so
+    research is not spent on one-off parser debris.  Ordered most-read first."""
     ent = state.get("entities", {})
     return [w for w, _ in sorted(ent.items(), key=lambda kv: -kv[1])
             if ent[w] >= 2 and _is_wordlike(w)

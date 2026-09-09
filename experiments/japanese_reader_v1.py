@@ -454,10 +454,21 @@ def run_once(runtime: Path) -> dict:
                 wm_stories.append({"url": b["url"], "events": evs})
     # renewable concrete-noun fuel: Tatoeba reader texts Noise parsed itself,
     # for word meaning only -- never a shelf book, never a benchmark story.
+    from collections import Counter as _Counter
+    _fuel_tok: _Counter = _Counter()
     for i, text in enumerate(cur.get("_vocab_fuel_texts", [])):
         evs = _heuristic_only(_events_of(corpus._modernise(text)))
         if len(evs) >= 3:
             wm_stories.append({"url": f"vocab-fuel://{i}", "events": evs})
+            for e in evs:
+                for slot in ("subject", "obj"):
+                    tok = (e.get(slot) or "").strip()
+                    if tok:
+                        _fuel_tok[tok] += 1
+    # fuel tokens seen >= 2 times join the word-meaning vocabulary (they never
+    # become curriculum-"known" via a graduated book, but they are still words
+    # Noise read and can research)
+    wm_known = curriculum._known_set(cur) | {t for t, n in _fuel_tok.items() if n >= 2}
     # the RNN's cumulative training ledger (collections it has EVER trained on):
     # a collection here can never be moved into a held-out tier.
     rnn_ever_trained_cols = set(
@@ -517,7 +528,7 @@ def run_once(runtime: Path) -> dict:
     prev_wm = _read(runtime / WORD_MEANING_FILE)
     try:
         wm_report = word_meaning.learn_and_evaluate(
-            wm_stories, prev_wm, cycle, known_words=curriculum._known_set(cur))
+            wm_stories, prev_wm, cycle, known_words=wm_known)
     except Exception as exc:                      # never let it break the reader
         wm_report = {**(prev_wm or {}), "status": "error", "error": repr(exc)}
     _write(runtime / WORD_MEANING_FILE, wm_report)
