@@ -198,20 +198,34 @@ def _plausible_genus(g: str) -> bool:
 
 
 # --- usage profile: how Noise sees the word used ---------------------------
-_ACT_VERBS = ("あるく", "はしる", "とぶ", "およぐ", "みる", "きく", "かぐ", "たべる",
-              "のむ", "いう", "はなす", "なく", "ほえる", "わらう", "おこる", "なげる",
-              "かんがえる", "おもう", "ねる", "おきる", "すむ", "うごく", "はたらく",
-              "よぶ", "こたえる", "たずねる")
-_HANDLE_VERBS = ("つくる", "もつ", "つかう", "なげる", "とる", "かう", "うる", "こわす",
-                 "わる", "きる", "ひらく", "しめる", "はこぶ", "おく", "ひろう", "みがく")
-_EAT_VERBS = ("たべる", "のむ", "くう", "かじる", "あじわう")
-_GOAL_PARTICLE_HINT = ("いく", "くる", "かえる", "はいる", "でる", "つく", "のぼる",
-                       "おりる", "すすむ")
+# The heuristic parser emits noisy, often multi-token, kanji-or-kana verb
+# strings ("持って来て取りおろさす").  Match on a stem *substring* and include
+# both scripts.  Behaviour that needs a mind (perceive / speak / feel) marks a
+# creature; motion alone does not (a train moves).
+_ANIMATE_VERBS = ("みる", "見", "きく", "聞", "かぐ", "嗅", "いう", "言", "はなす", "話",
+                  "こたえ", "答え", "たずね", "尋ね", "よぶ", "呼", "なく", "泣",
+                  "ほえ", "吠", "わら", "笑", "おこ", "怒", "おもう", "思", "かんがえ",
+                  "考え", "ねむ", "眠", "ねる", "寝", "おき", "起", "たべ", "食べ",
+                  "のむ", "飲", "くう", "食う", "はたらく", "働", "あそ", "遊", "うたい",
+                  "歌", "すわ", "座", "にげ", "逃")
+_MOTION_VERBS = ("あるく", "歩", "はしる", "走", "とぶ", "飛", "およ", "泳", "くる", "来",
+                 "いく", "行", "かえ", "帰", "つく", "着", "とまる", "止ま", "すすむ",
+                 "進", "のぼ", "登", "上", "おり", "降", "でる", "出", "はいる", "入",
+                 "うごく", "動", "きえる", "消え", "ながれ", "流れ")
+_HANDLE_VERBS = ("つくる", "作", "もつ", "持", "つかう", "使", "なげ", "投げ", "とる",
+                 "取", "かう", "買", "うる", "売", "こわ", "壊", "わる", "割", "きる",
+                 "切", "ひらく", "開", "あけ", "開け", "しめ", "閉", "はこぶ", "運",
+                 "おく", "置", "ひろう", "拾", "みがく", "磨", "ひく", "引", "つかむ",
+                 "掴", "にぎ", "握", "むけ", "向け", "かつ", "担", "ならす", "鳴らす",
+                 "ふく", "吹", "あて", "当て", "よせ", "寄せ", "すすめ", "与え", "召")
+_EAT_VERBS = ("たべ", "食べ", "のむ", "飲", "くう", "食う", "かじ", "齧", "あじわ", "味わ")
+_WEAR_VERBS = ("きる", "着", "はく", "穿", "かぶ", "被", "まと", "纏", "めす", "召")
 
 
 def _verb_has(verb: str, stems: "tuple[str, ...]") -> bool:
     v = _norm(verb)
-    return any(v == s or v.startswith(s) or s in v for s in stems)
+    return any(s in v or s[:2] in v for s in stems if len(s) >= 2) \
+        or any(s in v for s in stems if len(s) == 1)
 
 
 def _reading_class(profile: dict) -> "tuple[str, float]":
@@ -224,22 +238,33 @@ def _reading_class(profile: dict) -> "tuple[str, float]":
     sv = Counter(profile.get("subj_verbs", {}))
     ov = Counter(profile.get("obj_verbs", {}))
     total = subj + obj
-    if total < 2:
+    if total < 3:
         return "", 0.0
-    act = sum(n for v, n in sv.items() if _verb_has(v, _ACT_VERBS))
+    animate = sum(n for v, n in sv.items() if _verb_has(v, _ANIMATE_VERBS))
+    hunted = sum(n for v, n in ov.items() if _verb_has(v, ("かり", "狩", "つかまえ", "捕")))
+    motion = sum(n for v, n in sv.items() if _verb_has(v, _MOTION_VERBS))
     handled = sum(n for v, n in ov.items() if _verb_has(v, _HANDLE_VERBS))
     eaten = sum(n for v, n in ov.items() if _verb_has(v, _EAT_VERBS))
-    goal = sum(n for v, n in ov.items() if _verb_has(v, _GOAL_PARTICLE_HINT))
-    if eaten and eaten >= handled:
-        return "食べ物", min(1.0, eaten / 3)
-    if act and act >= max(1, handled):
-        # acts under its own power -> a creature (person is a sub-case the
-        # taxonomy/testimony can refine)
-        return "生き物", min(1.0, act / 3)
-    if handled and subj == 0:
-        return "道具", min(1.0, handled / 3)
-    if goal and subj == 0:
-        return "場所", min(1.0, goal / 3)
+    worn = sum(n for v, n in ov.items() if _verb_has(v, _WEAR_VERBS))
+    suru = sum(n for v, n in ov.items() if _norm(v) in ("する", "した", "して行る"))
+    obj_ratio = obj / total
+
+    if eaten and eaten >= handled and eaten >= animate:
+        return "食べ物", min(1.0, 0.3 + eaten / total)
+    if animate + hunted and animate + hunted >= handled:
+        # perceives / speaks / feels / is hunted -> a creature (person is a
+        # sub-case that testimony/taxonomy refines)
+        return "生き物", min(1.0, 0.3 + (animate + hunted) / total)
+    if worn and obj_ratio >= 0.5:
+        return "道具", min(1.0, 0.4 + worn / total)          # clothing
+    if obj_ratio >= 0.65 and handled:
+        return "道具", min(1.0, 0.35 + handled / total)      # a handled thing
+    if motion and handled and not animate:
+        return "道具", min(0.8, 0.35 + handled / total)      # moves + handled = vehicle
+    if suru and subj <= total * 0.2 and not handled:
+        return "出来事", min(0.8, 0.3 + suru / total)        # X をする -> an act
+    if obj_ratio >= 0.6 and not (animate or motion or eaten):
+        return "道具", 0.3                                   # only ever acted on
     return "", 0.0
 
 

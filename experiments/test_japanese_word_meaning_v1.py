@@ -64,6 +64,22 @@ class ReadingClassTest(unittest.TestCase):
                                             "subj_verbs": {"あるく": 1}, "obj_verbs": {}}),
                          ("", 0.0))
 
+    def test_moves_and_is_handled_reads_as_a_vehicle_not_a_creature(self):
+        prof = {"subj": 5, "obj": 5,
+                "subj_verbs": {"着く": 3, "走る": 2},          # motion only, no mind
+                "obj_verbs": {"止める": 3, "引く": 2}}
+        cls, _ = wm._reading_class(prof)
+        self.assertEqual(cls, "道具")
+
+    def test_worn_object_reads_as_a_tool(self):
+        prof = {"subj": 0, "obj": 6, "subj_verbs": {},
+                "obj_verbs": {"着る": 4, "かける": 2}}
+        self.assertEqual(wm._reading_class(prof)[0], "道具")
+
+    def test_x_wo_suru_reads_as_an_event(self):
+        prof = {"subj": 0, "obj": 5, "subj_verbs": {}, "obj_verbs": {"する": 5}}
+        self.assertEqual(wm._reading_class(prof)[0], "出来事")
+
 
 class ObserveTest(unittest.TestCase):
     def test_profiles_and_entities_come_from_heuristic_events_only(self):
