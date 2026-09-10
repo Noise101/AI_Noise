@@ -105,7 +105,7 @@ _GENUS = re.compile(
 # A small closed set of everyday classes.  Both the fine dictionary genus and
 # the local model's answer are folded onto this so beliefs from different
 # sources can agree or conflict.
-COARSE_CLASSES = ("生き物", "人", "植物", "食べ物", "道具", "場所",
+COARSE_CLASSES = ("生き物", "人", "身体", "植物", "食べ物", "道具", "場所",
                   "自然物", "出来事", "気持ち")
 _COARSE_RULES = (
     (("哺乳", "動物", "獣", "けもの", "鳥類", "野鳥", "海鳥", "魚類", "さかな",
@@ -114,7 +114,8 @@ _COARSE_RULES = (
       "蛙", "亀", "蛇", "蝙蝠", "鶴", "烏", "鳩", "蟻", "生物", "家畜", "幼虫",
       "怪物", "化け物", "お化け", "幽霊", "亡霊", "鬼", "妖怪"), "生き物"),
     (("人物", "人間", "人類", "者", "王", "女王", "妖精", "巨人", "小人",
-      "少年", "少女", "老人", "青年", "幼児", "武士", "きこり", "登場人物", "職業",
+      "少年", "少女", "老人", "青年", "幼児", "児童", "園児", "乳児", "赤子",
+      "武士", "きこり", "登場人物", "職業",
       "家来", "女性", "男性", "男親", "女親", "父", "母", "娘", "息子",
       "兄", "姉", "弟", "妹", "夫", "妻", "夫婦", "師匠", "教師", "医師", "牧師",
       "漁師", "看護師", "官吏", "役人", "警官",
@@ -122,7 +123,15 @@ _COARSE_RULES = (
       "婦人", "主人", "君主", "神", "使用人",
       "召使", "奴隷", "呼称", "敬称", "階級", "成員", "構成員", "官職", "従事者",
       "責任者", "軍隊", "一行", "一団", "家族", "仲間", "連中", "群衆", "民衆",
-      "農業", "農家", "商人", "貴族", "国民", "住民", "村民", "難民", "乗組員"), "人"),
+      "農業", "農家", "商人", "貴族", "国民", "住民", "村民", "難民", "乗組員",
+      "会社員", "公務員", "従業員", "職員", "店員", "社員", "隊員", "委員",
+      "係員", "駅員", "船員", "工員"), "人"),
+    # a body / body-part / organ / bodily fluid -- physical, non-agentive; a
+    # child distinguishes "my hand" from "a creature" and from "a tool"
+    (("身体", "からだ", "肉体", "全身", "上半身", "下半身", "臓器", "内臓", "器官",
+      "循環器", "消化器", "呼吸器", "泌尿器", "生殖器", "感覚器", "骨格", "骨",
+      "筋肉", "血液", "体液", "体毛", "毛髪", "皮膚", "部位", "身体部位", "上肢",
+      "下肢", "頭部", "顔面", "五体"), "身体"),
     (("植物", "草花", "花", "草木", "樹木", "大木", "野草", "薬草", "香草", "牧草",
       "山菜", "野菜", "きのこ", "苔", "作物", "穀類", "根菜", "球根", "苗", "蔦"), "植物"),
     (("食べ物", "食物", "食材", "食品", "食料", "食糧", "料理", "菓子", "果実",
@@ -139,35 +148,56 @@ _COARSE_RULES = (
       "森", "森林", "林", "山林", "谷", "渓谷", "丘", "丘陵", "岸", "海岸", "浜",
       "砂浜", "野原", "平原", "荒野", "洞窟", "洞穴", "建物", "建築物", "部屋",
       "道路", "通り", "施設", "空間", "区域", "区画", "行政区画", "地名", "名所",
-      "公園", "庭園", "農園", "田畑", "畑", "街", "港", "駅", "城", "宮殿",
-      "神殿", "本堂", "寺院", "僧院", "病院", "学校", "塔", "会館", "館", "広場",
-      "敷地", "領域", "領地", "近所", "近辺", "周辺", "郊外"), "場所"),
+      "公園", "庭園", "農園", "園地", "遊園地", "動物園", "植物園", "田畑",
+      "畑", "街", "港", "駅", "城", "宮殿",
+      "神殿", "神社", "神宮", "寺社", "本堂", "寺院", "僧院", "病院", "学校",
+      "塔", "会館", "館", "広場", "敷地", "領域", "領地", "近所", "近辺",
+      "周辺", "郊外"), "場所"),
     (("天体", "星", "太陽", "月", "自然現象", "鉱物", "岩石", "宝石", "岩", "砂",
       "石", "雲", "雪", "霧", "光線", "元素", "物質", "液体", "気体", "混合気体",
-      "体液", "天然", "自然物"), "自然物"),
+      "天然", "自然物"), "自然物"),
     (("現象", "出来事", "事件", "儀式", "行事", "戦い", "戦争", "行為", "行動",
       "動作", "祭り", "遊戯", "競技", "作業", "活動", "催し"), "出来事"),
     (("感情", "気持ち", "心情", "情動", "情念", "心理状態"), "気持ち"),
 )
 
 
-# substrings that VETO a class even if one of its keys also matched -- e.g.
-# "末梢神経障害" contains 神 (person) but is a disease, "兵器" contains a person
-# key via 器 collisions, "神社" is a place not a deity.
+# A class key that appears only in the MIDDLE of a longer word is unreliable
+# ("末梢神経障害" contains 神; "民話" contains 民).  The suffix pass below handles
+# most collisions structurally; this veto covers the few that survive it.
 _COARSE_BLOCK = {
-    "人": ("神経", "神話", "精神", "神社", "神殿", "神宮", "神通", "神秘",
-           "民話", "民謡", "民家", "兵器", "武者絵"),
+    "人": ("神経", "神話", "精神", "神通", "神秘", "民話", "民謡", "民家"),
+    "生き物": ("生物学", "微生物学", "動物園", "動物学"),
+    "場所": ("宮中",),
 }
 
 
 def _coarse(fine: str) -> str:
-    """Fold a fine genus / free-text class onto the closed coarse ontology."""
+    """Fold a fine dictionary genus / free-text class string onto the closed
+    coarse ontology.  Normalisation of an external source's wording -- NOT an
+    answer handed to Noise; a word is 'understood' only on its own reading
+    evidence.
+
+    Two passes, most-reliable first:
+      1. the genus string ENDS with a class key -- it is the head noun of a
+         definition ("小さな道具" / "鍵盤楽器" / "教育施設" / "内臓の一つ"→内臓).
+         A definition head is almost never a spurious substring.
+      2. a class key appears anywhere, minus an explicit collision veto.
+    Rule order breaks ties (生き物 → 人 → 身体 → 植物 → 食べ物 → 道具 → …), so a
+    more specific class wins when two keys match.
+    """
     if not fine:
         return ""
+    fine = fine.strip().rstrip("。．、,")
     if fine in COARSE_CLASSES:
         return fine
+    # trailing qualifier that is not part of the head noun
+    head = re.sub(r"(の(一種|一つ|総称|名|仲間)|など|類)$", "", fine) or fine
     for keys, cls in _COARSE_RULES:
-        if any(k in fine for k in keys) and not any(b and b in fine for b in _COARSE_BLOCK.get(cls, ())):
+        if any(head.endswith(k) or fine.endswith(k) for k in keys):
+            return cls
+    for keys, cls in _COARSE_RULES:
+        if any(k in fine for k in keys) and not any(b in fine for b in _COARSE_BLOCK.get(cls, ())):
             return cls
     return ""
 

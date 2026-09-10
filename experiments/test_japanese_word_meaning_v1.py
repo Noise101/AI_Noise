@@ -49,17 +49,25 @@ class CoarseOntologyTest(unittest.TestCase):
             self.assertEqual(wm._coarse(g), "場所", g)
         for g in ("食材", "飲料", "乳製品"):
             self.assertEqual(wm._coarse(g), "食べ物", g)
-        for g in ("体液", "混合気体", "液体"):
+        for g in ("混合気体", "液体", "鉱物", "岩石"):
             self.assertEqual(wm._coarse(g), "自然物", g)
 
-    def test_block_list_stops_substring_collisions(self):
-        # 兵器 must not become 人 via a person key; 末梢神経障害 (神) must not either
+    def test_body_class_places_organs_and_body_parts(self):
+        for g in ("臓器", "内臓", "器官", "循環器", "感覚器", "体液", "骨格",
+                  "筋肉", "血液", "内臓の一つ"):
+            self.assertEqual(wm._coarse(g), "身体", g)
+        self.assertIn("身体", wm.COARSE_CLASSES)
+
+    def test_suffix_pass_beats_mid_word_collisions(self):
+        # the definition-head suffix wins before a middle-of-word substring
+        self.assertEqual(wm._coarse("木管楽器"), "道具")     # 楽器, not 植物 via 木
+        self.assertEqual(wm._coarse("水族館"), "場所")       # 館, not 自然物 via 水
+        self.assertEqual(wm._coarse("鍵盤楽器"), "道具")
+        self.assertEqual(wm._coarse("教育施設"), "場所")
         self.assertEqual(wm._coarse("兵器"), "道具")
-        self.assertEqual(wm._coarse("末梢神経障害"), "")
-        self.assertEqual(wm._coarse("神社"), "")
-        self.assertEqual(wm._coarse("水族館"), "場所")     # 館, not 自然物 via 水
-        # a bare deity is still a person (folktale genus)
-        self.assertEqual(wm._coarse("神"), "人")
+        self.assertEqual(wm._coarse("神社"), "場所")         # a shrine is a place
+        self.assertEqual(wm._coarse("神"), "人")             # a bare deity is a person
+        self.assertEqual(wm._coarse("末梢神経障害"), "")     # 神 mid-word, vetoed
 
     def test_no_regression_on_abstract_genus_strings(self):
         for g in ("事実", "現実", "概念", "様子", "全体像", "経験", "性質", "状況・状態"):

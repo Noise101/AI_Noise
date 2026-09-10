@@ -91,14 +91,22 @@ folded onto a small closed coarse ontology (生き物 / 道具 / 場所 / …).
   `japanese_prediction_v1` adds one more channel: a word whose real story events
   Noise keeps rating implausible under its believed genus contributes a capped
   (≤0.30) penalty against that genus.
-- **Genus classification** (2026-09-10) — testimony genus strings are folded to
-  the 9 coarse classes by `_coarse` (`_COARSE_RULES` keyword table +
-  `_COARSE_BLOCK` collision veto), with a last-run fallback in `_wiktionary_gist`
-  and a wikipedia first-two-sentences fallback. A held-out probe whose genus
-  fetch came back empty is **retried** (`REFS_MAX_ATTEMPTS`), not cached as a
-  permanent exclusion — a transient fetch failure used to drop real concrete
-  words (太陽 / ランプ / お金) from the held-out pool forever, which is most of why
-  it sat at ~19–20.
+- **Genus classification** (2026-09-10) — a fine dictionary genus string is
+  folded onto the **10** coarse classes (`生き物 / 人 / 身体 / 植物 / 食べ物 /
+  道具 / 場所 / 自然物 / 出来事 / 気持ち`; the same tuple is mirrored in
+  `cognition_v1.COARSE` and `japanese_dialogue_v1.COARSE`) by `_coarse`, in two
+  passes: (1) the string ENDS with a class key — it is the definition's head
+  noun ("鍵盤楽器" → 楽器 → 道具, "教育施設" → 施設 → 場所, "内臓の一つ" → 内臓 →
+  身体), which is almost never a spurious substring; (2) a class key appears
+  anywhere, minus a small `_COARSE_BLOCK` veto for the collisions the suffix
+  pass does not catch ("末梢神経障害" contains 神). Rule order breaks ties. This
+  is normalisation of an external source's wording, not an answer — a word is
+  "understood" only on its own reading evidence. `_wiktionary_gist` has a
+  last-run fallback and a wikipedia first-two-sentences fallback; a held-out
+  probe whose genus fetch came back empty is **retried** (`REFS_MAX_ATTEMPTS`),
+  not cached as a permanent exclusion (a transient fetch failure used to drop
+  real concrete words — 太陽 / ランプ / お金 — from the pool forever, most of why
+  it sat at ~19–20).
 - **Capability (frozen, held-out)** — does the belief machinery put a held-out
   word (genus-validated, concrete) in the right coarse class more often than naive
   co-occurrence propagation? One-sided significance over per-word gains; it is a

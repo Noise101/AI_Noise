@@ -101,6 +101,7 @@ _VACUOUS = ("ある", "あった", "いる", "いた", "した", "する", "し�
 _GENUS_VC_FIT = {
     "生き物": {"motion", "mental", "handle", "ingest", "change", "other"},
     "人": {"motion", "mental", "handle", "ingest", "change", "other"},
+    "身体": {"motion", "change", "other"},        # a body part moves / changes, doesn't speak
     "自然物": {"motion", "change", "other"},
     "道具": {"motion", "change", "other"},
     "食べ物": {"change", "other"},

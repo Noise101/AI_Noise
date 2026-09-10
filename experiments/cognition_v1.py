@@ -42,7 +42,7 @@ EXPERIENCE_CAP = 4000
 RULES_CAP = 3000
 HISTORY_CAP = 400
 
-COARSE = ("生き物", "人", "植物", "食べ物", "道具", "場所", "自然物", "出来事", "気持ち")
+COARSE = ("生き物", "人", "身体", "植物", "食べ物", "道具", "場所", "自然物", "出来事", "気持ち")
 # verbs that carry no information about the subject's kind -- every entity does them
 _VACUOUS_VERBS = ("ある", "いる", "なる", "する", "くる", "来る", "いく", "行く", "みる",
                   "見る", "おもう", "思う", "いう", "言う", "できる", "しまう", "です",

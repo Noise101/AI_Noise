@@ -158,18 +158,28 @@ corpus.**
 
 **2026-09-10 — that bottleneck was substantially a bug, not corpus poverty.**
 `japanese_word_meaning_v1` had researched ~369 words but `_coarse` (fine genus →
-9-class fold) placed only ~102, and `selection_refs` cached *transient fetch
-failures* permanently (267 of 348 held-out probes had an empty genus and were
-never retried — including 太陽 / ランプ / お金 / 手紙 / 人形 / 通り). Fixes:
-`_COARSE_RULES` expanded (女性・男親・使用人・官職・軍隊→人; 装置・家具・書物・布巾→道具;
-首都・施設・行政区画→場所; 食材・飲料→食べ物; 体液・混合気体→自然物) with a
-`_COARSE_BLOCK` veto for substring collisions (兵器→道具 not 人; 末梢神経障害→"" not 人);
-`_wiktionary_gist` extraction widened (more `…である`-style patterns, last-run
-fallback, wikipedia `exsentences` 1→2); `selection_refs` empty-genus entries are
-now **retried up to `REFS_MAX_ATTEMPTS`** instead of cached forever. Offline:
-`_coarse`-placeable researched words 102 → 155. This feeds ALL five stuck
-signals (bigger held-out set, more non-creature subjects/objects for the
-prediction module, more concrete concepts for dialogue and the cognition probe).
+coarse fold) placed only ~102, and `selection_refs` cached *transient fetch
+failures* permanently (267 of 348 held-out probes had an empty genus, never
+retried — 太陽 / ランプ / お金 / 手紙 / 人形 / 通り). Fixes:
+
+- A **10th coarse class 身体** (body / organ / body-part / bodily fluid) added to
+  `COARSE_CLASSES`, mirrored in `cognition_v1.COARSE`,
+  `japanese_dialogue_v1.COARSE`, `japanese_prediction_v1._GENUS_VC_FIT`.
+- `_coarse` reworked to a **two-pass matcher**: pass 1 needs the class key to be
+  a SUFFIX of the genus string (the definition head noun — 鍵盤楽器→道具,
+  教育施設→場所, 内臓の一つ→身体), which structurally removes most mid-word
+  collisions (木管楽器 no longer 植物 via 木; 水族館 no longer 自然物 via 水; 神社→場所);
+  pass 2 is the old anywhere-substring with a small `_COARSE_BLOCK` veto
+  (末梢神経障害 contains 神). Rule order (生き物→人→身体→植物→…) breaks ties.
+- `_COARSE_RULES` keyword coverage widened across every class.
+- `_wiktionary_gist` extraction widened (more `…である`/…をいう/…と呼ばれ patterns,
+  last-run fallback, wikipedia `exsentences` 1→2).
+- `selection_refs` empty-genus entries **retried up to `REFS_MAX_ATTEMPTS`**.
+
+Offline: `_coarse`-placeable researched words 102 → 142, 0 regressions. On the
+live worker the held-out set moved 20 → 23 in ~10 cycles and keeps climbing.
+Feeds ALL five stuck signals. `_coarse` is normalisation of an external source's
+wording — a word is still "understood" only on its own reading evidence.
 Still TODO if this is not enough: a graded developmental corpus, or parser
 object-extraction.
 
