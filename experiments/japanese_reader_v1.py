@@ -36,6 +36,7 @@ import reading_llm_v1 as reading_llm
 import cognition_v1 as cognition
 import capability_probe_v1 as capability_probe
 import japanese_dialogue_v1 as ja_dialogue
+import japanese_prediction_v1 as ja_prediction
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RUNTIME = ROOT / ".local"
@@ -49,6 +50,7 @@ WORD_MEANING_FILE = "reading-word-meaning.json"
 COGNITION_FILE = "cognition-state.json"
 PROBE_FILE = "cognition-probe.json"
 JA_DIALOGUE_FILE = "japanese-dialogue.json"
+PREDICTION_FILE = "reading-prediction.json"
 CAREGIVER_FILE = "caregiver.json"
 AIDED_FILE = "reading-aided.json"          # evidence-0 aided readings (diagnostic store)
 STATUS_FILE = "reading-status.json"
@@ -598,9 +600,13 @@ def run_once(runtime: Path) -> dict:
     # word meaning -- learn what the entities Noise reads DENOTE, from
     # ja.wiktionary / ja.wikipedia (CC-BY-SA); tested by self-explanation
     prev_wm = _read(runtime / WORD_MEANING_FILE)
+    # last cycle's prediction-failure feedback: capped counter-evidence to the
+    # genus a word's story behaviour kept contradicting (one channel, invariant 10)
+    pred_feedback = (_read(runtime / PREDICTION_FILE) or {}).get("prediction_feedback", {})
     try:
         wm_report = word_meaning.learn_and_evaluate(
-            wm_stories, prev_wm, cycle, known_words=wm_known)
+            wm_stories, prev_wm, cycle, known_words=wm_known,
+            prediction_feedback=pred_feedback)
     except Exception as exc:                      # never let it break the reader
         wm_report = {**(prev_wm or {}), "status": "error", "error": repr(exc)}
     _write(runtime / WORD_MEANING_FILE, wm_report)
@@ -635,6 +641,19 @@ def run_once(runtime: Path) -> dict:
             cog_report = {**(cog_report or {}), "status": "error", "error": repr(exc)}
         _write(runtime / COGNITION_FILE, cog_report)
         _write(runtime / PROBE_FILE, probe_report)
+
+    # predict the next event's verb CLASS from Noise's concepts, grade it,
+    # revise a concept on a persistent miss.  The self-correction loop the
+    # Japanese side was missing.  AI_NOISE_JA_PREDICTION=0 turns it off.
+    pred_report = _read(runtime / PREDICTION_FILE)
+    if ja_prediction.enabled():
+        try:
+            pred_report = ja_prediction.run_prediction(
+                cycle, all_stories, heur_store.get(book_id, []) if book_id else [],
+                wm_report.get("beliefs", {}), (cog_report or {}).get("rules", []), pred_report)
+        except Exception as exc:                      # isolate: never stalls reading
+            pred_report = {**(pred_report or {}), "status": "error", "error": repr(exc)}
+        _write(runtime / PREDICTION_FILE, pred_report)
 
     # say something in Japanese from what reading taught, learn if it landed.
     # A use-test for the beliefs; the partner is an environment, not a teacher.
@@ -719,7 +738,7 @@ def run_once(runtime: Path) -> dict:
                           "corrections", "llm_status", "llm_asked_count",
                           "test_words", "measured", "mean_gain", "z",
                           "significant_now", "capability_confirmed",
-                          "sample_explanations")},
+                          "sample_explanations", "prediction_feedback_applied")},
         "cognition": {k: (cog_report or {}).get(k) for k in
                       ("status", "concept", "rules_total", "rules_reusable",
                        "experiences_total", "problems_this_cycle", "correct_this_cycle",
@@ -743,6 +762,18 @@ def run_once(runtime: Path) -> dict:
                              # legacy keys (challenge-backed) for status continuity
                              "problem_count", "first_derive_rate", "latest_derive_rate",
                              "latest_lift", "before_after_gain", "trend", "latest_by_level")},
+        "prediction": {k: (pred_report or {}).get(k) for k in
+                       ("status", "eval_regime", "regime_reset_from", "train_stories",
+                        "recomputed", "selection", "selection_significant_streak",
+                        "selection_next_streak_train", "selection_measurements",
+                        "selection_stories", "reserve_stories", "final_status",
+                        "final_opened_count", "final_query_budget", "final_result",
+                        "capability_confirmed", "capability_confirmed_ever",
+                        "capability_confirmed_current_model", "confirmed_checkpoints",
+                        "capability_pending_reason", "prediction_trend",
+                        "secondary_diagnostic_next_verb_class",
+                        "live_this_cycle", "outcomes_tracked", "feedback_words",
+                        "corrupters", "collections_disjoint", "tier_collection_counts")},
         "japanese_dialogue": {k: (dlg_report or {}).get(k) for k in
                               ("status", "frozen_count", "practice_turns", "probe_rounds",
                                "best_strategy", "first_understood_rate", "overall_understood_rate",

@@ -491,6 +491,10 @@ def _revise_belief(state: dict, word: str, cycle: int,
     testimony = [] if suppress_testimony else _testimony_classes(state, word)
     read_cls, read_str = _reading_class(state["profiles"].get(word, {}))
     nbr_cls, nbr_str = _neighbour_class(state, word)
+    # prediction-failure feedback (japanese_prediction_v1): a word whose story
+    # behaviour has kept contradicting its believed genus.  One capped channel --
+    # it can lower a genus's evidence but never by itself pick the winner.
+    pred_fb = (state.get("prediction_feedback") or {}).get(word) or {}
 
     t_weight: Counter = Counter()
     sources: dict[str, list[str]] = {}
@@ -504,13 +508,22 @@ def _revise_belief(state: dict, word: str, cycle: int,
     if nbr_cls:
         e_weight[nbr_cls] += nbr_str
         sources.setdefault(nbr_cls, []).append("neighbours")
+    against = pred_fb.get("against") if not suppress_testimony else ""
+    pred_pen = min(0.30, float(pred_fb.get("strength", 0.0))) if against else 0.0
+    if against and pred_pen > 0:
+        t_weight[against] = max(0.0, t_weight.get(against, 0.0) - pred_pen)
+        e_weight[against] = max(0.0, e_weight.get(against, 0.0) - pred_pen)
+        sources.setdefault(against, []).append("prediction_miss")
+    # if the word's own usage class is the very genus its story behaviour keeps
+    # contradicting, discount that reading strength too
+    read_str_eff = max(0.0, read_str - pred_pen) if (against and read_cls == against) else read_str
 
     # a word's OWN usage profile (reading_usage) + testimony is primary evidence;
     # the neighbour vote only corroborates -- "椅子 sits near people" must not
     # outweigh "椅子 is picked up, moved, offered" (a direct observation).
     def _own(cls: str) -> float:
         return min(TESTIMONY_CAP, t_weight.get(cls, 0.0)) + \
-            (min(EVIDENCE_HEADROOM, read_str) if read_cls == cls else 0.0)
+            (min(EVIDENCE_HEADROOM, read_str_eff) if read_cls == cls else 0.0)
 
     classes = set(t_weight) | set(e_weight)
     if not classes:
@@ -531,11 +544,13 @@ def _revise_belief(state: dict, word: str, cycle: int,
     t_best = min(TESTIMONY_CAP, t_weight.get(best, 0.0))
     e_best = min(EVIDENCE_HEADROOM, e_weight.get(best, 0.0))
     understood = confidence >= UNDERSTOOD_CONF and (
-        (read_cls == best and read_str >= UNDERSTOOD_EVIDENCE) or e_best >= UNDERSTOOD_EVIDENCE)
+        (read_cls == best and read_str_eff >= UNDERSTOOD_EVIDENCE) or e_best >= UNDERSTOOD_EVIDENCE)
 
     revisions = list(prev.get("revisions", []))
     if prev.get("genus") and prev["genus"] != best:
-        reason = ("reading evidence overruled testimony"
+        reason = ("prediction failures contradicted the genus"
+                  if against and prev["genus"] == against else
+                  "reading evidence overruled testimony"
                   if e_weight.get(best, 0.0) > e_weight.get(prev["genus"], 0.0)
                   else "re-weighted")
         revisions.append({"cycle": cycle, "from": prev["genus"], "to": best,
@@ -609,8 +624,12 @@ def _score_against_ref(expl: dict, ref: dict) -> float:
 
 def learn_and_evaluate(stories: list[dict], previous: dict | None, cycle: int,
                        known_words: "set[str] | None" = None,
-                       llm: "_LLMClient | None" = None) -> dict:
+                       llm: "_LLMClient | None" = None,
+                       prediction_feedback: "dict | None" = None) -> dict:
     state = _migrate(dict(previous or _blank()))
+    # capped counter-evidence from japanese_prediction_v1 (a word whose story
+    # behaviour keeps contradicting its believed genus); transient, not persisted
+    state["prediction_feedback"] = prediction_feedback or {}
     _observe(state, stories)
 
     # re-freeze the held-out set / scrub the taxonomy when the policy bumps
@@ -730,8 +749,10 @@ def learn_and_evaluate(stories: list[dict], previous: dict | None, cycle: int,
     state["learning_curve"] = curve[-200:]
     state["significant_now"] = significant
     state["capability_confirmed"] = bool(significant and prior_sig)
+    applied_feedback = sorted(state.pop("prediction_feedback", {}))   # transient
 
     return {**state, "status": "measured" if n else "insufficient_test_words",
+            "prediction_feedback_applied": applied_feedback,
             "vocab": len(vocab), "researched_count": len(state["researched"]),
             "taxonomy_size": len(state["taxonomy"]),
             "belief_count": len(state["beliefs"]), "understood_count": understood_now,

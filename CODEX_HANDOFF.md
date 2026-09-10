@@ -135,6 +135,29 @@ probe's tiers AND the dialogue probe. Faster concrete-noun throughput is the
 highest-leverage next step; do not lower `MIN_SELECTION_PROBLEMS` /
 `TEST_SET_TARGET` to manufacture a signal.
 
+## The predict → fail → self-correct loop (`japanese_prediction_v1`, 2026-09-10)
+
+Added the step the Japanese loop was missing: Noise scores a real story event's
+plausibility from its concepts, scores a genus-corrupted version, and a real
+event it keeps rating implausible feeds `japanese_word_meaning_v1` a capped
+(≤0.30) counter-evidence against the subject's believed genus (`_revise_belief`,
+one channel). Tiered like the other benchmarks; secondary diagnostic = next-verb
+-class prediction.
+
+**Result on the live corpus: near-flat, and it localises the bottleneck.**
+Next-verb-class prediction is ~+0.3pt over the marginal (dead, same as English
+`verb_cloze`). Plausibility discrimination is ~+0.6pt full / ~+1.6pt on the
+~22% of trials that carry discriminative structure — not significant — because
+**90% of scorable events are `(creature subject, no object genus)`**. The
+concept graph is ~78% 生き物; the concrete non-creature nouns (道具/場所/食べ物 as
+narrative arguments) that would make events checkable are the same
+held-out-scarce set. Every measured Japanese-side capability (word_meaning z,
+cognition probe, retell, dialogue, and now prediction) bottlenecks on the same
+thing: **the concrete non-creature vocabulary Noise can ground from this corpus
+(~19–30 words). Reading more of the same literary corpus does not move it.** A
+genuinely graded developmental (絵本-level) Japanese corpus, or a parser that
+cleanly recovers objects, is the actual unblock — not more modules.
+
 ## Safety and integrity
 
 - Web access is read-only. Do not post, purchase, change permissions, or mutate external services.

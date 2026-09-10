@@ -154,6 +154,40 @@ only baseline-fails problems and reported `lift = derive_rate` in disguise; the
 reader archives the v2 state under `.local/audit/` and its rates are not
 inherited.
 
+### Judge a story event's plausibility, revise a concept when wrong (`japanese_prediction_v1`)
+
+The Japanese reading loop accumulated a co-occurrence graph and dictionary
+testimony but never made a falsifiable judgement about a story and revised when
+it was wrong.  This module adds the predict → fail → self-correct step:
+
+1. reading a real event `(subject, verb, object)` whose subject has a genus
+   Noise believes, Noise scores its **plausibility** from its own concepts —
+   abstracted `(subject_genus, verb_class, object_genus)` rules, the
+   subject-genus / verb-class fit, the verb-class / object-genus fit.
+2. it also scores a genus-**corrupted** version (verb class or object genus
+   swapped).  Did Noise rate the real event above the fake, *more often* than a
+   verb/argument-frequency baseline?  Tiered (`jb.Tiers`): SELECTION diagnostic,
+   capability = a candidate checkpoint (anchor-streak 2) passing its one-shot
+   unopened final.
+3. a real event Noise keeps rating implausible is the self-correction signal: it
+   accumulates per subject word, and a word whose story behaviour keeps looking
+   wrong under its believed genus feeds `japanese_word_meaning_v1` a **capped
+   (≤0.30) counter-evidence** against that genus — one channel in `_revise_belief`,
+   never the sole cause of a revision (invariant 10).
+
+**What this measured** (2026-09-10, live corpus): the same wall as English
+`event_structure_v1`.  Predicting the *next verb class* from the subject's genus
+is near-flat (secondary_diagnostic, ~+0.3pt over the marginal).  Plausibility
+discrimination carries a little signal but is not yet significant (~+0.6pt full,
+~+1.6pt on the ~22% of trials that carry any discriminative structure) —
+because **90% of scorable events are `(creature subject, no object genus)`**, for
+which every verb class is plausible.  The concept graph is ~78% 生き物 and the
+concrete non-creature nouns that would make events checkable are exactly the
+held-out-scarce set.  Narrative regularity, not a causal claim (invariant 6).
+This is NOT the retired world-model predictors: genus-abstracted, baseline-gated,
+frozen-tier, and its only learning output is capped genus counter-evidence.
+`AI_NOISE_JA_PREDICTION=0` off.
+
 ## Predict within the event, not the next event
 
 The parsed corpus (isolated `subject|verb|object` clauses from real 19th-century

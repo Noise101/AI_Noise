@@ -409,6 +409,34 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
         if se:
             lines.append(f"  例: {se.get('situation','')[:40]} → {se.get('result','')}"
                          f"／次: {se.get('correction','')[:50]}")
+    pd = reading_status.get("prediction", {}) or {}
+    if pd.get("status") == "measured":
+        sel = pd.get("selection") or {}
+        d2 = pd.get("secondary_diagnostic_next_verb_class") or {}
+        cap = ("確定（過去checkpoint）" if pd.get("capability_confirmed_ever") else
+               f"未確定（{pd.get('capability_pending_reason')}）")
+        lines.append(
+            f"物語予測＝出来事の妥当性判定（概念から）: 能力 {cap}")
+        lines.append(
+            f"  selection: モデル {sel.get('model_accuracy')} 対 頻度基準 {sel.get('baseline_accuracy')}"
+            f"（利得 {sel.get('discrimination_gain')}、z {sel.get('gain_z')}、有意連続 "
+            f"{pd.get('selection_significant_streak', 0)}、傾向 {pd.get('prediction_trend')}）"
+            f"／{sel.get('n_sources')}話・{sel.get('n_trials')}試行")
+        lines.append(
+            f"  構造のある試行 {sel.get('checkable_fraction')}（残りは「生き物が生き物的行動」で"
+            f"判別情報なし）／その部分だけ モデル {sel.get('checkable_model_acc')} 対 "
+            f"{sel.get('checkable_baseline_acc')}")
+        lines.append(
+            f"  次の動詞クラス予測（診断のみ・能力ではない）: モデル {d2.get('model_accuracy')} 対 "
+            f"周辺分布 {d2.get('marginal_accuracy')}（利得 {d2.get('gain')}＝ほぼ平坦）")
+        lines.append(
+            f"  concept判定の結果を語の意味へ還元: 反例語 {pd.get('feedback_words')}／"
+            f"追跡 {pd.get('outcomes_tracked')}語（読んだ実イベントを繰り返し「不自然」と判定した語の"
+            f"genusに上限付き反証）")
+        if pd.get("regime_reset_from"):
+            lines.append(f"  ↳ 評価方式変更 {pd.get('regime_reset_from')} → {pd.get('eval_regime')}：連続・確認リセット")
+    elif pd.get("status") == "insufficient_selection_stories":
+        lines.append(f"物語予測（出来事の妥当性判定）: 準備中（{pd.get('capability_pending_reason')}）")
     dl = reading_status.get("japanese_dialogue", {}) or {}
     if dl.get("status") in ("ran", "partner_unavailable", "waiting"):
         if dl.get("status") == "ran":
@@ -1552,7 +1580,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "japanese_reading": report.get("japanese_reading") or {
             key: read_json(runtime / "reading-status.json").get(key) for key in
             ("cycle", "reading", "curriculum", "comprehension", "retelling", "sequence",
-             "narrative_sequence", "narrative_sequence_training",
+             "narrative_sequence", "narrative_sequence_training", "prediction",
              "word_meaning", "cognition", "cognition_probe", "japanese_dialogue",
              "caregiver", "caregiver_questions", "llm_scaffold_totals",
              "aided_reading", "schema_migration", "self_vs_aided", "aided_store", "provenance", "sequence_retirement_log", "sequence_ever_trained_fingerprint", "sequence_boundary_fingerprint", "sequence_ever_trained_collections")},
@@ -1915,7 +1943,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                 report["japanese_reading"] = {k: reading_status.get(k) for k in
                                               ("cycle", "books_fetched", "reading", "level_advance",
                                                "curriculum", "comprehension", "retelling", "sequence",
-                                               "narrative_sequence", "narrative_sequence_training",
+                                               "narrative_sequence", "narrative_sequence_training", "prediction",
                                                "word_meaning", "cognition", "cognition_probe", "japanese_dialogue",
                                                "caregiver", "caregiver_questions", "llm_scaffold_totals",
                                                "aided_reading", "schema_migration", "self_vs_aided", "aided_store", "provenance", "sequence_retirement_log", "sequence_ever_trained_fingerprint", "sequence_boundary_fingerprint", "sequence_ever_trained_collections")}
