@@ -29,11 +29,15 @@ import time
 import urllib.request
 from collections import Counter
 
-VERSION = 1
+VERSION = 2                     # v2: fast partner model, JA-only prompt, cleaner frozen set
 FROZEN_CONCEPTS = 12
 MIN_UNDERSTOOD_TO_START = 25
 STRATEGIES = ("genus", "property", "relation", "question")
-PARTNER_TIMEOUT = 18
+PARTNER_TIMEOUT = 30
+# the big local model takes ~55s per JA reply -- far too slow for a per-cycle
+# call.  A small model answers a one-sentence statement in a few seconds and is
+# plenty for "was this understood".  Override with AI_NOISE_JA_DIALOGUE_MODEL.
+PARTNER_MODEL = os.environ.get("AI_NOISE_JA_DIALOGUE_MODEL", "qwen3:4b")
 HISTORY_CAP = 200
 TURNS_CAP = 60
 
@@ -65,7 +69,7 @@ def _hid(*p) -> str:
 class JapanesePartner:
     def __init__(self, base_url: str = "http://127.0.0.1:11434", model: str | None = None):
         self.base_url = base_url.rstrip("/")
-        self.model = model or os.environ.get("AI_NOISE_LOCAL_MODEL", "qwen3.8:27b")
+        self.model = model or PARTNER_MODEL
 
     def available(self) -> bool:
         if os.environ.get("AI_NOISE_SKIP_LOCAL_LLM"):
@@ -77,9 +81,9 @@ class JapanesePartner:
             return False
 
     def respond(self, utterance: str) -> str | None:
-        prompt = ("日本語を学んでいる人が下の文を言いました。話題を続けて、日本語で"
-                  "一〜二文で自然に応答してください。意味が分からなければ、はっきりそう"
-                  "言ってください。文法の訂正はしないでください。\n"
+        prompt = ("日本語を学んでいる人が下の文を言いました。話題を続けて、必ず日本語だけで"
+                  "一〜二文で自然に応答してください。英語は使わないでください。意味が分から"
+                  "なければ「よく分かりません」と言ってください。文法の訂正はしないでください。\n"
                   f"学習者: {utterance[:300]}")
         schema = {"type": "object", "properties": {"reply": {"type": "string"}},
                   "required": ["reply"]}
@@ -207,7 +211,10 @@ def run_practice(wm: dict, rules: list[dict], previous: dict | None,
         return {**st, "status": "waiting", "have": len(concepts), "need": MIN_UNDERSTOOD_TO_START}
 
     if not st["frozen"]:
-        pool = sorted(concepts[:60], key=lambda w: hashlib.md5(w.encode()).hexdigest())
+        clean = [w for w in concepts
+                 if " " not in w and "　" not in w and 2 <= len(w) <= 5
+                 and not w.startswith(("一", "何", "美", "自分", "そう", "こう"))]
+        pool = sorted((clean or concepts)[:60], key=lambda w: hashlib.md5(w.encode()).hexdigest())
         st["frozen"] = pool[:FROZEN_CONCEPTS]
         st["frozen_at"] = cycle
 
