@@ -610,6 +610,20 @@ def run_once(runtime: Path) -> dict:
     # not by rule count.  AI_NOISE_COGNITION=0 turns it off.
     cog_report = _read(runtime / COGNITION_FILE)
     probe_report = _read(runtime / PROBE_FILE)
+    if (probe_report.get("version") and probe_report.get("version") != capability_probe.VERSION):
+        audit_dir = runtime / "audit"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        _write(audit_dir / f"cognition-probe-retired-{stamp}.json", {
+            "retired_at": stamp, "retired_version": probe_report.get("version"),
+            "new_version": capability_probe.VERSION,
+            "reason": "P1-3: baseline post-selection.  The retired probe kept ONLY "
+                      "problems the frequency baseline failed, so its `lift` was the "
+                      "raw derive-rate, not evidence of beating a general baseline.  "
+                      "Its history is NOT reinterpreted as a fair final result; the "
+                      "surviving baseline-fails problems are re-used as the new "
+                      "CHALLENGE tier only.",
+            "retired_report": probe_report})
     if cognition.enabled():
         try:
             cog_report = cognition.run_cognitive_cycle(
@@ -708,9 +722,23 @@ def run_once(runtime: Path) -> dict:
                        "live_solve_rate", "repeated_failure_rate", "by_level",
                        "controller_policy", "controller_decisions", "sample_experience")},
         "cognition_probe": {k: (probe_report or {}).get(k) for k in
-                            ("status", "frozen_at", "problem_count", "first_derive_rate",
-                             "latest_derive_rate", "latest_lift", "before_after_gain",
-                             "trend", "latest_by_level")},
+                            ("status", "frozen_at", "have", "need",
+                             "tier_separation_valid", "tier_sizes",
+                             "challenge_problem_count", "challenge_first_derive_rate",
+                             "challenge_latest_derive_rate", "challenge_before_after_gain",
+                             "challenge_trend", "challenge_note",
+                             "selection_problem_count", "selection_measurements",
+                             "selection_latest", "selection_models_clearing_threshold",
+                             "selection_pass", "selection_trend",
+                             "final_problem_count", "reserve_problem_count",
+                             "final_opened_count", "final_result",
+                             "capability_confirmed", "capability_basis",
+                             "capability_pending_reason", "migrated_from_version",
+                             "reference_pool_by_genus", "pairable_genera", "bottleneck",
+                             "challenge_have", "final_have",
+                             # legacy keys (challenge-backed) for status continuity
+                             "problem_count", "first_derive_rate", "latest_derive_rate",
+                             "latest_lift", "before_after_gain", "trend", "latest_by_level")},
         "japanese_dialogue": {k: (dlg_report or {}).get(k) for k in
                               ("status", "frozen_count", "practice_turns", "probe_rounds",
                                "best_strategy", "first_understood_rate", "overall_understood_rate",

@@ -126,13 +126,33 @@ re-solves with the controller's learned policy (no exploration), so the metric
 tracks what the loop settled on.
 
 **Capability is the frozen probe, not the rule count** (invariant 16).
-`capability_probe_v1` freezes ~10–40 genus-combination problems whose **gold is
-the independent ja.wiktionary genus** (from word_meaning's already-fetched
-gists — no network), keeping only ones the frequency baseline gets wrong. Every
-`PROBE_INTERVAL` cycles the current reasoner re-attempts the frozen set; the
-recorded `derive_rate` / `lift` / trend say whether reasoning over the growing
-belief graph is getting better. It starts small and grows as the Tatoeba fuel
-adds concrete vocabulary.
+`capability_probe_v1` freezes genus-combination problems whose **gold is the
+independent ja.wiktionary genus** (from word_meaning's already-fetched gists —
+no network), split into **three tiers that never share a word** (a word group is
+pinned to a tier by a stable hash *before* any gold is seen, so no concept /
+dictionary entry / source straddles a split):
+
+- **challenge** — problems the frequency baseline fails, collected on purpose.
+  Its before/after curve is a self-improvement DIAGNOSTIC; a rise here is *not*
+  "beats a general baseline".
+- **unbiased selection** — a salt sample of the whole population; gold and
+  baseline correctness are never consulted at selection time (a baseline-correct
+  problem is just as likely to be in it). Re-measured only when the model
+  fingerprint moves (never re-rolled waiting for a lucky p-value). Diagnostic.
+- **unopened final (+ reserve)** — never graded until the unbiased selection has
+  cleared a **pre-registered** threshold (derive-rate + minimum effect) across
+  two DISTINCT model fingerprints. Opened at most once each; an opened final is
+  never re-graded; not used for learning, rules, corrections or the controller.
+
+`capability_confirmed` requires ALL of: selection cleared the pre-registered bar
+on two distinct models; an unopened final improved in the same direction; the
+final beat its baseline by the minimum effect; tier separation is valid. The
+probe reports `building` (with the reference-pool sizes and the explicit
+bottleneck) until word_meaning's held-out concrete vocabulary is large enough to
+fill the tiers — it never manufactures a signal from insufficient data. v2 kept
+only baseline-fails problems and reported `lift = derive_rate` in disguise; the
+reader archives the v2 state under `.local/audit/` and its rates are not
+inherited.
 
 ## Predict within the event, not the next event
 
@@ -164,6 +184,20 @@ by the usual gate (beat the baseline on a frozen, source-disjoint split):
   held-out bits/char is a *continuous* capability signal and its `sample()`
   head is the generative substrate. It is not a substitute for a learning
   mechanism and carries zero credit until it beats the order-0 char baseline.
+- **`japanese_sequence_v1`** — the same RNN on Japanese, now instantiated as
+  **two models by regime** (P1-1). (1) the **general** model (`jseq_clean_v4`,
+  `.local/reading-sequence.json`) trains on the raw text of *every* book Noise
+  read — Tatoeba bundles and books the parser could not break into events
+  included — and is diagnostic-only + drives the display retellings. (2) a
+  **dedicated narrative** model (`jnarr_seq_v1`,
+  `.local/reading-narrative-sequence.json`) trains ONLY on recognised-narrative
+  raw text (≥3 heuristic events, not Tatoeba, not vocab-fuel) minus every
+  comprehension/retelling held-out collection. The retelling benchmark's
+  likelihood model and `rnn_training_urls` are the **narrative** model, so its
+  training source set is identical to the position baseline's by construction
+  (the general model's corpus is a permanent superset of the narrative story
+  set — measuring against it sat at `measurement_invalid_baseline_corpus_mismatch`
+  forever).
 - **`active_curriculum_v1`** — retires closed-class curiosity gags ("in the")
   and turns the frozen model's held-out misses into search seeds, so discovery
   targets what the model gets wrong rather than what is frequent.
@@ -184,14 +218,27 @@ The reply never updates a belief (invariants 10, 13).
 at ~6%.  `japanese_dialogue_v1` composes a Japanese utterance from Noise's OWN
 reading knowledge -- a word-meaning belief (`「椅子」は道具です。`), an abstracted
 rule (`「きつね」ははしることがあります。`), a co-occurrence (`「鉄砲」は「おおかみ」と
-いっしょに出てきます。`) -- and scores itself behaviourally on whether the local
-model's reply is coherent, on-topic, and not a clarification request.  It is a
-**use-test**: a belief Noise cannot put into a sentence a person understands is
-not yet usable.  Concrete concepts are talked about first (`「椅子」は道具です` is a
-real test; `「親方」は生き物です` is trivially true).  Capability: a frozen concept
-set, one utterance per cycle alternating a rotating practice concept (learns the
-best composition strategy) and a frozen probe concept (a full round = len(frozen)
-cycles; the round's understood-rate is tracked).  `AI_NOISE_JA_DIALOGUE=0` off.
+いっしょに出てきます。`) -- and scores itself **behaviourally with echo removed**
+(P1-2): a reply passes only if, after stripping everything it copied from Noise's
+own sentence plus bare agreement markers, it still carries independent semantic
+content AND that content is the *kind* of response the utterance's form asks for
+(a question → a polarity/genus answer; a relation claim → info about the pair,
+not a restatement; a genus/property claim → an independent use / attribute /
+kind). A verbatim or partial echo, a leaked `学習者:` prompt prefix, a bare
+「そうですね」, a reply that names the concept but says nothing about it, an
+asserted contradicting genus, and a helpful guess at a sentence Noise could not
+ground all **fail** — each recorded separately (`echo_detected`,
+`clarification`, `relevant_new_information`, `response_to_requested_act`,
+`contradicts_belief`, `partner_guessed_malformed`) alongside the utterance's own
+quality (`parseable`, `belief_supported`, `relation_supported`, `malformed`).
+It is a **use-test**: a belief Noise cannot put into a sentence a person
+understands is not yet usable. Capability: a frozen set of **tasks** — concept
+*and* a fixed utterance intent, so a shift in the learned best strategy cannot
+move the frozen metric — one utterance per cycle alternating a rotating practice
+concept and a frozen probe task (a full round = len(frozen) cycles; the round's
+understood-rate + echo/clarification/malformed rates are tracked). v2 counted
+echoes as understood; the reader archives the v2 state under `.local/audit/` and
+its rates are not inherited. `AI_NOISE_JA_DIALOGUE=0` off.
 
 ## Decision replay, not state replay
 

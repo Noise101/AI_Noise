@@ -371,13 +371,40 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
             lines.append("  Controller 方策: " + "、".join(
                 f"{pt}→{v['best']}({v['rate']})" for pt, v in list(pol.items())[:4]))
         if pr.get("status") == "measured":
+            ts = pr.get("tier_sizes") or {}
             lines.append(
-                f"  凍結能力プローブ: 導出率 {pr.get('latest_derive_rate')}"
-                f"（初回 {pr.get('first_derive_rate')}、差 {pr.get('before_after_gain')}、{pr.get('trend')}）"
-                f" lift {pr.get('latest_lift')}／{pr.get('problem_count')}問")
+                f"  能力プローブA・challenge（自己改善の診断のみ／一般基準超えではない）: "
+                f"導出率 {pr.get('challenge_latest_derive_rate')}"
+                f"（初回 {pr.get('challenge_first_derive_rate')}、差 {pr.get('challenge_before_after_gain')}"
+                f"、{pr.get('challenge_trend')}）／{pr.get('challenge_problem_count')}問")
+            sl = pr.get("selection_latest") or {}
+            lines.append(
+                f"  能力プローブB・unbiased selection（Noise対baseline・診断）: "
+                f"Noise {sl.get('derive_rate')} / baseline {sl.get('baseline_rate')}"
+                f"（正答 {sl.get('correct')} 対 {sl.get('baseline_correct')}、"
+                f"測定 {pr.get('selection_measurements')}回、閾値超えモデル "
+                f"{pr.get('selection_models_clearing_threshold')}、selection_pass {pr.get('selection_pass')}）"
+                f"／{pr.get('selection_problem_count')}問")
+            fr = pr.get("final_result")
+            lines.append(
+                f"  能力プローブC・unopened final: 開封 {pr.get('final_opened_count')}回"
+                + (f"／Noise {fr.get('correct')} 対 baseline {fr.get('baseline_correct')}"
+                   f"（閾値超え {fr.get('clears_threshold')}、同方向 {fr.get('same_direction')}）"
+                   if fr else "／未開封（selection_pass 前は採点しない）"))
+            lines.append(
+                f"  能力確認: {pr.get('capability_confirmed')}"
+                + (f"（根拠: {pr.get('capability_basis')}）" if pr.get("capability_confirmed")
+                   else f"（保留理由: {pr.get('capability_pending_reason')}）")
+                + f"／tier分離 {pr.get('tier_separation_valid')}"
+                + (f"／旧v{pr.get('migrated_from_version')}のchallenge問題を移行" if pr.get("migrated_from_version") else ""))
         elif pr.get("status") in ("building", "waiting"):
-            lines.append(f"  凍結能力プローブ: 準備中（{pr.get('have', 0)}/{pr.get('need', 0)}問、"
-                         "具体語彙の蓄積待ち）")
+            lines.append(f"  能力プローブ: 準備中（unbiased selection {pr.get('have', 0)}/{pr.get('need', 0)}問"
+                         f"、challenge {pr.get('challenge_have', 0)}問、final {pr.get('final_have', 0)}問）")
+            if pr.get("reference_pool_by_genus"):
+                lines.append(f"    参照語プール {pr.get('reference_pool_by_genus')}／"
+                             f"ペア可能 genus {pr.get('pairable_genera')}")
+            if pr.get("bottleneck"):
+                lines.append(f"    停滞理由: {pr.get('bottleneck')}")
         se = cg.get("sample_experience")
         if se:
             lines.append(f"  例: {se.get('situation','')[:40]} → {se.get('result','')}"
