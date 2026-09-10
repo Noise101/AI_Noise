@@ -201,16 +201,25 @@ def _sortkey(p: dict) -> str:
 
 
 def _model_fingerprint(wm_state: dict, cog_state: dict, words: list[str]) -> str:
-    """Changes when the thing the probe measures could have moved: the coarse
-    genus + rough confidence of the relevant beliefs, the rule count, and the
-    controller's decision count."""
+    """Changes ONLY when something that could move the probe's ANSWERS moved:
+    the coarse genus + rough confidence of the words it asks about, the
+    controller's LEARNED POLICY (its argmax strategy per problem type, not the
+    monotonic decision counter -- that ticked every cycle and made the probe
+    re-measure the frozen set every cycle), and the rule count."""
     beliefs = wm_state.get("beliefs") or {}
     parts = []
     for w in sorted(set(words)):
         b = beliefs.get(w) or {}
         parts.append(f"{w}:{cog._canon_class(b.get('genus',''))}:{round(float(b.get('confidence',0)),1)}")
+    pol = (cog_state or {}).get("controller", {}).get("policy", {}) or {}
+    for pt in sorted(pol):
+        try:
+            best = cog.choose_strategy(cog_state, pt, explore=False)
+        except Exception:
+            best = ""
+        parts.append(f"pol:{pt}={best}")
     parts.append(f"rules={len((cog_state or {}).get('rules', []))}")
-    parts.append(f"decisions={(cog_state or {}).get('controller', {}).get('decisions', 0)}")
+    parts.append(f"corr={len((cog_state or {}).get('corrections_index', {}))}")
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
 
@@ -353,6 +362,19 @@ def maybe_run(cycle: int, wm_state: dict, heur_store: dict, shelf: dict,
                          probe["final"], probe["reserve"])
     ch_hist = probe.setdefault("challenge_history", [])
     sel_hist = probe.setdefault("selection_history", [])
+    # one-time repair: a stale fingerprint formula (a monotonic decision counter)
+    # re-measured the frozen selection set every cycle -- collapse consecutive
+    # entries with an identical grade to their first occurrence.
+    if len(sel_hist) > 3:
+        compact, sig = [], None
+        for e in sel_hist:
+            s = (e.get("correct"), e.get("baseline_correct"), e.get("n"), e.get("derive_rate"))
+            if s != sig:
+                compact.append(e)
+                sig = s
+        if len(compact) < len(sel_hist):
+            sel_hist = compact
+            probe["selection_history"] = sel_hist
 
     # ---- A. challenge: a plain interval diagnostic ------------------------
     due = not ch_hist or (cycle - (ch_hist[-1].get("cycle") or 0)) >= PROBE_INTERVAL

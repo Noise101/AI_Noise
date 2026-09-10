@@ -90,8 +90,8 @@ class TierSeparationTest(unittest.TestCase):
 
 class CapabilityGateTest(unittest.TestCase):
     def _cog(self, decisions=0, rules=None):
-        return {"rules": rules or [], "corrections_index": {},
-                "controller": {"policy": {}, "decisions": decisions}}
+        return {"rules": [{"rule_id": f"r{i}"} for i in range(decisions)],
+                "corrections_index": {}, "controller": {"policy": {}, "decisions": 0}}
 
     def test_final_is_not_graded_before_selection_passes(self):
         wm = _build_state(match_belief=False)            # beliefs all wrong -> Noise fails selection
