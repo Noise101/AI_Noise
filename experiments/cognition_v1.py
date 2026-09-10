@@ -246,15 +246,31 @@ COMPOSITION_TYPES = ("odd_one_out", "common_property", "property_transfer")
 _DOMINANT = "生き物"
 
 
+import re as _re
+# a token that is really a verb / verb-fragment, not a noun
+_VERBISH = _re.compile(r"(った|って|ている|ていた|られ|され|せる|ない$|なく|"
+                       r"ます$|ました|だっ|でし|ように|ながら|ので$|けど$|"
+                       r"^ふと|^そう|^こう|^ああ|^どう|^もし|^まだ|^もう)")
+_FRAGMENT_HEADS = ("しな", "して", "った", "ある", "いる", "れる", "など", "こと",
+                   "もの", "とき", "ため", "よう", "実際", "そう", "こう")
+# common verbs / copulas that the parser sometimes emits in a noun slot
+_VERB_TOKENS = frozenset((
+    "言う", "いう", "思う", "おもう", "見る", "みる", "する", "なる", "ある", "いる",
+    "くる", "来る", "いく", "行く", "分かる", "わかる", "出る", "入る", "はいる",
+    "だる", "である", "です", "いた", "した", "きた", "答える", "こたえる"))
+
+
 def _real_word(w: str) -> bool:
+    w = (w or "").strip()
+    if not w or w in _VERB_TOKENS or _VERBISH.search(w):
+        return False
     try:
         from japanese_word_meaning_v1 import _is_wordlike
         if not _is_wordlike(w):
             return False
     except Exception:
         pass
-    return not any(s in w for s in ("しな", "して", "った", "ある", "いる", "れる", "など",
-                                    "こと", "もの", "とき", "ため", "よう", "実際"))
+    return not any(w.startswith(s) or w.endswith(s) for s in _FRAGMENT_HEADS)
 
 
 def _genus_pool(wm: dict, min_conf: float = 0.55) -> "dict[str, list[str]]":
@@ -307,8 +323,10 @@ def composition_problems(wm: dict, cycle: int, limit: int = 40) -> list[dict]:
 def generate_problems(ctx: CognitiveContext, rules: list[dict], limit: int) -> list[dict]:
     wm, c, g = ctx.wm, ctx.concept, ctx.concept_genus
     probs: list[dict] = []
+    if not _real_word(c):
+        return probs
     verbs = _book_verbs(ctx.events)
-    nb = _neighbours(wm, c)
+    nb = [n for n in _neighbours(wm, c) if _real_word(n)]
 
     # L1 (recall, live practice only) -- what did the concept do next?
     for i, e in enumerate(ctx.events[:-1]):
@@ -374,9 +392,69 @@ def generate_problems(ctx: CognitiveContext, rules: list[dict], limit: int) -> l
     for p in probs:
         if p["pid"] in seen or not p["options"] or p["gold"] not in p["options"]:
             continue
+        if not _real_word(p.get("concept", "")):
+            continue
+        if p.get("other") and not _real_word(p["other"]):
+            continue
+        if any(o not in COARSE and not _real_word(o) for o in p["options"]):
+            continue
         seen.add(p["pid"])
         uniq.append(p)
     return uniq[:limit]
+
+
+# --------------------------------------------------------------------------
+# Cognitive Controller (Phase 3) -- learn which reasoning STRATEGY suits which
+# problem type, from the loop's own graded outcomes.  A contextual bandit:
+# context = problem type, arms = strategies, reward = verified-correct.
+# --------------------------------------------------------------------------
+STRATEGIES = ("deliberate", "compose", "lookup")   # tie-break order: safest first
+_EXPLORE = 0.15                 # epsilon: try a non-best strategy this often
+_STRATEGY_FLAGS = {"lookup": {}, "compose": {"compose": True},
+                   "deliberate": {"deliberate": True}}
+_STRATEGY_RANK = {"deliberate": 2, "compose": 1, "lookup": 0}
+
+
+def _controller(state: dict) -> dict:
+    return state.setdefault("controller", {"policy": {}, "decisions": 0})
+
+
+def choose_strategy(state: dict, problem_type: str, salt: str = "", explore: bool = True) -> str:
+    pol = _controller(state)["policy"].get(problem_type, {})
+    # rate first; on a near-tie (< 0.03) prefer the safer strategy
+    rated = sorted(((round(_beta(pol.get(s, {})), 2), _STRATEGY_RANK[s], s) for s in STRATEGIES),
+                   reverse=True)
+    if not explore:
+        return rated[0][2]
+    # deterministic epsilon-exploration keyed by the problem: the live loop keeps
+    # trying non-best arms so a better one can be discovered
+    h = int(hashlib.md5(f"{problem_type}{salt}".encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+    if h < _EXPLORE and len(rated) > 1:
+        return rated[1 + int(h / _EXPLORE * (len(rated) - 1))][2]
+    return rated[0][2]
+
+
+def _beta(rec: dict) -> float:
+    return (rec.get("ok", 0) + 1) / (rec.get("n", 0) + 2)
+
+
+def record_strategy_outcome(state: dict, problem_type: str, strategy: str, correct: bool) -> None:
+    pol = _controller(state)["policy"].setdefault(problem_type, {})
+    rec = pol.setdefault(strategy, {"ok": 0, "n": 0})
+    rec["n"] += 1
+    rec["ok"] += int(correct)
+    rec["rate"] = round(_beta(rec), 3)
+    _controller(state)["decisions"] += 1
+
+
+def controller_summary(state: dict) -> dict:
+    pol = state.get("controller", {}).get("policy", {})
+    out = {}
+    for pt, arms in pol.items():
+        rated = sorted(((v.get("rate", _beta(v)), s, v.get("n", 0)) for s, v in arms.items()), reverse=True)
+        if rated and rated[0][2] >= 3:
+            out[pt] = {"best": rated[0][1], "rate": round(rated[0][0], 3), "n": rated[0][2]}
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -384,7 +462,10 @@ def generate_problems(ctx: CognitiveContext, rules: list[dict], limit: int) -> l
 # --------------------------------------------------------------------------
 def solve(problem: dict, wm: dict, rules: list[dict], corrections: list[str],
           heur_store: dict | None = None, compose: bool = False,
-          deliberate: bool = False) -> dict:
+          deliberate: bool = False, strategy: str | None = None) -> dict:
+    if strategy in _STRATEGY_FLAGS:
+        f = _STRATEGY_FLAGS[strategy]
+        compose, deliberate = f.get("compose", False), f.get("deliberate", False)
     steps: list[str] = []
     t, concept = problem["type"], problem.get("concept", "")
     rules_by_id = {r["rule_id"]: r for r in rules}
@@ -760,13 +841,14 @@ def corrections_for(state: dict, problem_type: str, concept_genus: str) -> list[
 # --------------------------------------------------------------------------
 def _pick_concept(wm: dict, events: list, previous: dict, cycle: int) -> str:
     """Rotate through understood entities of the book just read; fall back to
-    the most-read understood entity overall."""
+    the most-read understood entity overall.  Only real words -- never a parser
+    fragment like 「ふとわたし」/「思った」."""
     beliefs = wm.get("beliefs") or {}
     in_book = [w for w in {_norm(e.get("subject")) for e in events} | {_norm(e.get("obj")) for e in events}
-               if w and beliefs.get(w, {}).get("understood")]
+               if w and beliefs.get(w, {}).get("understood") and _real_word(w)]
     if in_book:
         return sorted(in_book)[cycle % len(in_book)]
-    understood = [w for w, b in beliefs.items() if b.get("understood")]
+    understood = [w for w, b in beliefs.items() if b.get("understood") and _real_word(w)]
     ent = wm.get("entities") or {}
     understood.sort(key=lambda w: -ent.get(w, 0))
     return understood[cycle % len(understood)] if understood else ""
@@ -802,8 +884,10 @@ def run_cognitive_cycle(cycle: int, wm_state: dict, heur_store: dict, shelf: dic
         for p in ctx.problems:
             p.setdefault("book_id", just_read or "")
             corr = corrections_for(state, p["type"], ctx.concept_genus)
-            sol = solve(p, wm_state, state["rules"], corr, heur_store, deliberate=True)
+            strat = choose_strategy(state, p["type"], salt=p["pid"] + str(cycle))
+            sol = solve(p, wm_state, state["rules"], corr, heur_store, strategy=strat)
             correct = _grade(p, sol["answer"])
+            record_strategy_outcome(state, p["type"], strat, correct)
             ev = self_evaluate(p, sol, ctx.retrieved, wm_state)
             record_experience(state, p, sol, correct, ev, cycle)
             ctx.solved.append({"pid": p["pid"], "level": p["level"], "type": p["type"],
@@ -838,6 +922,8 @@ def run_cognitive_cycle(cycle: int, wm_state: dict, heur_store: dict, shelf: dic
             "live_solve_rate": live_rate,
             "repeated_failure_rate": repeat_rate,
             "by_level": solved_summary["by_level"],
+            "controller_policy": controller_summary(state),
+            "controller_decisions": state.get("controller", {}).get("decisions", 0),
             "sample_experience": state["experiences"][-1] if state["experiences"] else None,
             "note": "capability is measured by capability_probe_v1 on a frozen set, "
                     "not by rule count (ARCHITECTURE invariant 16)"}

@@ -157,6 +157,28 @@ class ExperienceTest(unittest.TestCase):
         self.assertTrue(r2["repeated_failure"])
 
 
+class ControllerTest(unittest.TestCase):
+    def test_controller_learns_the_better_strategy_from_outcomes(self):
+        state = {"version": cog.VERSION}
+        # "compose" always right, "direct" always wrong, for common_property
+        for _ in range(12):
+            cog.record_strategy_outcome(state, "common_property", "compose", True)
+            cog.record_strategy_outcome(state, "common_property", "direct", False)
+        self.assertEqual(cog.choose_strategy(state, "common_property", explore=False), "compose")
+        s = cog.controller_summary(state)
+        self.assertEqual(s["common_property"]["best"], "compose")
+        self.assertGreater(s["common_property"]["rate"], 0.8)
+
+    def test_solve_strategy_flag_sets_the_reasoning_mode(self):
+        wm = {"beliefs": {"き": _belief("生き物")}, "contexts": {}, "profiles": {}}
+        p = {"type": "genus_recall", "concept": "き", "options": list(cog.COARSE),
+             "gold": "生き物", "grade": "coarse", "prompt": "?"}
+        # direct trusts the belief; the answer is the same here but the path differs
+        self.assertEqual(cog.solve(p, wm, [], [], {}, strategy="direct")["answer"], "生き物")
+        self.assertIn(cog.solve(p, wm, [], [], {}, strategy="deliberate")["answer"],
+                      ("生き物", "わからない"))
+
+
 class LoopTest(unittest.TestCase):
     def test_full_cycle_runs_and_round_trips(self):
         r1 = cog.run_cognitive_cycle(1, WM, STORE, SHELF, "b1", None)

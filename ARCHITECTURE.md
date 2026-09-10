@@ -117,6 +117,14 @@ the book just read:
    Correction record, success and failure alike; the next attempt at a similar
    problem reads the Correction. Repeated failures are flagged.
 
+**Cognitive Controller** (Phase 3): a contextual bandit picks the reasoning
+*strategy* per problem type -- `lookup` (belief only), `compose` (neighbour
+vote), `deliberate` (hypotheses + counter-evidence) -- from the loop's own
+graded outcomes (Beta-smoothed verified-success rate per (type, strategy),
+ε-greedy exploration, safest strategy wins a near-tie).  The frozen probe
+re-solves with the controller's learned policy (no exploration), so the metric
+tracks what the loop settled on.
+
 **Capability is the frozen probe, not the rule count** (invariant 16).
 `capability_probe_v1` freezes ~10–40 genus-combination problems whose **gold is
 the independent ja.wiktionary genus** (from word_meaning's already-fetched

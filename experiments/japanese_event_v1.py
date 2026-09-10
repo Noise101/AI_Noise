@@ -35,7 +35,9 @@ from dataclasses import dataclass, field
 #        った defaults to る; single-kanji topic は
 #   5 -> compound verbs (〜ておる, 〜ながら), copula ではなかった, ことができる,
 #        んだ -> ぶ/む/ぬ, 考える/思う in the table; adverbs out of the subject slot
-PARSER_VERSION = 7      # v7: sentences also split on blank lines (section
+PARSER_VERSION = 8      # v8: leading sentence-adverbs / archaic connectives
+                        #     stripped off a glued noun ("ふとわたし" -> "わたし")
+                        # v7: sentences also split on blank lines (section
                        # headings no longer glue to the first subject); time
                        # adverbials (〜まで, 〜ごろ) rejected as subjects
 
@@ -127,7 +129,14 @@ NOUN_PREFIX = re.compile(r"^(大きな|小さな|きれいな|りっぱな|元�
                          r"ひとりの|ふたりの|いっぴきの|いちわの|いっぽんの|としとった|"
                          r"たくさんの|おおくの|すべての|いくつかの|なんびきかの|"
                          r"まだ|もう|ずっと|やがて|すぐ|とても|いつも|きっと|"
-                         r"でも|そして|それから|すると|しかし|ところが|また)")
+                         r"でも|そして|それから|すると|しかし|ところが|また|"
+                         # sentence adverbs / archaic connectives that the scanner
+                         # glues to a following pronoun ("ふとわたし", "而してそれ")
+                         r"ふと|ふいに|おもわず|思わず|とつぜん|突然|きゅうに|急に|"
+                         r"しばらく|やっと|ようやく|ついに|さらに|やはり|なお|"
+                         r"而して|しかして|さて|ところで|では|それでは|かくして|"
+                         r"じつは|実は|たしかに|なるほど|もちろん|むろん|"
+                         r"はっと|ぎょっと|にわかに|いつしか|ふたたび|再び)")
 # 「... という ...」: the noun before という names the entity that follows
 TO_IU = re.compile(r"という")
 # a clause that is only a topic NP ("ねこは、") carries no verb but does set the

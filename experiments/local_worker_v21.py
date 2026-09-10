@@ -366,6 +366,10 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
         lines.append(
             f"認知ループ（知識→能力）: 規則 {cg.get('rules_total')}（再利用可 {cg.get('rules_reusable')}）"
             f"／経験 {cg.get('experiences_total')}／誤り再発率 {cg.get('repeated_failure_rate')}")
+        pol = cg.get("controller_policy") or {}
+        if pol:
+            lines.append("  Controller 方策: " + "、".join(
+                f"{pt}→{v['best']}({v['rate']})" for pt, v in list(pol.items())[:4]))
         if pr.get("status") == "measured":
             lines.append(
                 f"  凍結能力プローブ: 導出率 {pr.get('latest_derive_rate')}"

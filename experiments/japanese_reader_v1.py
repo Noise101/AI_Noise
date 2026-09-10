@@ -61,11 +61,11 @@ AOZORA_LEVEL_MARGIN = 1.0   # skip Aozora works more than this above the reading
 TATOEBA_MAX_LEVEL = 4.0     # above this the parser handles literary prose well
                             # enough that sentence drills add little
 TATOEBA_READERS_PER_LEVEL = 6   # once this many exist near the level, stop
-VOCAB_FUEL_COOLDOWN = 8      # cycles between word-meaning fuel top-ups
-VOCAB_FUEL_FRESH = 4        # fresh Tatoeba readers pulled per top-up
-VOCAB_FUEL_BUFFER = 16     # fuel reader texts kept in the rolling buffer
-VOCAB_FUEL_LEVELS = (2.5, 3.0, 3.5, 4.0)   # Tatoeba levels rich in concrete nouns
-VOCAB_FUEL_BAND = 0.6
+VOCAB_FUEL_COOLDOWN = 5      # cycles between word-meaning fuel top-ups
+VOCAB_FUEL_FRESH = 6        # fresh Tatoeba readers pulled per top-up
+VOCAB_FUEL_BUFFER = 24     # fuel reader texts kept in the rolling buffer
+VOCAB_FUEL_LEVELS = (2.0, 2.5, 3.0, 3.5, 4.0, 4.5)   # a wide concrete-noun span
+VOCAB_FUEL_BAND = 0.7
                             # fetching so the band can drain and the level rise
 AOZORA_WORKS_PER_AUTHOR = 10
 
@@ -609,7 +609,7 @@ def run_once(runtime: Path) -> dict:
                       ("status", "concept", "rules_total", "rules_reusable",
                        "experiences_total", "problems_this_cycle", "correct_this_cycle",
                        "live_solve_rate", "repeated_failure_rate", "by_level",
-                       "sample_experience")},
+                       "controller_policy", "controller_decisions", "sample_experience")},
         "cognition_probe": {k: (probe_report or {}).get(k) for k in
                             ("status", "frozen_at", "problem_count", "first_derive_rate",
                              "latest_derive_rate", "latest_lift", "before_after_gain",

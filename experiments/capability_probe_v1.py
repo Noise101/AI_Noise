@@ -130,7 +130,10 @@ def run_probe(probe: dict, wm_state: dict, heur_store: dict, cog_state: dict) ->
     unresolved = 0
     for p in probe.get("problems", []):
         corr = cog.corrections_for(cog_state, p["type"], cog._genus(wm_state, p.get("concept", "")))
-        sol = cog.solve(p, wm_state, rules, corr, heur_store, deliberate=True)
+        # the frozen probe reflects the CONTROLLER's learned policy (no
+        # exploration -- salt fixed) so the metric tracks what the loop settled on
+        strat = cog.choose_strategy(cog_state, p["type"], explore=False)
+        sol = cog.solve(p, wm_state, rules, corr, heur_store, strategy=strat)
         ok = cog._grade(p, sol["answer"])
         base_ok = cog._grade(p, p.get("baseline", ""))
         correct += ok
