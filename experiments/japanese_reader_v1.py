@@ -43,7 +43,8 @@ CURRICULUM_FILE = "reading-curriculum.json"
 EVENTS_FILE = "reading-events.json"
 COMPREHENSION_FILE = "reading-comprehension.json"
 RETELL_FILE = "reading-retelling.json"
-SEQUENCE_FILE = "reading-sequence.json"
+SEQUENCE_FILE = "reading-sequence.json"                 # general character model
+NARRATIVE_SEQUENCE_FILE = "reading-narrative-sequence.json"   # P1-1: retell-only model
 WORD_MEANING_FILE = "reading-word-meaning.json"
 COGNITION_FILE = "cognition-state.json"
 PROBE_FILE = "cognition-probe.json"
@@ -130,15 +131,20 @@ def _within_reach(text: str, level: float) -> bool:
 
 
 def _rnn_corpus(cur: dict, forbidden_cols: set[str]) -> dict[str, str]:
-    """The character RNN's training text: the RAW published text of every book
-    Noise has READ -- including books the heuristic parser could not break into
-    events (`shelved_stuck`).  The RNN needs characters, not a parse, and gating
-    its corpus on parser success is why it sat at 723K chars while 169 read books
-    went unused.  Raw text is reading *input*, not an interpretation, so the
-    `heuristic_self` provenance filter does not apply here.  What DOES still
-    apply: every collection feeding a comprehension / retelling SELECTION / FINAL
-    / RESERVE snapshot is kept out -- a source must never sit in both a capability
-    test set and the model tested on it."""
+    """The GENERAL character model's training text: the RAW published text of
+    every book Noise has READ -- including books the heuristic parser could not
+    break into events (`shelved_stuck`) and the Tatoeba sentence bundles.  The
+    model needs characters, not a parse, and gating its corpus on parser success
+    is why it sat at 723K chars while 169 read books went unused.  Raw text is
+    reading *input*, not an interpretation, so the `heuristic_self` provenance
+    filter does not apply here.  What DOES still apply: every collection feeding a
+    comprehension / retelling SELECTION / FINAL / RESERVE snapshot is kept out.
+
+    This model is DIAGNOSTIC ONLY (character bits/char) and drives the display
+    retellings.  It is NEVER the retelling benchmark's likelihood model -- its
+    corpus is a superset of the narrative story set, so the position baseline
+    built from "exactly the RNN's training sources" could never match it.  The
+    dedicated narrative model (`_narrative_rnn_corpus`) exists for that."""
     texts: dict[str, str] = {}
     for book in cur.get("shelf", {}).values():
         text = book.get("text") or ""
@@ -147,6 +153,30 @@ def _rnn_corpus(cur: dict, forbidden_cols: set[str]) -> dict[str, str]:
         if jb.collection(book["url"]) in forbidden_cols:
             continue
         texts[book["url"]] = texts.get(book["url"], "") + text
+    return texts
+
+
+def _narrative_rnn_corpus(cur: dict, narrative_urls: set[str],
+                          forbidden_cols: set[str]) -> dict[str, str]:
+    """P1-1: the DEDICATED narrative model's training text.  RAW text, but ONLY
+    of books that were recognised as narratives this cycle -- `narrative_urls` is
+    exactly the url set of `all_stories` (read, >= 3 heuristic events, `source`
+    != 'tatoeba').  Vocab-fuel bundles have no shelf entry so they cannot appear
+    here; Tatoeba books are on the shelf but never in `narrative_urls`.  Every
+    forbidden (selection / final / reserve / non-train tier) collection is
+    excluded, so the model's training source set is disjoint from every retell
+    test snapshot AND identical to the position baseline's source set."""
+    texts: dict[str, str] = {}
+    for book in cur.get("shelf", {}).values():
+        url = book.get("url")
+        text = book.get("text") or ""
+        if not url or url not in narrative_urls or not text:
+            continue
+        if not curriculum.book_was_read(book):
+            continue
+        if jb.collection(url) in forbidden_cols:
+            continue
+        texts[url] = texts.get(url, "") + text
     return texts
 
 
@@ -298,6 +328,7 @@ def run_once(runtime: Path) -> dict:
     prev_comp = _read(runtime / COMPREHENSION_FILE)
     prev_retell = _read(runtime / RETELL_FILE)
     prev_seq = _read(runtime / SEQUENCE_FILE)
+    prev_narr_seq = _read(runtime / NARRATIVE_SEQUENCE_FILE)
     cycle = cur.get("cycle", 0) + 1
     cur["cycle"] = cycle
     events_store = _read_events()
@@ -471,59 +502,98 @@ def run_once(runtime: Path) -> dict:
     # become curriculum-"known" via a graduated book, but they are still words
     # Noise read and can research)
     wm_known = curriculum._known_set(cur) | {t for t, n in _fuel_tok.items() if n >= 2}
-    # the RNN's cumulative training ledger (collections it has EVER trained on):
-    # a collection here can never be moved into a held-out tier.
-    rnn_ever_trained_cols = set(
+    narrative_urls = {s["url"] for s in all_stories}
+
+    # cumulative training ledgers (collections a model has EVER trained on).  A
+    # collection a model trained on is PINNED to the `train` tier of the
+    # benchmark that TESTS that model, and can never be forced into its held-out
+    # tier -- that pin protects earned weights when a regime is re-drawn.
+    #   * comprehension tests its own n-gram model -> pins the GENERAL RNN ledger
+    #     (pre-existing wiring, unchanged).
+    #   * retelling tests the DEDICATED NARRATIVE RNN -> pins the narrative
+    #     ledger only (P1-1).  The general RNN is NOT the retelling likelihood
+    #     model and earns no retelling capability, so it does NOT have to avoid
+    #     retelling's held-out collections; forcing it to was retiring its 150k
+    #     earned steps every time the tiers moved.
+    gen_ever_trained_cols = set(
         (prev_seq.get("training_data_fingerprint") or {}).get("ever_trained_collections") or [])
+    narr_ever_trained_cols_prev = set(
+        (prev_narr_seq.get("training_data_fingerprint") or {}).get("ever_trained_collections") or [])
     comp_forbidden = comprehension.forbidden_training_collections(
-        prev_comp, all_stories, ever_trained_collections=rnn_ever_trained_cols, cycle=cycle)
+        prev_comp, all_stories, ever_trained_collections=gen_ever_trained_cols, cycle=cycle)
     retell_forbidden = retell.forbidden_training_collections(
-        prev_retell, all_stories, ever_trained_collections=rnn_ever_trained_cols, cycle=cycle)
+        prev_retell, all_stories, ever_trained_collections=narr_ever_trained_cols_prev, cycle=cycle)
+    # the general model avoids only the comprehension held-out set; the dedicated
+    # narrative model avoids BOTH (comprehension's, so the two capability test
+    # sets never overlap its corpus, and retelling's own).
+    general_forbidden = comp_forbidden
+    narrative_forbidden = comp_forbidden | retell_forbidden
 
-    # character RNN over the RAW TEXT of every book Noise has READ -- including
-    # books the heuristic parser could not break into events (`shelved_stuck`):
-    # the RNN needs characters, not a parse, and gating its corpus on parser
-    # success is why it sat at 723K chars while 169 read books went unused.  Raw
-    # published text is reading *input*, not an interpretation, so the
-    # `heuristic_self` provenance filter does not apply here.  What DOES still
-    # apply: every collection feeding a comprehension / retelling SELECTION /
-    # FINAL / RESERVE snapshot is kept out -- a source must never sit in both a
-    # capability test set and the model tested on it.
-    forbidden_cols = comp_forbidden | retell_forbidden
-    seq_texts = _rnn_corpus(cur, forbidden_cols)
-    training_context = {
-        "regime": sequence.TRAINING_REGIME,
-        "parser_version": PARSER_VERSION,
-        "provenance_policy": curriculum.PROVENANCE_POLICY,
-        "read_only": True,
-        "forbidden_collections": sorted(forbidden_cols),
-    }
-    seq_report = sequence.train_and_evaluate(seq_texts, prev_seq, SEQUENCE_TRAIN_SECONDS,
-                                             training_context=training_context)
+    def _archive_retired_rnn(report: dict, label: str) -> None:
+        retired = report.get("retired_model")
+        if retired and retired.get("retired_state"):
+            audit_dir = runtime / "audit"
+            audit_dir.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            _write(audit_dir / f"{label}-retired-{stamp}.json", retired)
+            report["retired_model"] = {k: v for k, v in retired.items() if k != "retired_state"}
 
-    # archive a retired (contaminated) RNN, then keep only metadata in the report
-    retired = seq_report.get("retired_model")
-    if retired and retired.get("retired_state"):
+    # (1) GENERAL character model -- raw text of every read book (Tatoeba, and
+    # books the parser could not break down, included).  Diagnostic bits/char +
+    # the display retellings.  NEVER the retelling benchmark's likelihood model.
+    seq_texts = _rnn_corpus(cur, general_forbidden)
+    seq_report = sequence.train_and_evaluate(
+        seq_texts, prev_seq, SEQUENCE_TRAIN_SECONDS, regime=sequence.TRAINING_REGIME,
+        training_context={
+            "training_regime": sequence.TRAINING_REGIME, "parser_version": PARSER_VERSION,
+            "provenance_policy": curriculum.PROVENANCE_POLICY, "read_only": True,
+            "forbidden_collections": sorted(general_forbidden)})
+    _archive_retired_rnn(seq_report, "reading-sequence")
+    gen_ever_trained_cols = set(
+        (seq_report.get("training_data_fingerprint") or {}).get("ever_trained_collections") or [])
+
+    # (2) DEDICATED NARRATIVE model -- raw text of recognised-narrative books
+    # ONLY, minus every forbidden (selection/final/reserve/non-train) collection.
+    # Its training source set is BY CONSTRUCTION identical to the retelling
+    # position baseline's source set, so the P1-6 corpus-match check can pass.
+    narr_texts = _narrative_rnn_corpus(cur, narrative_urls, narrative_forbidden)
+    narr_report = sequence.train_and_evaluate(
+        narr_texts, prev_narr_seq, SEQUENCE_TRAIN_SECONDS, regime=sequence.NARRATIVE_REGIME,
+        training_context={
+            "training_regime": sequence.NARRATIVE_REGIME, "parser_version": PARSER_VERSION,
+            "provenance_policy": curriculum.PROVENANCE_POLICY, "read_only": True,
+            "forbidden_collections": sorted(narrative_forbidden)})
+    _archive_retired_rnn(narr_report, "reading-narrative-sequence")
+    narr_ever_trained_cols = set(
+        (narr_report.get("training_data_fingerprint") or {}).get("ever_trained_collections") or [])
+    narr_training_urls = sorted(
+        s["url"] for s in (narr_report.get("training_data_fingerprint") or {}).get("ever_trained_sources", []))
+
+    comp_report = comprehension.evaluate_comprehension(
+        all_stories, prev_comp, ever_trained_collections=gen_ever_trained_cols, cycle=cycle)
+
+    # retelling -- one-time archival of the pre-v5 report (measured against the
+    # general RNN and therefore permanently measurement_invalid), then the
+    # benchmark re-runs on the dedicated narrative model whose training URLs ARE
+    # the position baseline's source set.
+    if prev_retell.get("eval_regime") and prev_retell.get("eval_regime") != retell.EVAL_REGIME:
         audit_dir = runtime / "audit"
         audit_dir.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        _write(audit_dir / f"reading-sequence-retired-{stamp}.json", retired)
-        seq_report["retired_model"] = {k: v for k, v in retired.items() if k != "retired_state"}
-
-    # use the POST-training cumulative ledger for the tier pinning + baseline
-    rnn_ever_trained_cols = set(
-        (seq_report.get("training_data_fingerprint") or {}).get("ever_trained_collections") or [])
-    rnn_training_urls = sorted(
-        s["url"] for s in (seq_report.get("training_data_fingerprint") or {}).get("ever_trained_sources", []))
-    comp_report = comprehension.evaluate_comprehension(
-        all_stories, prev_comp, ever_trained_collections=rnn_ever_trained_cols, cycle=cycle)
-
-    # retelling -- the position baseline is built from EXACTLY the RNN's training
-    # URLs (P1-6), so pass them in.
+        _write(audit_dir / f"reading-retelling-retired-{stamp}.json", {
+            "retired_at": stamp,
+            "reason": "P1-1: retelling now uses a dedicated narrative RNN; the prior "
+                      "regime scored against the general character RNN whose corpus "
+                      "(Tatoeba bundles + unparseable books) is a permanent superset of "
+                      "the narrative story set -> measurement_invalid_baseline_corpus_mismatch. "
+                      "No capability was ever confirmed under the retired regime.",
+            "retired_eval_regime": prev_retell.get("eval_regime"),
+            "new_eval_regime": retell.EVAL_REGIME,
+            "retired_report": prev_retell})
     retell_report = retell.evaluate_retelling(
-        all_stories, prev_retell, rnn_state=seq_report.get("state"),
-        rnn_training_urls=rnn_training_urls,
-        ever_trained_collections=rnn_ever_trained_cols, cycle=cycle)
+        all_stories, prev_retell, rnn_state=narr_report.get("state"),
+        rnn_training_urls=narr_training_urls,
+        ever_trained_collections=narr_ever_trained_cols, cycle=cycle)
 
     # word meaning -- learn what the entities Noise reads DENOTE, from
     # ja.wiktionary / ja.wikipedia (CC-BY-SA); tested by self-explanation
@@ -607,6 +677,7 @@ def run_once(runtime: Path) -> dict:
     _write(runtime / COMPREHENSION_FILE, comp_report)
     _write(runtime / RETELL_FILE, retell_report)
     _write(runtime / SEQUENCE_FILE, seq_report)
+    _write(runtime / NARRATIVE_SEQUENCE_FILE, narr_report)
     status = {
         "heartbeat": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "cycle": cycle, "books_fetched": fetched,
@@ -689,6 +760,29 @@ def run_once(runtime: Path) -> dict:
             len((seq_report.get("training_data_fingerprint") or {}).get("ever_trained_collections") or []),
         "sequence_retirement_log": seq_report.get("retirement_log", []),
         "sequence_sample": (seq_report.get("samples") or [""])[0],
+        # P1-1: the dedicated narrative model + how it lines up with the retelling
+        # benchmark's position baseline (they MUST share a training source set)
+        "narrative_sequence": {k: narr_report.get(k) for k in
+                     ("status", "capability_status", "held_out_bits_per_char",
+                      "baseline_bits_per_char", "improvement_bits", "improvement_z",
+                      "perplexity_trend", "steps_trained", "model_fingerprint",
+                      "training_regime", "contamination_status", "reset_reason",
+                      "ever_trained_source_count", "sources_added_this_cycle",
+                      "train_chars", "held_out_chars")},
+        "narrative_sequence_training": {
+            "corpus_source_count": len(narr_texts),
+            "ever_trained_source_count":
+                (narr_report.get("training_data_fingerprint") or {}).get("ever_trained_source_count"),
+            "ever_trained_collections":
+                len((narr_report.get("training_data_fingerprint") or {}).get("ever_trained_collections") or []),
+            "retell_baseline_source_count": retell_report.get("baseline_source_count"),
+            "retell_corpus_matches_rnn": retell_report.get("baseline_corpus_matches_rnn"),
+            "retell_eval_valid": retell_report.get("status") not in
+                ("measurement_invalid", "measurement_invalid_baseline_corpus_mismatch"),
+            "narrative_urls_recognised": len(narrative_urls),
+            "retired_retell_regime": prev_retell.get("eval_regime")
+                if (prev_retell.get("eval_regime") and prev_retell.get("eval_regime") != retell.EVAL_REGIME)
+                else None},
         "caregiver": caregiver.summary(care_state),
         "caregiver_questions": [q["prompt"] for q in care_state.get("pending", [])],
         "llm_scaffold": ({"book": reading.get("title"), **{k: scaffold.get(k) for k in

@@ -287,7 +287,16 @@ def score_retelling(original_events: list[dict], retold_text: str) -> dict:
 # built from the same training corpus?  This removes the structural shortcut in
 # v1, where an outer loop generated each event and concatenated them in input
 # order (so "ordered" input always beat "shuffled" input regardless of the RNN).
-EVAL_REGIME = "narrative_order_recovery_v4"   # v4: re-frozen on parser v6 events
+# v5 (P1-1): the benchmark's likelihood model is now a DEDICATED narrative RNN
+# (japanese_sequence_v1.NARRATIVE_REGIME) trained only on recognised-narrative
+# raw text -- so "the position baseline is built from EXACTLY the RNN's training
+# sources" can actually hold.  v4 measured against the general character RNN
+# whose corpus (Tatoeba bundles + books the parser could not break into events)
+# is a permanent superset of the narrative story set, so v4 sat at
+# measurement_invalid_baseline_corpus_mismatch forever.  The regime bump drops
+# every v4 selection streak / candidate / learning-curve; the reader archives
+# the retired v4 report under .local/audit/ before the switch.
+EVAL_REGIME = "narrative_order_recovery_v5_dedicated_rnn"
 SCORING_VERSION = 2
 BASELINE_DEFINITION = "verb_position_from_training_corpus"
 BENCH_SALT = "retell:nor:v2"

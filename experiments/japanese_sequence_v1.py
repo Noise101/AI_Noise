@@ -64,6 +64,17 @@ UNK = "�"
 # weight matrices change shape, so v3 is NOT a compatible predecessor -- the v3
 # model is archived and training restarts clean at the larger capacity.
 TRAINING_REGIME = "jseq_clean_v4"
+# P1-1: a SECOND, dedicated model for the narrative order-recovery benchmark.
+# Same code, same structure -- but trained ONLY on the raw text of books that
+# were recognised as narratives (>= 3 heuristic events, not Tatoeba, not a
+# vocab-fuel sentence bundle, not a selection/final/reserve collection).  The
+# general model (TRAINING_REGIME) still trains on everything Noise read
+# (Tatoeba included) for the character-prediction diagnostic and display
+# retellings; it is NEVER the retelling benchmark's likelihood model, because
+# its corpus is a superset of the narrative story set and the position baseline
+# built from "exactly the RNN's training sources" can then never match it
+# (permanent measurement_invalid_baseline_corpus_mismatch).
+NARRATIVE_REGIME = "jnarr_seq_v1"
 # regimes whose weights transfer to the current one unchanged (only the identity
 # bookkeeping was fixed): migrate in place, never retire for the code change.
 COMPATIBLE_PREDECESSOR_REGIMES = ()
@@ -122,7 +133,7 @@ def boundary_fingerprint(ctx: dict) -> str:
     boundary either (a parser change cannot invalidate a character model that
     never saw the parser's output)."""
     payload = json.dumps({
-        "training_regime": TRAINING_REGIME,
+        "training_regime": ctx.get("training_regime", TRAINING_REGIME),
         "split_policy_version": SPLIT_POLICY_VERSION,
         "model_version": VERSION, "hidden_dim": HIDDEN, "seq_len": SEQ_LEN,
         "vocab_cap": VOCAB_CAP, "vocab_method": VOCAB_METHOD,
@@ -147,7 +158,7 @@ def training_data_fingerprint(ever_trained: dict, ctx: dict) -> dict:
     return {
         "boundary_fingerprint": boundary_fingerprint(ctx),
         "ever_trained_set_fingerprint": hashlib.sha256(src_payload.encode()).hexdigest()[:16],
-        "training_regime": TRAINING_REGIME,
+        "training_regime": ctx.get("training_regime", TRAINING_REGIME),
         "split_policy_version": SPLIT_POLICY_VERSION,
         "parser_version": ctx.get("parser_version"),
         "provenance_policy": ctx.get("provenance_policy", PROVENANCE_POLICY),
@@ -169,10 +180,11 @@ def _contamination_check(previous: dict, ctx: dict, corpus_texts: dict) -> dict:
     if not prev_state or not prev_state.get("vocab"):
         return {"reason": None, "collisions": []}
     prev_regime = previous.get("training_regime") or prev_state.get("training_regime")
+    regime = ctx.get("training_regime", TRAINING_REGIME)
     if not prev_regime:
         return {"reason": "legacy_state_without_training_regime", "collisions": []}
-    if prev_regime != TRAINING_REGIME and prev_regime not in COMPATIBLE_PREDECESSOR_REGIMES:
-        return {"reason": f"training_regime_changed:{prev_regime}->{TRAINING_REGIME}", "collisions": []}
+    if prev_regime != regime and prev_regime not in COMPATIBLE_PREDECESSOR_REGIMES:
+        return {"reason": f"training_regime_changed:{prev_regime}->{regime}", "collisions": []}
     # a compatible predecessor: skip the boundary check (the boundary format
     # itself changed) and skip the ledger checks (seeded below); just migrate.
     if prev_regime in COMPATIBLE_PREDECESSOR_REGIMES:
@@ -260,11 +272,16 @@ def _insufficient(previous: dict, train_chars: int, held_chars: int) -> dict:
 def train_and_evaluate(raw_texts: dict[str, str], previous: dict | None = None,
                        train_seconds: float = DEFAULT_TRAIN_SECONDS,
                        max_steps: int | None = None,
-                       training_context: dict | None = None) -> dict:
+                       training_context: dict | None = None,
+                       regime: str = TRAINING_REGIME) -> dict:
     previous = dict(previous or {})
     ctx = dict(training_context or {})
     ctx.setdefault("provenance_policy", PROVENANCE_POLICY)
     ctx.setdefault("read_only", True)
+    # P1-1: the regime the caller declares wins (general vs dedicated-narrative);
+    # everything downstream that stamps or compares a regime reads it from ctx.
+    ctx["training_regime"] = regime or ctx.get("training_regime") or TRAINING_REGIME
+    regime = ctx["training_regime"]
     texts = {u: n for u, t in raw_texts.items() if len(n := normalise(t)) >= 40}
 
     # --- contamination gate: retire ONLY when weights the model already holds
@@ -323,7 +340,7 @@ def train_and_evaluate(raw_texts: dict[str, str], previous: dict | None = None,
 
     def _ident(ever_trained: dict, added: int, dropped: list) -> dict:
         tdf = training_data_fingerprint(ever_trained, ctx)
-        return {"training_regime": TRAINING_REGIME,
+        return {"training_regime": regime,
                 "split_policy_version": SPLIT_POLICY_VERSION,
                 "training_data_fingerprint": tdf,
                 "ever_trained_sources": ever_trained,
@@ -481,7 +498,7 @@ def train_and_evaluate(raw_texts: dict[str, str], previous: dict | None = None,
                     generate(model, "おじいさんは", 90)],
         "model_fingerprint": fp,
         "state": {**final_state, "version": VERSION, "steps_trained": steps_trained,
-                  "model_fingerprint": fp, "training_regime": TRAINING_REGIME,
+                  "model_fingerprint": fp, "training_regime": regime,
                   "ever_trained_sources": ever_trained,
                   "boundary_fingerprint": ident["training_data_fingerprint"]["boundary_fingerprint"]},
         **ident,

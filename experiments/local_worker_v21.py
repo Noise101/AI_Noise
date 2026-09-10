@@ -399,15 +399,33 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
         else:
             lines.append(f"日本語で話す: {dl.get('status')}"
                          + (f"（{dl.get('have',0)}/{dl.get('need',0)}語）" if dl.get("status") == "waiting" else ""))
+    nseq = reading_status.get("narrative_sequence", {}) or {}
+    nseq_tr = reading_status.get("narrative_sequence_training", {}) or {}
     if seq.get("held_out_bits_per_char") is not None:
         rlog = reading_status.get("sequence_retirement_log") or []
-        lines.append(f"日本語文字RNN（診断のみ・能力判定に不使用）: "
+        lines.append(f"日本語文字RNN①汎用（診断のみ・能力判定に不使用）: "
                      f"{seq.get('held_out_bits_per_char')} bits/char"
                      f"（基準 {seq.get('baseline_bits_per_char')}、z {seq.get('improvement_z')}"
                      f"、steps {seq.get('steps_trained')}、regime {seq.get('training_regime')}"
                      f"、累積学習source {seq.get('ever_trained_source_count')}"
-                     f"（今回+{seq.get('sources_added_this_cycle', 0)}）"
+                     f"（今回+{seq.get('sources_added_this_cycle', 0)}、Tatoeba等も含む）"
                      f"、累積学習作品集 {reading_status.get('sequence_ever_trained_collections')}）")
+    if nseq.get("status"):
+        vv = nseq_tr.get("retell_eval_valid")
+        lines.append(f"日本語文字RNN②物語専用（再話能力判定の尤度モデル）: "
+                     f"{nseq.get('held_out_bits_per_char')} bits/char"
+                     f"（基準 {nseq.get('baseline_bits_per_char')}、steps {nseq.get('steps_trained')}"
+                     f"、regime {nseq.get('training_regime')}、状態 {nseq.get('status')}）")
+        lines.append(f"  物語専用の学習source {nseq_tr.get('ever_trained_source_count')}"
+                     f"（認定narrative {nseq_tr.get('narrative_urls_recognised')}話）"
+                     f" = 位置基準source {nseq_tr.get('retell_baseline_source_count')}"
+                     f"／一致 {nseq_tr.get('retell_corpus_matches_rnn')}"
+                     f"／再話評価は{'有効' if vv else '無効'}")
+        if nseq_tr.get("retired_retell_regime"):
+            lines.append(f"  ↳ 旧再話評価 {nseq_tr.get('retired_retell_regime')} を監査退避、"
+                         f"新regimeで再開（旧合格は継承しない）")
+        if nseq.get("reset_reason"):
+            lines.append(f"  ⚠ 物語専用RNN退役: {nseq.get('reset_reason')}")
         if seq.get("reset_reason"):
             cols = [c.get("kind") for c in (seq.get("reset_collisions") or [])]
             lines.append(f"  ⚠ 今回RNN退役: {seq.get('reset_reason')}"
@@ -1494,6 +1512,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "japanese_reading": report.get("japanese_reading") or {
             key: read_json(runtime / "reading-status.json").get(key) for key in
             ("cycle", "reading", "curriculum", "comprehension", "retelling", "sequence",
+             "narrative_sequence", "narrative_sequence_training",
              "word_meaning", "cognition", "cognition_probe", "japanese_dialogue",
              "caregiver", "caregiver_questions", "llm_scaffold_totals",
              "aided_reading", "schema_migration", "self_vs_aided", "aided_store", "provenance", "sequence_retirement_log", "sequence_ever_trained_fingerprint", "sequence_boundary_fingerprint", "sequence_ever_trained_collections")},
@@ -1856,6 +1875,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                 report["japanese_reading"] = {k: reading_status.get(k) for k in
                                               ("cycle", "books_fetched", "reading", "level_advance",
                                                "curriculum", "comprehension", "retelling", "sequence",
+                                               "narrative_sequence", "narrative_sequence_training",
                                                "word_meaning", "cognition", "cognition_probe", "japanese_dialogue",
                                                "caregiver", "caregiver_questions", "llm_scaffold_totals",
                                                "aided_reading", "schema_migration", "self_vs_aided", "aided_store", "provenance", "sequence_retirement_log", "sequence_ever_trained_fingerprint", "sequence_boundary_fingerprint", "sequence_ever_trained_collections")}

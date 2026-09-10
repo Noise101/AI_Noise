@@ -136,6 +136,53 @@ class JapaneseReaderTest(unittest.TestCase):
                 self.assertNotIn(b["url"], reader._rnn_corpus(cur, set()))
                 break
 
+    def test_narrative_rnn_corpus_excludes_tatoeba_and_unrecognised_books(self):
+        # P1-1: the dedicated narrative model trains ONLY on the raw text of books
+        # whose url is in `narrative_urls` (= all_stories: read, >=3 events, not
+        # tatoeba).  Tatoeba bundles and vocab-fuel never reach it -- that is what
+        # let the general RNN's corpus diverge from the retell position baseline.
+        reader.run_once(self.runtime)
+        cur = reader._read(self.runtime / reader.CURRICULUM_FILE)
+        ids = list(cur["shelf"])
+        narr_id, tat_id, stuck_id = ids[0], ids[1], ids[2]
+        cur["shelf"][narr_id].update(status="graduated", times_read=3,
+                                     text="いぬがかわでさかなをみつけた。いぬはさかなをたべた。ねこがないた。" * 4,
+                                     source="ja")
+        cur["shelf"][tat_id].update(status="graduated", times_read=3,
+                                    text="いぬが はしる。ねこが ねる。" * 8, source="tatoeba")
+        cur["shelf"][stuck_id].update(status="shelved_stuck", times_read=6,
+                                      text="ぜんぶかなでよめないはなし。" * 12, source="ja")
+        narrative_urls = {cur["shelf"][narr_id]["url"]}
+        corpus = reader._narrative_rnn_corpus(cur, narrative_urls, set())
+        self.assertIn(cur["shelf"][narr_id]["url"], corpus)
+        self.assertNotIn(cur["shelf"][tat_id]["url"], corpus)      # tatoeba excluded
+        self.assertNotIn(cur["shelf"][stuck_id]["url"], corpus)    # not a recognised narrative
+        # the GENERAL corpus still takes all three (raw characters)
+        gen = reader._rnn_corpus(cur, set())
+        self.assertIn(cur["shelf"][tat_id]["url"], gen)
+        self.assertIn(cur["shelf"][stuck_id]["url"], gen)
+        # a forbidden collection is dropped from the narrative corpus too
+        forbidden = {reader.jb.collection(cur["shelf"][narr_id]["url"])}
+        self.assertNotIn(cur["shelf"][narr_id]["url"],
+                         reader._narrative_rnn_corpus(cur, narrative_urls, forbidden))
+
+    def test_run_once_writes_a_separate_narrative_sequence_state_and_status(self):
+        # P1-1: the two models live in different files; the general model's file
+        # is never repurposed, and status carries both.
+        st = reader.run_once(self.runtime)
+        self.assertTrue((self.runtime / reader.SEQUENCE_FILE).exists())
+        self.assertTrue((self.runtime / reader.NARRATIVE_SEQUENCE_FILE).exists())
+        gen = reader._read(self.runtime / reader.SEQUENCE_FILE)
+        narr = reader._read(self.runtime / reader.NARRATIVE_SEQUENCE_FILE)
+        self.assertEqual(gen.get("training_regime"), reader.sequence.TRAINING_REGIME)
+        self.assertEqual(narr.get("training_regime"), reader.sequence.NARRATIVE_REGIME)
+        self.assertIn("narrative_sequence", st)
+        self.assertIn("narrative_sequence_training", st)
+        # the retelling benchmark is not stuck on a permanent corpus mismatch:
+        # with this tiny corpus it is simply "insufficient", never invalid
+        self.assertNotIn(st["retelling"].get("status"),
+                         ("measurement_invalid", "measurement_invalid_baseline_corpus_mismatch"))
+
     def test_fetched_but_unread_books_do_not_enter_the_events_store(self):
         # a book that was only fetched (registered on the shelf) must not appear
         # in reading-events.json until Noise actually reads it

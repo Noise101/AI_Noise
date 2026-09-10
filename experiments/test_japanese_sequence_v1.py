@@ -268,6 +268,38 @@ class JapaneseSequenceTest(unittest.TestCase):
         self.assertIsNone(model._idx("Z"))               # OOV -> None, as before
         self.assertEqual(model.train_step("Zzz the fox. ", 0.02), 0.0)   # window skipped
 
+    # --- P1-1: general vs dedicated-narrative regime -----------------------
+    def test_regime_param_stamps_a_distinct_identity(self):
+        gen = js.train_and_evaluate(learnable_texts(40), {}, train_seconds=30, max_steps=60,
+                                    regime=js.TRAINING_REGIME, training_context=self._ctx())
+        narr = js.train_and_evaluate(learnable_texts(40), {}, train_seconds=30, max_steps=60,
+                                     regime=js.NARRATIVE_REGIME, training_context=self._ctx())
+        self.assertEqual(gen["training_regime"], js.TRAINING_REGIME)
+        self.assertEqual(narr["training_regime"], js.NARRATIVE_REGIME)
+        self.assertEqual(narr["state"]["training_regime"], js.NARRATIVE_REGIME)
+        self.assertNotEqual(gen["training_data_fingerprint"]["boundary_fingerprint"],
+                            narr["training_data_fingerprint"]["boundary_fingerprint"])
+
+    def test_feeding_a_general_state_into_a_narrative_call_retires_not_continues(self):
+        # the two models must never silently share weights: a regime mismatch is
+        # a retirement, so a stale file in the wrong slot cannot leak.
+        gen = js.train_and_evaluate(learnable_texts(40), {}, train_seconds=30, max_steps=80,
+                                    regime=js.TRAINING_REGIME, training_context=self._ctx())
+        crossed = js.train_and_evaluate(learnable_texts(40), gen, train_seconds=30, max_steps=60,
+                                        regime=js.NARRATIVE_REGIME, training_context=self._ctx())
+        self.assertEqual(crossed["reset_reason"],
+                         f"training_regime_changed:{js.TRAINING_REGIME}->{js.NARRATIVE_REGIME}")
+        self.assertLess(crossed["steps_trained"], 1000)
+        self.assertEqual(crossed["training_regime"], js.NARRATIVE_REGIME)
+
+    def test_a_narrative_state_continues_on_its_own_regime(self):
+        n1 = js.train_and_evaluate(learnable_texts(40), {}, train_seconds=30, max_steps=80,
+                                   regime=js.NARRATIVE_REGIME, training_context=self._ctx())
+        n2 = js.train_and_evaluate(learnable_texts(40), n1, train_seconds=30, max_steps=60,
+                                   regime=js.NARRATIVE_REGIME, training_context=self._ctx())
+        self.assertIsNone(n2["reset_reason"])
+        self.assertGreater(n2["steps_trained"], n1["steps_trained"])
+
     def test_held_out_split_has_a_min_eval_sources_floor(self):
         r = js.train_and_evaluate(learnable_texts(40), {}, train_seconds=30, max_steps=40,
                                   training_context=self._ctx())
