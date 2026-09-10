@@ -505,10 +505,15 @@ def _revise_belief(state: dict, word: str, cycle: int,
         e_weight[nbr_cls] += nbr_str
         sources.setdefault(nbr_cls, []).append("neighbours")
 
-    combined = {cls: min(TESTIMONY_CAP, t_weight.get(cls, 0.0))
-                + min(EVIDENCE_HEADROOM, e_weight.get(cls, 0.0))
-                for cls in set(t_weight) | set(e_weight)}
-    if not combined:
+    # a word's OWN usage profile (reading_usage) + testimony is primary evidence;
+    # the neighbour vote only corroborates -- "椅子 sits near people" must not
+    # outweigh "椅子 is picked up, moved, offered" (a direct observation).
+    def _own(cls: str) -> float:
+        return min(TESTIMONY_CAP, t_weight.get(cls, 0.0)) + \
+            (min(EVIDENCE_HEADROOM, read_str) if read_cls == cls else 0.0)
+
+    classes = set(t_weight) | set(e_weight)
+    if not classes:
         belief = {"genus": "", "confidence": 0.0, "understood": False,
                   "support": {"testimony": 0.0, "evidence": 0.0},
                   "sources": [], "revisions": prev.get("revisions", []),
@@ -516,13 +521,17 @@ def _revise_belief(state: dict, word: str, cycle: int,
         state["beliefs"][word] = belief
         return belief
 
-    best = max(combined, key=lambda c: (combined[c], c in e_weight))
-    ranked = sorted(combined.values(), reverse=True)
-    contest = (ranked[1] / ranked[0]) if len(ranked) > 1 and ranked[0] > 0 else 0.0
+    best = max(classes, key=lambda c: (_own(c) + (0.15 if nbr_cls == c else 0.0), c == read_cls))
+    own_best = _own(best)
+    rival = max((_own(c) for c in classes if c != best), default=0.0)
+    contest = rival / own_best if own_best > 0 else (1.0 if rival else 0.0)
+    nbr_adj = (0.12 if nbr_cls == best else
+               -0.1 if (nbr_cls and nbr_cls != best and nbr_str >= 0.35 and own_best < 0.5) else 0.0)
+    confidence = round(max(0.0, min(1.0, own_best * (1.0 - 0.45 * contest) + nbr_adj)), 3)
     t_best = min(TESTIMONY_CAP, t_weight.get(best, 0.0))
     e_best = min(EVIDENCE_HEADROOM, e_weight.get(best, 0.0))
-    confidence = round(max(0.0, (t_best + e_best) * (1.0 - 0.5 * contest)), 3)
-    understood = confidence >= UNDERSTOOD_CONF and e_best >= UNDERSTOOD_EVIDENCE
+    understood = confidence >= UNDERSTOOD_CONF and (
+        (read_cls == best and read_str >= UNDERSTOOD_EVIDENCE) or e_best >= UNDERSTOOD_EVIDENCE)
 
     revisions = list(prev.get("revisions", []))
     if prev.get("genus") and prev["genus"] != best:
