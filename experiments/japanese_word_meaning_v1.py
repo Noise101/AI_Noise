@@ -56,7 +56,10 @@ MIN_TEST_WORDS = 8
 SIGNIFICANCE_Z = 3.0
 EXPLAIN_TERMS = 5
 TEST_SET_TARGET = 40          # held-out set grows to this, genus-validated
-TEST_PROBES_PER_CYCLE = 2     # held-out candidates genus-checked per cycle
+TEST_PROBES_PER_CYCLE = 3     # held-out candidates genus-checked per cycle
+REFS_MAX_ATTEMPTS = 3         # a cached probe with no genus is retried up to this
+                             # many times (a transient fetch failure must not
+                             # exclude a real word from the held-out pool forever)
 
 # role / abstract nouns that dominate a literary corpus but have no concrete
 # denotation to learn -- kept out of the held-out capability set
@@ -95,7 +98,8 @@ _BAD_GENUS = frozenset((
 # "...イヌ科に属する哺乳動物。" -> 哺乳動物 ; "...時刻を示す道具。" -> 道具.
 _GENUS = re.compile(
     r"([一-鿿゠-ヿ]{2,}[ぁ-ゟ]{0,2})"
-    r"(?:である|です|。|のこと|を指す|の(?:一種|総称|名))")
+    r"(?:である|です|だ。|のこと|を指す|をいう|と呼ぶ|と呼ばれ|の(?:一種|一つ|総称|名)"
+    r"|に用い|に使う|のための)")
 
 # --- coarse ontology ---------------------------------------------------------
 # A small closed set of everyday classes.  Both the fine dictionary genus and
@@ -104,24 +108,56 @@ _GENUS = re.compile(
 COARSE_CLASSES = ("生き物", "人", "植物", "食べ物", "道具", "場所",
                   "自然物", "出来事", "気持ち")
 _COARSE_RULES = (
-    (("哺乳", "動物", "獣", "けもの", "鳥", "とり", "魚", "さかな", "虫", "昆虫",
-      "類", "犬", "猫", "狐", "狸", "猿", "熊", "鼠", "兎", "馬", "牛", "羊",
-      "蛙", "亀", "蛇", "蝙蝠", "鶴", "烏", "鳩", "蟻", "生物"), "生き物"),
-    (("人物", "人間", "者", "士", "王", "女王", "神", "妖精", "巨人", "小人",
-      "少年", "少女", "老人", "武士", "きこり", "登場人物", "職業", "家来"), "人"),
-    (("植物", "花", "木", "草", "樹", "野菜", "きのこ", "苔"), "植物"),
-    (("食べ物", "食物", "料理", "菓子", "果実", "果物", "飲み物", "穀物",
-      "パン", "実", "米", "飯"), "食べ物"),
-    (("道具", "器具", "器", "具", "機械", "武器", "乗り物", "車", "船", "衣類",
-      "服", "家具", "容器", "楽器", "品", "物品", "貨幣", "金銭"), "道具"),
-    (("場所", "地域", "地方", "土地", "国", "町", "村", "都市", "山", "川",
-      "海", "湖", "島", "森", "林", "建物", "部屋", "道路", "施設", "空間"), "場所"),
-    (("天体", "星", "太陽", "月", "自然現象", "鉱物", "石", "岩", "水", "火",
-      "風", "雲", "雪", "光", "元素", "物質"), "自然物"),
-    (("現象", "出来事", "事件", "儀式", "行事", "戦い", "戦争", "行為",
-      "動作", "祭り"), "出来事"),
-    (("感情", "気持ち", "心情", "情動"), "気持ち"),
+    (("哺乳", "動物", "獣", "けもの", "鳥類", "野鳥", "海鳥", "魚類", "さかな",
+      "昆虫", "鳥獣", "貝類", "甲殻類", "爬虫類", "両生類", "霊長類", "齧歯類",
+      "犬", "猫", "狐", "狸", "猿", "熊", "鼠", "兎", "馬", "牛", "羊", "山羊",
+      "蛙", "亀", "蛇", "蝙蝠", "鶴", "烏", "鳩", "蟻", "生物", "家畜", "幼虫",
+      "怪物", "化け物", "お化け", "幽霊", "亡霊", "鬼", "妖怪"), "生き物"),
+    (("人物", "人間", "人類", "者", "王", "女王", "妖精", "巨人", "小人",
+      "少年", "少女", "老人", "青年", "幼児", "武士", "きこり", "登場人物", "職業",
+      "家来", "女性", "男性", "男親", "女親", "父", "母", "娘", "息子",
+      "兄", "姉", "弟", "妹", "夫", "妻", "夫婦", "師匠", "教師", "医師", "牧師",
+      "漁師", "看護師", "官吏", "役人", "警官",
+      "兵士", "兵隊", "歩兵", "騎兵", "水兵", "軍人", "隊員", "僧", "尼", "姫", "嬢",
+      "婦人", "主人", "君主", "神", "使用人",
+      "召使", "奴隷", "呼称", "敬称", "階級", "成員", "構成員", "官職", "従事者",
+      "責任者", "軍隊", "一行", "一団", "家族", "仲間", "連中", "群衆", "民衆",
+      "農業", "農家", "商人", "貴族", "国民", "住民", "村民", "難民", "乗組員"), "人"),
+    (("植物", "草花", "花", "草木", "樹木", "大木", "野草", "薬草", "香草", "牧草",
+      "山菜", "野菜", "きのこ", "苔", "作物", "穀類", "根菜", "球根", "苗", "蔦"), "植物"),
+    (("食べ物", "食物", "食材", "食品", "食料", "食糧", "料理", "菓子", "果実",
+      "果物", "飲み物", "飲料", "穀物", "パン", "米", "御飯", "ご飯", "汁物",
+      "乳製品", "酒類", "主食", "副食", "おかず"), "食べ物"),
+    (("道具", "器具", "用具", "用品", "器物", "容器", "楽器", "武器", "火器",
+      "什器", "陶器", "磁器", "機械", "装置", "乗り物", "車両", "自動車", "馬車",
+      "荷車", "船舶", "衣類", "衣服", "喪服", "服装", "家具", "調度", "玩具", "履物",
+      "刃物", "織物", "布巾", "金具", "燃料", "文書", "書物", "書類", "帳面",
+      "貨幣", "紙幣", "筆記用具", "灯火用具", "工具", "農具", "建具", "什器",
+      "兵器", "銃器", "刀剣", "道具立て", "商品", "品物", "物品", "製品"), "道具"),
+    (("場所", "地域", "地方", "土地", "国土", "首都", "都市", "町", "村", "村落",
+      "集落", "川", "河", "河川", "海", "海洋", "湖", "湖沼", "沼", "池", "島",
+      "森", "森林", "林", "山林", "谷", "渓谷", "丘", "丘陵", "岸", "海岸", "浜",
+      "砂浜", "野原", "平原", "荒野", "洞窟", "洞穴", "建物", "建築物", "部屋",
+      "道路", "通り", "施設", "空間", "区域", "区画", "行政区画", "地名", "名所",
+      "公園", "庭園", "農園", "田畑", "畑", "街", "港", "駅", "城", "宮殿",
+      "神殿", "本堂", "寺院", "僧院", "病院", "学校", "塔", "会館", "館", "広場",
+      "敷地", "領域", "領地", "近所", "近辺", "周辺", "郊外"), "場所"),
+    (("天体", "星", "太陽", "月", "自然現象", "鉱物", "岩石", "宝石", "岩", "砂",
+      "石", "雲", "雪", "霧", "光線", "元素", "物質", "液体", "気体", "混合気体",
+      "体液", "天然", "自然物"), "自然物"),
+    (("現象", "出来事", "事件", "儀式", "行事", "戦い", "戦争", "行為", "行動",
+      "動作", "祭り", "遊戯", "競技", "作業", "活動", "催し"), "出来事"),
+    (("感情", "気持ち", "心情", "情動", "情念", "心理状態"), "気持ち"),
 )
+
+
+# substrings that VETO a class even if one of its keys also matched -- e.g.
+# "末梢神経障害" contains 神 (person) but is a disease, "兵器" contains a person
+# key via 器 collisions, "神社" is a place not a deity.
+_COARSE_BLOCK = {
+    "人": ("神経", "神話", "精神", "神社", "神殿", "神宮", "神通", "神秘",
+           "民話", "民謡", "民家", "兵器", "武者絵"),
+}
 
 
 def _coarse(fine: str) -> str:
@@ -131,7 +167,7 @@ def _coarse(fine: str) -> str:
     if fine in COARSE_CLASSES:
         return fine
     for keys, cls in _COARSE_RULES:
-        if any(k in fine for k in keys):
+        if any(k in fine for k in keys) and not any(b and b in fine for b in _COARSE_BLOCK.get(cls, ())):
             return cls
     return ""
 
@@ -310,6 +346,14 @@ def _wiktionary_gist(word: str) -> dict | None:
         cand = g.group(1)
         if _plausible_genus(cand) and word not in cand:
             genus = cand
+    if not genus:
+        # no clean "…である" head noun -- take the last plausible kanji/kana run
+        # of the definition (many defs end "…に用いる小さな道具" / "…の楽器")
+        runs = re.findall(r"[一-鿿゠-ヿ]{2,}[ぁ-ゟ]{0,2}", defsent)
+        for cand in reversed(runs):
+            if _plausible_genus(cand) and word not in cand and _coarse(cand):
+                genus = cand
+                break
     rel_m = re.search(r"関連語。(.{0,120})", text)
     related = [w for w in _content_words(rel_m.group(1)) if w not in _BAD_GENUS][:8] if rel_m else []
     terms = [w for w in _content_words(defsent) if w != word and w not in _BAD_GENUS][:12]
@@ -326,7 +370,7 @@ def _wikipedia_genus(word: str) -> str:
     try:
         params = urllib.parse.urlencode({
             "action": "query", "titles": word, "redirects": 1, "prop": "extracts",
-            "exintro": 1, "explaintext": 1, "exsentences": 1,
+            "exintro": 1, "explaintext": 1, "exsentences": 2,
             "format": "json", "formatversion": 2})
         pages = WEB_CACHE.get_json(f"{WIKIPEDIA_API}?{params}", USER_AGENT
                                   ).get("query", {}).get("pages", [])
@@ -337,9 +381,14 @@ def _wikipedia_genus(word: str) -> str:
     lead = (pages[0].get("extract") or "").replace(" ", "")
     if "曖昧さ回避" in lead or not lead:
         return ""
-    for g in _GENUS.finditer(lead.split("。")[0] + "。"):
-        c = g.group(1)
-        if _plausible_genus(c) and word not in c:
+    for sent in lead.split("。")[:2]:
+        for g in _GENUS.finditer(sent + "。"):
+            c = g.group(1)
+            if _plausible_genus(c) and word not in c and _coarse(c):
+                return c
+    # fall back to the last coarse-mappable run of the first sentence
+    for c in reversed(re.findall(r"[一-鿿゠-ヿ]{2,}[ぁ-ゟ]{0,2}", lead.split("。")[0])):
+        if _plausible_genus(c) and word not in c and _coarse(c):
             return c
     return ""
 
@@ -650,14 +699,26 @@ def learn_and_evaluate(stories: list[dict], previous: dict | None, cycle: int,
     # This keeps the frozen set to words with a real denotation to learn --
     # the literary corpus's frequent "entities" are mostly names / abstractions.
     if len(state["selection_words"]) < TEST_SET_TARGET:
-        seen = held_out_set | {w for w in state["selection_refs"]}
-        candidates = [w for w in test_words
-                      if _is_wordlike(w) and w not in seen and w not in _ABSTRACT_ROLE
-                      and not w.endswith(("たち", "さん", "ちゃん", "さま"))][:TEST_PROBES_PER_CYCLE]
-        for w in candidates:
+        # a cached probe with NO genus was very often a transient fetch failure,
+        # not "this word has no denotation" -- retry it up to REFS_MAX_ATTEMPTS
+        # instead of excluding the word from the held-out pool forever.
+        placed = {w for w, r in state["selection_refs"].items()
+                  if _coarse((r or {}).get("genus", "")) in COARSE_CLASSES}
+        exhausted = {w for w, r in state["selection_refs"].items()
+                     if (r or {}).get("attempts", 1) >= REFS_MAX_ATTEMPTS
+                     or not _is_wordlike(w)}
+        seen = held_out_set | placed | exhausted
+        fresh = [w for w in test_words
+                 if _is_wordlike(w) and w not in seen and w not in state["selection_refs"]
+                 and w not in _ABSTRACT_ROLE
+                 and not w.endswith(("たち", "さん", "ちゃん", "さま"))]
+        retry = [w for w in test_words if w in state["selection_refs"] and w not in seen]
+        for w in (fresh + retry)[:TEST_PROBES_PER_CYCLE]:
+            prior = (state["selection_refs"].get(w) or {}).get("attempts", 0)
             gist = _wiktionary_gist(w) or {}
-            state["selection_refs"][w] = gist            # cache probe result (+/-)
-            if _coarse(gist.get("genus", "")) in COARSE_CLASSES:
+            gist["attempts"] = prior + 1
+            state["selection_refs"][w] = gist
+            if _coarse(gist.get("genus", "")) in COARSE_CLASSES and w not in held_out_set:
                 state["selection_words"].append(w)
         held_out_set = set(state["selection_words"])
     frozen_test = [w for w in state["selection_words"] if w in state["contexts"]]

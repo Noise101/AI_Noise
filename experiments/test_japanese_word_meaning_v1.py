@@ -39,6 +39,32 @@ class CoarseOntologyTest(unittest.TestCase):
         self.assertEqual(wm._coarse("大きな川"), "場所")
         self.assertEqual(wm._coarse("よく分からない語"), "")
 
+    def test_expanded_rules_place_common_dictionary_genus_strings(self):
+        # words the pre-expansion _coarse dropped -- person / tool / place / food
+        for g in ("女性", "男親", "使用人", "官職", "軍隊", "住民", "乗組員", "職業"):
+            self.assertEqual(wm._coarse(g), "人", g)
+        for g in ("装置", "家具", "容器", "衣服", "書物", "布巾", "車両", "保安用具"):
+            self.assertEqual(wm._coarse(g), "道具", g)
+        for g in ("首都", "施設", "行政区画", "建築物", "洞窟"):
+            self.assertEqual(wm._coarse(g), "場所", g)
+        for g in ("食材", "飲料", "乳製品"):
+            self.assertEqual(wm._coarse(g), "食べ物", g)
+        for g in ("体液", "混合気体", "液体"):
+            self.assertEqual(wm._coarse(g), "自然物", g)
+
+    def test_block_list_stops_substring_collisions(self):
+        # 兵器 must not become 人 via a person key; 末梢神経障害 (神) must not either
+        self.assertEqual(wm._coarse("兵器"), "道具")
+        self.assertEqual(wm._coarse("末梢神経障害"), "")
+        self.assertEqual(wm._coarse("神社"), "")
+        self.assertEqual(wm._coarse("水族館"), "場所")     # 館, not 自然物 via 水
+        # a bare deity is still a person (folktale genus)
+        self.assertEqual(wm._coarse("神"), "人")
+
+    def test_no_regression_on_abstract_genus_strings(self):
+        for g in ("事実", "現実", "概念", "様子", "全体像", "経験", "性質", "状況・状態"):
+            self.assertEqual(wm._coarse(g), "", g)
+
     def test_person_is_compatible_with_creature(self):
         self.assertTrue(wm._compatible("人", "生き物"))
         self.assertTrue(wm._compatible("生き物", "生き物"))
@@ -208,6 +234,37 @@ class LearnAndEvaluateTest(unittest.TestCase):
         a = {w: wm._held_out(w) for w in ("きつね", "からす", "ぶどう", "つき", "うみ")}
         b = {w: wm._held_out(w) for w in ("きつね", "からす", "ぶどう", "つき", "うみ")}
         self.assertEqual(a, b)
+
+    def test_a_transient_gist_failure_is_retried_not_cached_forever(self):
+        # a held-out-eligible concrete word whose first gist fetch fails, then
+        # succeeds -- it must still reach the held-out set, not be excluded
+        held = next(w for w in ("いす", "つくえ", "はこ", "ふね", "くつ")
+                    if wm._held_out(w) and wm._is_wordlike(w))
+        calls = {"n": 0}
+
+        def flaky_gist(word):
+            if word != held:
+                return None
+            calls["n"] += 1
+            return None if calls["n"] == 1 else {"genus": "道具", "terms": [], "related": []}
+
+        story = _self([{"subject": held, "verb": "はこぶ", "obj": ""},
+                       {"subject": "ひと", "verb": "つかう", "obj": held},
+                       {"subject": "ひと", "verb": "おく", "obj": held}])
+        orig = wm._wiktionary_gist
+        wm._wiktionary_gist = flaky_gist
+        try:
+            st = None
+            for c in range(1, 6):
+                st = wm.learn_and_evaluate([{"events": story}] * 10, st, c,
+                                           known_words={held, "ひと"}, llm=_FakeLLM(up=False))
+        finally:
+            wm._wiktionary_gist = orig
+        self.assertGreaterEqual(calls["n"], 2)                 # it was retried
+        self.assertIn(held, st["selection_words"])             # and eventually placed
+        # a word that keeps failing stops being retried after REFS_MAX_ATTEMPTS
+        self.assertLessEqual(
+            (st["selection_refs"].get(held) or {}).get("attempts", 99), wm.REFS_MAX_ATTEMPTS)
 
 
 if __name__ == "__main__":

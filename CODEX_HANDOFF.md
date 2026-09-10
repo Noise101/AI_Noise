@@ -153,10 +153,25 @@ concept graph is ~78% 生き物; the concrete non-creature nouns (道具/場所/
 narrative arguments) that would make events checkable are the same
 held-out-scarce set. Every measured Japanese-side capability (word_meaning z,
 cognition probe, retell, dialogue, and now prediction) bottlenecks on the same
-thing: **the concrete non-creature vocabulary Noise can ground from this corpus
-(~19–30 words). Reading more of the same literary corpus does not move it.** A
-genuinely graded developmental (絵本-level) Japanese corpus, or a parser that
-cleanly recovers objects, is the actual unblock — not more modules.
+thing: **the concrete vocabulary Noise can *validate a genus for* from this
+corpus.**
+
+**2026-09-10 — that bottleneck was substantially a bug, not corpus poverty.**
+`japanese_word_meaning_v1` had researched ~369 words but `_coarse` (fine genus →
+9-class fold) placed only ~102, and `selection_refs` cached *transient fetch
+failures* permanently (267 of 348 held-out probes had an empty genus and were
+never retried — including 太陽 / ランプ / お金 / 手紙 / 人形 / 通り). Fixes:
+`_COARSE_RULES` expanded (女性・男親・使用人・官職・軍隊→人; 装置・家具・書物・布巾→道具;
+首都・施設・行政区画→場所; 食材・飲料→食べ物; 体液・混合気体→自然物) with a
+`_COARSE_BLOCK` veto for substring collisions (兵器→道具 not 人; 末梢神経障害→"" not 人);
+`_wiktionary_gist` extraction widened (more `…である`-style patterns, last-run
+fallback, wikipedia `exsentences` 1→2); `selection_refs` empty-genus entries are
+now **retried up to `REFS_MAX_ATTEMPTS`** instead of cached forever. Offline:
+`_coarse`-placeable researched words 102 → 155. This feeds ALL five stuck
+signals (bigger held-out set, more non-creature subjects/objects for the
+prediction module, more concrete concepts for dialogue and the cognition probe).
+Still TODO if this is not enough: a graded developmental corpus, or parser
+object-extraction.
 
 ## Safety and integrity
 

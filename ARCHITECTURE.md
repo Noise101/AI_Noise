@@ -88,6 +88,17 @@ folded onto a small closed coarse ontology (生き物 / 道具 / 場所 / …).
 - **Revision** — the belief is recomputed each cycle; when reading evidence
   outweighs an earlier testimony-only genus the belief flips and the change is
   kept in `revisions`. Counter-evidence can always demote "understood" (invariant 8).
+  `japanese_prediction_v1` adds one more channel: a word whose real story events
+  Noise keeps rating implausible under its believed genus contributes a capped
+  (≤0.30) penalty against that genus.
+- **Genus classification** (2026-09-10) — testimony genus strings are folded to
+  the 9 coarse classes by `_coarse` (`_COARSE_RULES` keyword table +
+  `_COARSE_BLOCK` collision veto), with a last-run fallback in `_wiktionary_gist`
+  and a wikipedia first-two-sentences fallback. A held-out probe whose genus
+  fetch came back empty is **retried** (`REFS_MAX_ATTEMPTS`), not cached as a
+  permanent exclusion — a transient fetch failure used to drop real concrete
+  words (太陽 / ランプ / お金) from the held-out pool forever, which is most of why
+  it sat at ~19–20.
 - **Capability (frozen, held-out)** — does the belief machinery put a held-out
   word (genus-validated, concrete) in the right coarse class more often than naive
   co-occurrence propagation? One-sided significance over per-word gains; it is a

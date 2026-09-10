@@ -4,6 +4,8 @@ import unittest
 import japanese_prediction_v1 as jp
 import japanese_word_meaning_v1 as wmn
 
+kana = "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめも"
+
 
 def _b(genus, conf=0.75):
     return {"genus": genus, "understood": True, "confidence": conf,
@@ -14,10 +16,10 @@ def _b(genus, conf=0.75):
 # a world where the genus of the arguments really constrains the event:
 #   生き物 subjects do mental / motion / ingest;  they ingest 食べ物;
 #   道具 subjects only change;  場所 subjects only change/other
-WM = {"beliefs": {**{f"けもの{i}": _b("生き物") for i in range(14)},
-                  **{f"たべもの{i}": _b("食べ物") for i in range(10)},
-                  **{f"どうぐ{i}": _b("道具") for i in range(10)},
-                  **{f"ばしょ{i}": _b("場所") for i in range(10)}}}
+WM = {"beliefs": {**{f"むし{kana[i]}": _b("生き物") for i in range(14)},
+                  **{f"ごはん{kana[i]}": _b("食べ物") for i in range(10)},
+                  **{f"どうぐ{kana[i]}": _b("道具") for i in range(10)},
+                  **{f"ばしょ{kana[i]}": _b("場所") for i in range(10)}}}
 
 _CREATURE_V = ["見る", "言う", "思う", "走る", "食べる"]
 _TOOL_V = ["こわれる", "ひらく", "かわる"]
@@ -34,11 +36,11 @@ def structured_stories(n=220, seed=1):
     for i in range(n):
         evs = []
         for _ in range(7):
-            kind = rng.choice(["けもの", "けもの", "どうぐ", "ばしょ"])
-            w = f"{kind}{rng.randint(0, 9)}"
-            if kind == "けもの":
+            kind = rng.choice(["むし", "むし", "どうぐ", "ばしょ"])
+            w = f"{kind}{kana[rng.randint(0, 9)]}"
+            if kind == "むし":
                 v = rng.choice(_CREATURE_V)
-                o = f"たべもの{rng.randint(0,9)}" if v == "食べる" else ""
+                o = f"ごはん{kana[rng.randint(0,9)]}" if v == "食べる" else ""
             elif kind == "どうぐ":
                 v, o = rng.choice(_TOOL_V), ""
             else:
@@ -97,10 +99,10 @@ class SignalTest(unittest.TestCase):
 
     def test_only_heuristic_self_events_are_scored(self):
         s = structured_stories(30)
-        s[0]["events"].append({"subject": "けもの0", "verb": "食べる", "obj": "どうぐ0",
+        s[0]["events"].append({"subject": "むし0", "verb": "食べる", "obj": "どうぐ0",
                                "provenance": "local_llm_scaffold"})   # implausible + not self
         ts = jp._triples(s[0]["events"], WM["beliefs"])
-        self.assertTrue(all(not (t["subj"] == "けもの0" and t["og"] == "道具") for t in ts))
+        self.assertTrue(all(not (t["subj"] == "むし0" and t["og"] == "道具") for t in ts))
 
 
 class CapabilityGateTest(unittest.TestCase):
@@ -144,21 +146,21 @@ class FeedbackTest(unittest.TestCase):
     def _misses(self, cycles):
         r = {}
         for c in range(1, cycles + 1):
-            book = ([_ev("けもの5", "見る")]
-                    + [_ev("けもの5", "こわれる") for _ in range(4)])   # a "creature" that only breaks
+            book = ([_ev("むしか", "見る")]
+                    + [_ev("むしか", "こわれる") for _ in range(4)])   # a "creature" that only breaks
             r = jp.run_prediction(c, structured_stories(260), book, WM["beliefs"], [], r)
         return r
 
     def test_persistent_implausible_real_events_produce_capped_feedback(self):
         r = self._misses(12)
         fb = r["prediction_feedback"]
-        self.assertIn("けもの5", fb)
-        self.assertEqual(fb["けもの5"]["against"], "生き物")
-        self.assertGreater(fb["けもの5"]["strength"], 0)
-        self.assertLessEqual(fb["けもの5"]["strength"], jp.FEEDBACK_MAX_PENALTY)
+        self.assertIn("むしか", fb)
+        self.assertEqual(fb["むしか"]["against"], "生き物")
+        self.assertGreater(fb["むしか"]["strength"], 0)
+        self.assertLessEqual(fb["むしか"]["strength"], jp.FEEDBACK_MAX_PENALTY)
 
     def test_a_one_off_does_not_produce_feedback(self):
-        self.assertNotIn("けもの5", self._misses(1)["prediction_feedback"])
+        self.assertNotIn("むしか", self._misses(1)["prediction_feedback"])
 
     def test_word_meaning_uses_the_penalty_as_one_capped_channel(self):
         st = wmn._blank()

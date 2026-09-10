@@ -46,6 +46,12 @@ from collections import Counter, defaultdict
 import japanese_benchmark_v1 as jb
 import japanese_word_meaning_v1 as wmn
 
+try:
+    from cognition_v1 import _real_word as _real_word
+except Exception:                                       # pragma: no cover
+    def _real_word(w: str) -> bool:
+        return bool(w) and 2 <= len(w) <= 6 and wmn._is_wordlike(w)
+
 VERSION = 1
 BENCH_SALT = "ja-prediction:plausibility:v1"
 EVAL_REGIME = "event_plausibility_from_concept_v1"
@@ -346,6 +352,8 @@ def _update_outcomes(state: dict, events: list[dict], wm_beliefs: dict,
 def build_feedback(state: dict, cycle: int) -> dict:
     fb: dict = {}
     for w, rec in state.get("outcomes", {}).items():
+        if not _real_word(w):                  # never nudge a genus for a parse fragment
+            continue
         h, m = rec.get("hits", 0), rec.get("misses", 0)
         if m >= FEEDBACK_MIN_MISSES and m > FEEDBACK_MISS_RATIO * max(h, 1):
             strength = round(min(FEEDBACK_MAX_PENALTY, 0.06 * (m - FEEDBACK_MISS_RATIO * h)), 3)
