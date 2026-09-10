@@ -97,6 +97,36 @@ READMEの更新が実装より遅れ、v37以降が外部から追跡しにく�
 
 限定世界v41-v46の合格は機構診断であり、実教材能力へ加算しません。実教材での主評価はv51の固定最終試験です。
 
+### 並行する日本語発達読書ループ
+
+同じワーカー内で `japanese_reader_v1.py`（＋ `japanese_event_v1` / `reading_curriculum_v1` /
+`reading_comprehension_v1` / `japanese_retell_v1` / `japanese_sequence_v1` /
+`japanese_word_meaning_v1` / `cognition_v1` / `capability_probe_v1` /
+`japanese_dialogue_v1`）が動きます。状態は `.local/reading-*.json`。能力は件数ではなく
+**固定・未見・出典分離された評価**で測ります。2026-09-10 に評価上の3つの穴を修正しました。
+
+- **P1-1 再話の尤度モデル分離**: 順序復元ベンチマークは*汎用*文字RNN（読了全書＝Tatoeba束や
+  解析不能本を含む＝物語集合の恒久的上位集合）を採点対象にしていたため、位置ベースラインと
+  常に不一致（`measurement_invalid_baseline_corpus_mismatch`）でした。**物語専用RNN**
+  （`jnarr_seq_v1`、`reading-narrative-sequence.json`、認定narrativeの原文のみ・held-out
+  作品集を除外）を新設し、ベンチマークはこれを使用。学習source集合＝位置ベースラインの
+  source集合が構造的に一致します。汎用RNNは診断・表示用としてそのまま保持。
+- **P1-2 対話の復唱誤判定**: `japanese_dialogue_v1.score` は Noise 自身の発話からの
+  コピーを除去し、発話形式が要求する種類の独立情報を要求。`echo_detected` /
+  `clarification` / `relevant_new_information` / `response_to_requested_act` /
+  `contradicts_belief` / `partner_guessed_malformed` と発話品質（`parseable` /
+  `belief_supported` / `relation_supported` / `malformed`）を別々に記録。プローブは
+  概念だけでなく発話意図も凍結。VERSION 3。
+- **P1-3 能力プローブのベースライン事後選択**: `build_probe` はベースラインが失敗する問題
+  だけを固定していたため `lift` が導出率そのものでした。VERSION 3 で **challenge**
+  （ベースライン失敗・診断専用）/ **unbiased selection**（salt標本・gold/baseline不参照）/
+  **unopened final＋reserve**（事前登録閾値をモデル指紋2種で満たすまで採点しない）に分離。
+  語グループは gold を見る前にハッシュで tier 固定。現行コーパスでは独立辞書genusを持つ
+  具体名詞が約19語しかなく、プローブは正直に `building`（律速は読書量ではなく
+  `japanese_word_meaning_v1` の held-out 具体語彙）と表示します。
+
+いずれも旧状態は `.local/audit/` へ退避し、旧regimeの合格は新regimeへ継承しません。
+
 ## 外部監査用リンク
 
 監査基準コミットは[`742c30f`](https://github.com/Noise101/AI_Noise/commit/742c30f)です。GitHubの画面を展開できない監査ツール向けに、生ファイルも直接リンクします。

@@ -661,9 +661,13 @@ def run_once(runtime: Path) -> dict:
         _write(runtime / JA_DIALOGUE_FILE, dlg_report)
 
     # a free-generation retelling of the book just read, conditioned ONLY on the
-    # event representation Noise formed (no gold text, no LLM rephrasing)
-    if book_id and seq_report.get("state") and heuristic:
-        free = retell.free_retell(seq_report["state"], retell._event_repr(heuristic))
+    # event representation Noise formed (no gold text, no LLM rephrasing).
+    # DISPLAY ONLY, earns no capability credit -- but generated from the DEDICATED
+    # narrative model (disjoint from every retell test snapshot by construction),
+    # not the general model whose corpus can overlap the retell selection set.
+    _free_state = narr_report.get("state") or seq_report.get("state")
+    if book_id and _free_state and heuristic:
+        free = retell.free_retell(_free_state, retell._event_repr(heuristic))
         if free:
             reading["free_retelling"] = free
             reading["free_retelling_score"] = retell.score_retelling(heuristic, free)

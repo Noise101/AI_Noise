@@ -450,6 +450,20 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
                      f"、累積学習source {seq.get('ever_trained_source_count')}"
                      f"（今回+{seq.get('sources_added_this_cycle', 0)}、Tatoeba等も含む）"
                      f"、累積学習作品集 {reading_status.get('sequence_ever_trained_collections')}）")
+        if seq.get("reset_reason"):
+            cols = [c.get("kind") for c in (seq.get("reset_collisions") or [])]
+            lines.append(f"  ⚠ ①今回RNN退役: {seq.get('reset_reason')}"
+                         f"（衝突 {cols[:5]}）、clean再訓練を step 0 から開始"
+                         f"（親指紋 {seq.get('parent_model_fingerprint')}）")
+        elif rlog:
+            last = rlog[-1]
+            lines.append(f"  ①退役履歴 {len(rlog)}回（最後: {last.get('reset_reason')}、"
+                         f"旧{last.get('retired_steps_trained')}steps→退避済、"
+                         f"clean開始 {seq.get('started_clean_at')}）")
+        if seq.get("boundary_migrated"):
+            lines.append(f"  ①RNN training_regime を安全移行（コード変更のみ、重み・step 継続）")
+        if seq.get("dropped_trained_sources"):
+            lines.append(f"  ⚠ ①学習済みで現在コーパスに無い source {len(seq['dropped_trained_sources'])}件")
     if nseq.get("status"):
         vv = nseq_tr.get("retell_eval_valid")
         lines.append(f"日本語文字RNN②物語専用（再話能力判定の尤度モデル）: "
@@ -465,21 +479,7 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
             lines.append(f"  ↳ 旧再話評価 {nseq_tr.get('retired_retell_regime')} を監査退避、"
                          f"新regimeで再開（旧合格は継承しない）")
         if nseq.get("reset_reason"):
-            lines.append(f"  ⚠ 物語専用RNN退役: {nseq.get('reset_reason')}")
-        if seq.get("reset_reason"):
-            cols = [c.get("kind") for c in (seq.get("reset_collisions") or [])]
-            lines.append(f"  ⚠ 今回RNN退役: {seq.get('reset_reason')}"
-                         f"（衝突 {cols[:5]}）、clean再訓練を step 0 から開始"
-                         f"（親指紋 {seq.get('parent_model_fingerprint')}）")
-        elif rlog:
-            last = rlog[-1]
-            lines.append(f"  退役履歴 {len(rlog)}回（最後: {last.get('reset_reason')}、"
-                         f"旧{last.get('retired_steps_trained')}steps→退避済、"
-                         f"clean開始 {seq.get('started_clean_at')}）")
-        if seq.get("boundary_migrated"):
-            lines.append(f"  RNN training_regime を安全移行（コード変更のみ、重み・step 継続）")
-        if seq.get("dropped_trained_sources"):
-            lines.append(f"  ⚠ 学習済みで現在コーパスに無い source {len(seq['dropped_trained_sources'])}件")
+            lines.append(f"  ⚠ ②物語専用RNN退役: {nseq.get('reset_reason')}")
     if reading_status.get("level_advance", {}).get("advanced"):
         lines.append(f"★ レベル上昇 → {reading_status['level_advance']['level']}")
     sc = reading_status.get("llm_scaffold_totals", {}) or {}

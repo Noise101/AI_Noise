@@ -85,9 +85,55 @@ python3 local_worker_v21.py start "fox grapes"
 python3 local_worker_v21.py status
 ```
 
+## Japanese reading loop — evaluation integrity (2026-09-10)
+
+Three evaluation holes in the Japanese loop were closed. Each keeps the old
+state under `.local/audit/` and does not inherit its passes:
+
+- **P1-1 — retelling had no valid likelihood model.** The order-recovery
+  benchmark scored the *general* character RNN, whose corpus is the raw text of
+  every read book (Tatoeba bundles + unparseable books included) — a permanent
+  superset of the narrative story set — so `baseline_corpus_matches_rnn` was
+  always False (`measurement_invalid_baseline_corpus_mismatch`). Now a
+  **dedicated narrative RNN** (`japanese_sequence_v1`, regime `jnarr_seq_v1`,
+  `.local/reading-narrative-sequence.json`) trains only on recognised-narrative
+  raw text minus every held-out collection; the benchmark uses it and its
+  training URLs are the position baseline's source set by construction. The
+  general model is kept, unchanged, as the diagnostic / display model.
+- **P1-2 — dialogue scored echoes as understood.** `japanese_dialogue_v1.score`
+  now removes everything the reply copied from Noise's own sentence, requires
+  independent semantic content of the *kind* the utterance form asks for, and
+  records `echo_detected / clarification / relevant_new_information /
+  response_to_requested_act / contradicts_belief / partner_guessed_malformed`
+  plus utterance quality (`parseable / belief_supported / relation_supported /
+  malformed`). The probe freezes the *task* (concept + fixed intent), not just
+  the concept. VERSION 3.
+- **P1-3 — capability probe conditioned its baseline to fail.** `build_probe`
+  kept only baseline-fails problems, so `lift` was the raw derive-rate.
+  `capability_probe_v1` VERSION 3 splits into **challenge** (baseline-fails,
+  diagnostic only), **unbiased selection** (salt sample, no gold/baseline
+  filter), and **unopened final + reserve** (graded once, only after a
+  pre-registered selection threshold clears on two distinct model
+  fingerprints). Word groups are hash-pinned to a tier before any gold is seen.
+  On the live corpus the probe honestly reports `building` — only ~19 concrete
+  nouns have an independent ja.wiktionary genus, so word_meaning's held-out
+  concrete vocabulary is the rate limiter, not reading volume.
+
+`capability_confirmed` on the probe now needs ALL of: unbiased selection cleared
+the pre-registered bar on two distinct models; an unopened final improved in the
+same direction; the final beat its baseline by the minimum effect; tier
+separation valid. Retelling `capability_confirmed` still needs a candidate
+checkpoint passing its one-shot unopened final (unchanged).
+
 ## Next concrete work
 
 Improve the v51 heuristic observation parser without changing the locked benchmark examples. The present state/goal frames are auditable but still limited to explicit simple clauses. A new parser or representation must beat the frequency baseline on both the source-disjoint selection set and untouched final set; do not loosen thresholds to manufacture a positive result.
+
+The Japanese-side rate limiter is `japanese_word_meaning_v1`'s held-out concrete
+vocabulary (~19 words with a wiktionary-validatable genus). It caps the cognition
+probe's tiers AND the dialogue probe. Faster concrete-noun throughput is the
+highest-leverage next step; do not lower `MIN_SELECTION_PROBLEMS` /
+`TEST_SET_TARGET` to manufacture a signal.
 
 ## Safety and integrity
 
