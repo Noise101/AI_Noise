@@ -1477,6 +1477,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "japanese_reading": report.get("japanese_reading") or {
             key: read_json(runtime / "reading-status.json").get(key) for key in
             ("cycle", "reading", "curriculum", "comprehension", "retelling", "sequence",
+             "word_meaning", "cognition", "cognition_probe",
              "caregiver", "caregiver_questions", "llm_scaffold_totals",
              "aided_reading", "schema_migration", "self_vs_aided", "aided_store", "provenance", "sequence_retirement_log", "sequence_ever_trained_fingerprint", "sequence_boundary_fingerprint", "sequence_ever_trained_collections")},
         "storage": read_json(runtime / "storage-status.json"),
