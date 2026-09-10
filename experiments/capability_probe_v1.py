@@ -140,24 +140,36 @@ def _all_problems(wm_state: dict) -> list[dict]:
     pool = _ref_pool(wm_state)
     pairable = [g for g in pool if len(pool[g]) >= 2]
     out: list[dict] = []
+    seen_pids: set = set()
     for g in pairable:
         ws = pool[g]
         others = [w for og in pool if og != g for w in pool[og]]
-        for i in range(0, len(ws) - 1, 2):
-            a, b = ws[i], ws[i + 1]
-            out.append({"pid": _hid("cc", a, b), "level": 3, "type": "common_property",
-                        "concept": a, "other": b, "grade": "coarse", "gold": g,
-                        "prompt": f"「{a}」と「{b}」に共通するのは？",
-                        "options": cog._options(g, list(cog.COARSE), a + b + "c"),
-                        "ref": {a: g, b: g}, "words": sorted({a, b})})
-            if others:
-                odd = others[(i // 2) % len(others)]
-                og = next(x for x in pool if odd in pool[x])
-                out.append({"pid": _hid("oo", a, b, odd), "level": 2, "type": "odd_one_out",
-                            "concept": a, "grade": "exact", "gold": odd,
-                            "prompt": f"「{a}」「{b}」「{odd}」のうち、種類がちがうのは？",
-                            "options": cog._options(odd, [a, b], a + b + odd),
-                            "ref": {a: g, b: g, odd: og}, "words": sorted({a, b, odd})})
+        # pair each word with its next few in-genus neighbours (a denser pairing
+        # than consecutive-only -- every problem still lives in `a`'s tier, so a
+        # concept never straddles a split; it just yields more problems from a
+        # small pool)
+        for i in range(len(ws)):
+            for j in range(i + 1, min(i + 3, len(ws))):
+                a, b = ws[i], ws[j]
+                pid = _hid("cc", a, b)
+                if pid not in seen_pids:
+                    seen_pids.add(pid)
+                    out.append({"pid": pid, "level": 3, "type": "common_property",
+                                "concept": a, "other": b, "grade": "coarse", "gold": g,
+                                "prompt": f"「{a}」と「{b}」に共通するのは？",
+                                "options": cog._options(g, list(cog.COARSE), a + b + "c"),
+                                "ref": {a: g, b: g}, "words": sorted({a, b})})
+                if others:
+                    odd = others[(i * 7 + j) % len(others)]
+                    og = next(x for x in pool if odd in pool[x])
+                    pid = _hid("oo", a, b, odd)
+                    if pid not in seen_pids:
+                        seen_pids.add(pid)
+                        out.append({"pid": pid, "level": 2, "type": "odd_one_out",
+                                    "concept": a, "grade": "exact", "gold": odd,
+                                    "prompt": f"「{a}」「{b}」「{odd}」のうち、種類がちがうのは？",
+                                    "options": cog._options(odd, [a, b], a + b + odd),
+                                    "ref": {a: g, b: g, odd: og}, "words": sorted({a, b, odd})})
     for p in out:
         ct = _word_tier(p["concept"])
         distractors = [w for w in p["words"] if w != p["concept"]]
