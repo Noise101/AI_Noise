@@ -382,6 +382,23 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
         if se:
             lines.append(f"  例: {se.get('situation','')[:40]} → {se.get('result','')}"
                          f"／次: {se.get('correction','')[:50]}")
+    dl = reading_status.get("japanese_dialogue", {}) or {}
+    if dl.get("status") in ("ran", "partner_unavailable", "waiting"):
+        if dl.get("status") == "ran":
+            lines.append(
+                f"日本語で話す（読書知識の使用テスト）: 練習 {dl.get('practice_turns')}回"
+                f"／最良戦略 {dl.get('best_strategy')}／凍結テスト {dl.get('probe_rounds')}周")
+            lines.append(
+                f"  伝達成功率 {dl.get('overall_understood_rate')}"
+                f"（初回 {dl.get('first_understood_rate')}、差 {dl.get('before_after_gain')}、{dl.get('trend')}）"
+                "（相手は環境。返答は事実として不採用、伝わったかのみ計測）")
+            t = dl.get("sample_turn") or {}
+            if t.get("utterance"):
+                lines.append(f"  例: 「{t.get('utterance')}」→ {(t.get('reply') or '')[:40]}"
+                             f"（{'伝わった' if t.get('understood') else '伝わらず'}）")
+        else:
+            lines.append(f"日本語で話す: {dl.get('status')}"
+                         + (f"（{dl.get('have',0)}/{dl.get('need',0)}語）" if dl.get("status") == "waiting" else ""))
     if seq.get("held_out_bits_per_char") is not None:
         rlog = reading_status.get("sequence_retirement_log") or []
         lines.append(f"日本語文字RNN（診断のみ・能力判定に不使用）: "
@@ -1477,7 +1494,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
         "japanese_reading": report.get("japanese_reading") or {
             key: read_json(runtime / "reading-status.json").get(key) for key in
             ("cycle", "reading", "curriculum", "comprehension", "retelling", "sequence",
-             "word_meaning", "cognition", "cognition_probe",
+             "word_meaning", "cognition", "cognition_probe", "japanese_dialogue",
              "caregiver", "caregiver_questions", "llm_scaffold_totals",
              "aided_reading", "schema_migration", "self_vs_aided", "aided_store", "provenance", "sequence_retirement_log", "sequence_ever_trained_fingerprint", "sequence_boundary_fingerprint", "sequence_ever_trained_collections")},
         "storage": read_json(runtime / "storage-status.json"),
@@ -1839,7 +1856,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                 report["japanese_reading"] = {k: reading_status.get(k) for k in
                                               ("cycle", "books_fetched", "reading", "level_advance",
                                                "curriculum", "comprehension", "retelling", "sequence",
-                                               "word_meaning", "cognition", "cognition_probe",
+                                               "word_meaning", "cognition", "cognition_probe", "japanese_dialogue",
                                                "caregiver", "caregiver_questions", "llm_scaffold_totals",
                                                "aided_reading", "schema_migration", "self_vs_aided", "aided_store", "provenance", "sequence_retirement_log", "sequence_ever_trained_fingerprint", "sequence_boundary_fingerprint", "sequence_ever_trained_collections")}
             except Exception as reading_error:  # isolate the parallel loop

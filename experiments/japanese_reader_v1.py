@@ -35,6 +35,7 @@ import caregiver_v1 as caregiver
 import reading_llm_v1 as reading_llm
 import cognition_v1 as cognition
 import capability_probe_v1 as capability_probe
+import japanese_dialogue_v1 as ja_dialogue
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RUNTIME = ROOT / ".local"
@@ -46,6 +47,7 @@ SEQUENCE_FILE = "reading-sequence.json"
 WORD_MEANING_FILE = "reading-word-meaning.json"
 COGNITION_FILE = "cognition-state.json"
 PROBE_FILE = "cognition-probe.json"
+JA_DIALOGUE_FILE = "japanese-dialogue.json"
 CAREGIVER_FILE = "caregiver.json"
 AIDED_FILE = "reading-aided.json"          # evidence-0 aided readings (diagnostic store)
 STATUS_FILE = "reading-status.json"
@@ -550,6 +552,18 @@ def run_once(runtime: Path) -> dict:
         _write(runtime / COGNITION_FILE, cog_report)
         _write(runtime / PROBE_FILE, probe_report)
 
+    # say something in Japanese from what reading taught, learn if it landed.
+    # A use-test for the beliefs; the partner is an environment, not a teacher.
+    # AI_NOISE_JA_DIALOGUE=0 turns it off.
+    dlg_report = _read(runtime / JA_DIALOGUE_FILE)
+    if ja_dialogue.enabled():
+        try:
+            dlg_report = ja_dialogue.run_practice(
+                wm_report, (cog_report or {}).get("rules", []), dlg_report, cycle)
+        except Exception as exc:
+            dlg_report = {**(dlg_report or {}), "status": "error", "error": repr(exc)}
+        _write(runtime / JA_DIALOGUE_FILE, dlg_report)
+
     # a free-generation retelling of the book just read, conditioned ONLY on the
     # event representation Noise formed (no gold text, no LLM rephrasing)
     if book_id and seq_report.get("state") and heuristic:
@@ -614,6 +628,10 @@ def run_once(runtime: Path) -> dict:
                             ("status", "frozen_at", "problem_count", "first_derive_rate",
                              "latest_derive_rate", "latest_lift", "before_after_gain",
                              "trend", "latest_by_level")},
+        "japanese_dialogue": {k: (dlg_report or {}).get(k) for k in
+                              ("status", "frozen_count", "practice_turns", "probe_rounds",
+                               "best_strategy", "first_understood_rate", "overall_understood_rate",
+                               "before_after_gain", "trend", "sample_turn")},
         "comprehension": {k: comp_report.get(k) for k in
                           ("status", "comprehension_score", "consequence",
                            "consequence_baseline", "consequence_z", "beats_baseline",

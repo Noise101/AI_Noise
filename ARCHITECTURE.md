@@ -178,6 +178,21 @@ local model's reply is scored only for *usefulness* (verified against Noise's
 own grounded vocabulary and parser) or *comprehension* (was Noise understood).
 The reply never updates a belief (invariants 10, 13).
 
+### Say it from what you read (`japanese_dialogue_v1`)
+
+`generative_dialogue_v1` composes from a plateaued English vocabulary and sits
+at ~6%.  `japanese_dialogue_v1` composes a Japanese utterance from Noise's OWN
+reading knowledge -- a word-meaning belief (`「椅子」は道具です。`), an abstracted
+rule (`「きつね」ははしることがあります。`), a co-occurrence (`「鉄砲」は「おおかみ」と
+いっしょに出てきます。`) -- and scores itself behaviourally on whether the local
+model's reply is coherent, on-topic, and not a clarification request.  It is a
+**use-test**: a belief Noise cannot put into a sentence a person understands is
+not yet usable.  Concrete concepts are talked about first (`「椅子」は道具です` is a
+real test; `「親方」は生き物です` is trivially true).  Capability: a frozen concept
+set, one utterance per cycle alternating a rotating practice concept (learns the
+best composition strategy) and a frozen probe concept (a full round = len(frozen)
+cycles; the round's understood-rate is tracked).  `AI_NOISE_JA_DIALOGUE=0` off.
+
 ## Decision replay, not state replay
 
 `.local/events.jsonl` is an append-only, cross-module log (`{ts, curricula, module, event_type, before, after, reason}` per line) of discrete state-changing decisions: a benchmark locking, a selected model switching. It exists to answer "when and why did the system decide this" without trusting a human's memory of a status snapshot, and it coexists with (does not replace) each module's own bounded `revision_history`-style fields, which the algorithms themselves still read.
