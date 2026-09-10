@@ -626,6 +626,18 @@ def run_once(runtime: Path) -> dict:
     # A use-test for the beliefs; the partner is an environment, not a teacher.
     # AI_NOISE_JA_DIALOGUE=0 turns it off.
     dlg_report = _read(runtime / JA_DIALOGUE_FILE)
+    if (dlg_report.get("version") and dlg_report.get("version") != ja_dialogue.VERSION):
+        audit_dir = runtime / "audit"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        _write(audit_dir / f"japanese-dialogue-retired-{stamp}.json", {
+            "retired_at": stamp, "retired_version": dlg_report.get("version"),
+            "new_version": ja_dialogue.VERSION,
+            "reason": "P1-2: echo-aware scoring.  The prior scoring counted a "
+                      "verbatim/partial echo or a helpful guess at a malformed "
+                      "utterance as 'understood'; those understood rates are NOT "
+                      "carried into the new regime.",
+            "retired_report": dlg_report})
     if ja_dialogue.enabled():
         try:
             dlg_report = ja_dialogue.run_practice(
@@ -702,7 +714,11 @@ def run_once(runtime: Path) -> dict:
         "japanese_dialogue": {k: (dlg_report or {}).get(k) for k in
                               ("status", "frozen_count", "practice_turns", "probe_rounds",
                                "best_strategy", "first_understood_rate", "overall_understood_rate",
-                               "before_after_gain", "trend", "sample_turn")},
+                               "before_after_gain", "trend", "sample_turn",
+                               "recent_echo_rate", "recent_clarification_rate",
+                               "recent_new_info_rate", "recent_requested_act_rate",
+                               "recent_malformed_rate", "recent_belief_supported_rate",
+                               "latest_round_metrics", "have", "need")},
         "comprehension": {k: comp_report.get(k) for k in
                           ("status", "comprehension_score", "consequence",
                            "consequence_baseline", "consequence_z", "beats_baseline",

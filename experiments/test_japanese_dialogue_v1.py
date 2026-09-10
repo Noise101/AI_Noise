@@ -47,19 +47,83 @@ class ComposeTest(unittest.TestCase):
         self.assertEqual(jd.compose("みらい", WM, RULES, "genus"), "")
 
 
-class ScoreTest(unittest.TestCase):
-    def test_on_topic_coherent_reply_is_understood(self):
-        s = jd.score("「椅子」は道具です。", "椅子は座るための道具ですね。", "椅子", WM)
-        self.assertTrue(s["understood"])
+def _claim(concept, strategy="genus"):
+    return jd._claim(concept, WM, RULES, strategy)
 
-    def test_a_clarification_request_is_not_understood(self):
-        s = jd.score("「椅子」は道具です。", "すみません、どういう意味ですか。", "椅子", WM)
+
+class ScoreTest(unittest.TestCase):
+    def test_independent_correct_use_is_an_understood_candidate(self):
+        s = jd.score(_claim("椅子"), "椅子は人が座るために使います。木や金属で作られています。", WM)
+        self.assertTrue(s["understood"])
+        self.assertTrue(s["relevant_new_information"])
+        self.assertFalse(s["echo_detected"])
+
+    def test_full_verbatim_echo_fails(self):
+        s = jd.score(_claim("椅子"), "「椅子」は道具です。", WM)
+        self.assertTrue(s["echo_detected"])
+        self.assertFalse(s["understood"])
+
+    def test_leaked_prompt_prefix_echo_fails(self):
+        s = jd.score(_claim("椅子", "relation"),
+                     "学習者: 「椅子」は「鉛筆」と いっしょに 出てきます。", WM)
+        self.assertTrue(s["echo_detected"])
+        self.assertFalse(s["understood"])
+
+    def test_partial_echo_with_a_tiny_change_fails(self):
+        s = jd.score(_claim("椅子", "relation"), "椅子は鉛筆と一緒に出てきます。", WM)
+        self.assertFalse(s["understood"])
+        self.assertTrue(s["echo_detected"] or not s["relevant_new_information"])
+
+    def test_bare_agreement_fails(self):
+        for r in ("そうですね。", "はい、わかりました。", "なるほど、その通りです。"):
+            s = jd.score(_claim("椅子"), r, WM)
+            self.assertFalse(s["understood"], r)
+
+    def test_concept_word_in_an_unrelated_sentence_fails(self):
+        s = jd.score(_claim("椅子"), "椅子について、今日は良い天気で散歩が楽しいです。", WM)
+        self.assertFalse(s["understood"])
+
+    def test_clarification_fails_but_is_a_usable_recorded_failure(self):
+        s = jd.score(_claim("椅子"), "すみません、どういう意味ですか。", WM)
         self.assertFalse(s["understood"])
         self.assertTrue(s["clarification"])
 
-    def test_an_off_topic_reply_is_not_understood(self):
-        s = jd.score("「椅子」は道具です。", "今日はいい天気ですね。", "椅子", WM)
+    def test_wrong_added_genus_is_not_a_success_just_for_being_on_topic(self):
+        # partner volunteers a coarse genus that contradicts Noise's grounded one
+        s = jd.score(_claim("椅子"), "椅子は食べ物の一種で、とてもおいしいものです。", WM)
+        self.assertTrue(s["on_topic"])
+        self.assertTrue(s["contradicts_belief"])
         self.assertFalse(s["understood"])
+
+    def test_a_helpful_guess_at_a_malformed_utterance_is_not_a_capability_pass(self):
+        # "みらい" is not an understood belief -> malformed claim; even a good
+        # reply must not count
+        cl = jd._claim("みらい", WM, RULES, "genus")
+        self.assertTrue(cl["malformed"])
+        s = jd.score(cl, "未来とは、これから来る時間のことを指す言葉です。", WM)
+        self.assertTrue(s["partner_guessed_malformed"])
+        self.assertFalse(s["understood"])
+
+    def test_a_question_form_needs_an_actual_answer(self):
+        s_echo = jd.score(_claim("椅子", "question"), "「椅子」は道具ですか。", WM)
+        self.assertFalse(s_echo["understood"])
+        s_ans = jd.score(_claim("椅子", "question"),
+                         "はい、椅子は座るための道具です。台所でよく使います。", WM)
+        self.assertTrue(s_ans["response_to_requested_act"])
+        self.assertTrue(s_ans["understood"])
+
+    def test_quality_fields_are_reported_separately(self):
+        cl = jd._claim("椅子", WM, RULES, "relation")
+        for k in ("parseable", "belief_supported", "relation_supported", "malformed"):
+            self.assertIn(k, cl)
+        self.assertTrue(cl["relation_supported"])       # 鉛筆 is a real neighbour
+        self.assertFalse(cl["malformed"])
+
+    def test_partner_reply_never_flows_into_beliefs(self):
+        wm_copy = {k: (dict(v) if isinstance(v, dict) else v) for k, v in WM.items()}
+        before = str(wm_copy["beliefs"])
+        jd.score(_claim("椅子"), "椅子は食べ物です。動物です。植物です。", wm_copy)
+        self.assertEqual(str(wm_copy["beliefs"]), before)
 
 
 class RunTest(unittest.TestCase):

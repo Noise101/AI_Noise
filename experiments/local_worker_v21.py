@@ -387,15 +387,28 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
         if dl.get("status") == "ran":
             lines.append(
                 f"日本語で話す（読書知識の使用テスト）: 練習 {dl.get('practice_turns')}回"
-                f"／最良戦略 {dl.get('best_strategy')}／凍結テスト {dl.get('probe_rounds')}周")
+                f"／最良戦略 {dl.get('best_strategy')}／凍結テスト {dl.get('probe_rounds')}周"
+                f"（意図も凍結）")
             lines.append(
                 f"  伝達成功率 {dl.get('overall_understood_rate')}"
                 f"（初回 {dl.get('first_understood_rate')}、差 {dl.get('before_after_gain')}、{dl.get('trend')}）"
                 "（相手は環境。返答は事実として不採用、伝わったかのみ計測）")
+            lines.append(
+                f"  内訳（直近probe）: 復唱除外 {dl.get('recent_echo_rate')}／明確化要求 "
+                f"{dl.get('recent_clarification_rate')}／独立情報あり {dl.get('recent_new_info_rate')}"
+                f"／要求発話への応答 {dl.get('recent_requested_act_rate')}")
+            lines.append(
+                f"  発話の質: 信念に裏付け {dl.get('recent_belief_supported_rate')}／malformed "
+                f"{dl.get('recent_malformed_rate')}（malformed発話は相手が推測できても成功にしない）")
             t = dl.get("sample_turn") or {}
             if t.get("utterance"):
+                flags = "".join(x for x in (
+                    "復唱" if t.get("echo_detected") else "",
+                    "明確化" if t.get("clarification") else "",
+                    "malformed" if t.get("malformed") else "") if x)
                 lines.append(f"  例: 「{t.get('utterance')}」→ {(t.get('reply') or '')[:40]}"
-                             f"（{'伝わった' if t.get('understood') else '伝わらず'}）")
+                             f"（{'伝わった' if t.get('understood') else '伝わらず'}"
+                             + (f"・{flags}" if flags else "") + "）")
         else:
             lines.append(f"日本語で話す: {dl.get('status')}"
                          + (f"（{dl.get('have',0)}/{dl.get('need',0)}語）" if dl.get("status") == "waiting" else ""))
