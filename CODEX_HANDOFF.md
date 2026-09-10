@@ -114,10 +114,12 @@ state under `.local/audit/` and does not inherit its passes:
   diagnostic only), **unbiased selection** (salt sample, no gold/baseline
   filter), and **unopened final + reserve** (graded once, only after a
   pre-registered selection threshold clears on two distinct model
-  fingerprints). Word groups are hash-pinned to a tier before any gold is seen.
-  On the live corpus the probe honestly reports `building` — only ~19 concrete
-  nouns have an independent ja.wiktionary genus, so word_meaning's held-out
-  concrete vocabulary is the rate limiter, not reading volume.
+  fingerprints). Each word is hashed to a tier before any gold is seen; a
+  problem lives in the tier of the word it asks about, so no concept straddles a
+  split (a held-out problem's distractors may be challenge-tier or same-tier,
+  never a different held-out tier). `selection_refs` (the reference pool) is
+  decoupled from `TEST_SET_TARGET` — it keeps growing to `REF_POOL_TARGET` so
+  the probe can reach its tiers even after the frozen capability set is full.
 
 `capability_confirmed` on the probe now needs ALL of: unbiased selection cleared
 the pre-registered bar on two distinct models; an unopened final improved in the

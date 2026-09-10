@@ -110,11 +110,19 @@ def _ref_pool(wm_state: dict) -> "dict[str, list[str]]":
 
 
 # --------------------------------------------------------------------------
-# tier assignment -- a WORD GROUP is pinned to one tier by a stable hash, BEFORE
-# any gold / baseline correctness is looked at.  A problem is kept only if every
-# word it uses is in the same tier, so no concept / dictionary entry / source
-# ever straddles challenge / selection / final / reserve.
+# tier assignment -- each WORD is pinned to one tier by a stable hash, BEFORE any
+# gold / baseline correctness is looked at.  A problem lives in the tier of the
+# WORD IT ASKS ABOUT (`concept`): two problems about the same concept are always
+# in the same tier, so no concept / dictionary entry ever straddles
+# challenge / selection / final / reserve.  A held-out-tier (selection / final /
+# reserve) problem's *distractors* may be challenge-tier (challenge makes no
+# capability claim) or the SAME held-out tier -- never a different held-out tier,
+# which would let one held-out set inform another.  challenge problems take any
+# distractor (they are diagnostic only).
 # --------------------------------------------------------------------------
+_HELD_OUT_TIERS = ("selection", "final", "reserve")
+
+
 def _word_tier(word: str) -> str:
     h = int(hashlib.sha256(f"{TIER_SALT}|{word}".encode()).hexdigest(), 16) % 100
     if h < 40:
@@ -151,9 +159,29 @@ def _all_problems(wm_state: dict) -> list[dict]:
                             "options": cog._options(odd, [a, b], a + b + odd),
                             "ref": {a: g, b: g, odd: og}, "words": sorted({a, b, odd})})
     for p in out:
-        tiers = {_word_tier(w) for w in p["words"]}
-        p["tier"] = tiers.pop() if len(tiers) == 1 else None
+        ct = _word_tier(p["concept"])
+        distractors = [w for w in p["words"] if w != p["concept"]]
+        if ct == "challenge":
+            p["tier"] = "challenge"
+        elif all(_word_tier(w) in ("challenge", ct) for w in distractors):
+            p["tier"] = ct
+        else:
+            p["tier"] = None
     return [p for p in out if p["tier"]]
+
+
+def _tier_separation_valid(problems: list[dict]) -> bool:
+    """No word is the CONCEPT of problems sitting in two different held-out
+    tiers, and every problem's concept is in that problem's tier."""
+    concept_tier: dict = {}
+    for p in problems:
+        t = p.get("tier")
+        if _word_tier(p["concept"]) != t and t != "challenge":
+            return False
+        if t in _HELD_OUT_TIERS:
+            if concept_tier.setdefault(p["concept"], t) != t:
+                return False
+    return True
 
 
 def _sortkey(p: dict) -> str:
@@ -352,9 +380,7 @@ def maybe_run(cycle: int, wm_state: dict, heur_store: dict, shelf: dict,
     latest_sel = sel_hist[-1] if sel_hist else None
 
     # ---- C. unopened final: opened at most once, only after selection_pass ---
-    tier_separation_valid = all(
-        len({_word_tier(w) for w in p.get("words", [])}) == 1
-        for p in ch + sel + fin + rsv)
+    tier_separation_valid = _tier_separation_valid(ch + sel + fin + rsv)
     final_opened_count = sum(1 for r in (probe.get("final_result"), probe.get("reserve_result")) if r)
 
     if selection_pass and tier_separation_valid:

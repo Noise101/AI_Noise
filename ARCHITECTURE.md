@@ -147,9 +147,12 @@ tracks what the loop settled on.
 **Capability is the frozen probe, not the rule count** (invariant 16).
 `capability_probe_v1` freezes genus-combination problems whose **gold is the
 independent ja.wiktionary genus** (from word_meaning's already-fetched gists —
-no network), split into **three tiers that never share a word** (a word group is
-pinned to a tier by a stable hash *before* any gold is seen, so no concept /
-dictionary entry / source straddles a split):
+no network), split into tiers *before* any gold is seen: each word is hashed to a
+tier, and a problem lives in the tier of **the word it asks about** (`concept`),
+so two problems about the same concept always share a tier — no concept /
+dictionary entry straddles a split. A held-out-tier problem's *distractors* may
+be challenge-tier (challenge makes no capability claim) or the same held-out
+tier, never a different held-out tier.
 
 - **challenge** — problems the frequency baseline fails, collected on purpose.
   Its before/after curve is a self-improvement DIAGNOSTIC; a rise here is *not*

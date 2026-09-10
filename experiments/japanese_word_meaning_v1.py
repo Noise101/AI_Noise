@@ -55,7 +55,11 @@ LLM_ASKS_PER_CYCLE = 1         # local-model discrimination questions (train wor
 MIN_TEST_WORDS = 8
 SIGNIFICANCE_Z = 3.0
 EXPLAIN_TERMS = 5
-TEST_SET_TARGET = 40          # held-out set grows to this, genus-validated
+TEST_SET_TARGET = 40          # held-out capability set grows to this, genus-validated
+REF_POOL_TARGET = 400        # ... but keep genus-checking held-out words past that
+                             # so `selection_refs` (the cognition probe's reference
+                             # pool) keeps growing; only the first TEST_SET_TARGET
+                             # validated words join the frozen capability set
 TEST_PROBES_PER_CYCLE = 3     # held-out candidates genus-checked per cycle
 REFS_MAX_ATTEMPTS = 3         # a cached probe with no genus is retried up to this
                              # many times (a transient fetch failure must not
@@ -728,10 +732,12 @@ def learn_and_evaluate(stories: list[dict], previous: dict | None, cycle: int,
     # ja.wiktionary gives it a genus that folds onto a concrete coarse class.
     # This keeps the frozen set to words with a real denotation to learn --
     # the literary corpus's frequent "entities" are mostly names / abstractions.
-    if len(state["selection_words"]) < TEST_SET_TARGET:
-        # a cached probe with NO genus was very often a transient fetch failure,
-        # not "this word has no denotation" -- retry it up to REFS_MAX_ATTEMPTS
-        # instead of excluding the word from the held-out pool forever.
+    # a cached probe with NO genus was very often a transient fetch failure, not
+    # "this word has no denotation" -- retry it up to REFS_MAX_ATTEMPTS instead of
+    # excluding the word forever.  The frozen capability set stops growing at
+    # TEST_SET_TARGET, but `selection_refs` (the cognition probe's reference pool)
+    # keeps growing to REF_POOL_TARGET so that probe can still reach its tiers.
+    if len(state["selection_refs"]) < REF_POOL_TARGET:
         placed = {w for w, r in state["selection_refs"].items()
                   if _coarse((r or {}).get("genus", "")) in COARSE_CLASSES}
         exhausted = {w for w, r in state["selection_refs"].items()
@@ -748,7 +754,8 @@ def learn_and_evaluate(stories: list[dict], previous: dict | None, cycle: int,
             gist = _wiktionary_gist(w) or {}
             gist["attempts"] = prior + 1
             state["selection_refs"][w] = gist
-            if _coarse(gist.get("genus", "")) in COARSE_CLASSES and w not in held_out_set:
+            if (_coarse(gist.get("genus", "")) in COARSE_CLASSES and w not in held_out_set
+                    and len(state["selection_words"]) < TEST_SET_TARGET):
                 state["selection_words"].append(w)
         held_out_set = set(state["selection_words"])
     frozen_test = [w for w in state["selection_words"] if w in state["contexts"]]

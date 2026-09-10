@@ -54,18 +54,25 @@ class TierSeparationTest(unittest.TestCase):
             self.assertIn(tier, built)
         self.assertGreaterEqual(len(built["selection"]), probe.MIN_SELECTION_PROBLEMS)
 
-    def test_no_concept_or_source_group_straddles_tiers(self):
+    def test_no_concept_straddles_two_held_out_tiers(self):
         built = probe.build_probe(1, _build_state(), STORE, SHELF)
-        seen = {}
+        concept_tier = {}
         for tier in ("challenge", "selection", "final", "reserve"):
+            for p in built[tier]:
+                # a problem lives in its concept's tier ...
+                if tier != "challenge":
+                    self.assertEqual(probe._word_tier(p["concept"]), tier)
+                # ... two problems about the same concept -> same tier
+                self.assertEqual(concept_tier.setdefault(p["concept"], tier), tier)
+        # ... and a held-out-tier problem never has a distractor from a
+        # DIFFERENT held-out tier
+        for tier in ("selection", "final", "reserve"):
             for p in built[tier]:
                 for w in p["words"]:
-                    self.assertEqual(probe._word_tier(w), tier)      # word pinned to this tier
-                    self.assertIn(seen.setdefault(w, tier), (tier,))  # never a second tier
-        # and every problem's words share one tier
-        for tier in ("challenge", "selection", "final", "reserve"):
-            for p in built[tier]:
-                self.assertEqual(len({probe._word_tier(w) for w in p["words"]}), 1)
+                    if w != p["concept"]:
+                        self.assertIn(probe._word_tier(w), ("challenge", tier))
+        self.assertTrue(probe._tier_separation_valid(
+            built["challenge"] + built["selection"] + built["final"] + built["reserve"]))
 
     def test_selection_is_not_conditioned_on_baseline_being_wrong(self):
         built = probe.build_probe(1, _build_state(), STORE, SHELF)
