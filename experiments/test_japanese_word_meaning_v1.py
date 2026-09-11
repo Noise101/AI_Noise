@@ -300,5 +300,73 @@ class LearnAndEvaluateTest(unittest.TestCase):
             (st["selection_refs"].get(held) or {}).get("attempts", 99), wm.REFS_MAX_ATTEMPTS)
 
 
+class GluedParticleNormalisationTest(unittest.TestCase):
+    """A real bug found live: the particle scanner occasionally leaves a bare
+    topic/case particle glued to the following noun ("も気" from ...も気にな
+    った..., really 気 with a stray leading も). _norm must strip it -- the
+    same morphological analyser the event parser uses confirms structurally
+    that it is (particle, noun), not one word, so real words that happen to
+    start with the same kana (とけい, となり) are never touched.
+
+    `AI_NOISE_NO_MORPHOLOGY` is a process-wide env var another test module in
+    the same full-suite run may set -- setUp forces a real backend for the
+    tests that need one (see test_japanese_event_v1.MorphologyDrivenParseTest
+    for the same pattern) and undoes the pollution afterwards."""
+
+    def setUp(self):
+        import os
+        import morphology_teacher as mt
+        self._prev_env = os.environ.pop("AI_NOISE_NO_MORPHOLOGY", None)
+        mt.get_teacher(refresh=True)
+        if mt.get_teacher().name == "none":
+            self._restore_env()
+            self.skipTest("no morphological analyser vendored/installed")
+
+    def tearDown(self):
+        self._restore_env()
+
+    def _restore_env(self):
+        import os
+        import morphology_teacher as mt
+        if self._prev_env is None:
+            os.environ.pop("AI_NOISE_NO_MORPHOLOGY", None)
+        else:
+            os.environ["AI_NOISE_NO_MORPHOLOGY"] = self._prev_env
+        mt.get_teacher(refresh=True)
+
+    def test_a_glued_topic_particle_is_stripped_from_a_real_noun(self):
+        self.assertEqual(wm._norm("も気"), "気")
+        self.assertEqual(wm._norm("も返事"), "返事")
+
+    def test_a_glued_case_particle_is_stripped(self):
+        self.assertEqual(wm._norm("は椅子"), "椅子")
+
+    def test_a_real_word_that_merely_starts_with_a_particle_kana_is_untouched(self):
+        self.assertEqual(wm._norm("とけい"), "とけい")
+        self.assertEqual(wm._norm("となり"), "となり")
+
+    def test_a_prefix_is_not_mistaken_for_a_case_particle(self):
+        # お is an honorific PREFIX (接頭詞), not a case particle -- _GLUED_PARTICLE
+        # does not even list it, so this must survive untouched regardless
+        self.assertEqual(wm._norm("お返事"), "お返事")
+
+    def test_glued_pronoun_stripping_still_works_without_an_analyser(self):
+        import os
+        prev = os.environ.get("AI_NOISE_NO_MORPHOLOGY")
+        os.environ["AI_NOISE_NO_MORPHOLOGY"] = "1"
+        try:
+            import morphology_teacher as mt
+            mt.get_teacher(refresh=True)
+            self.assertEqual(wm._norm("とかれ"), "かれ")   # と+かれ, かれ in _STOP
+            self.assertEqual(wm._norm("も気"), "も気")     # no analyser: not stripped
+        finally:
+            if prev is None:
+                os.environ.pop("AI_NOISE_NO_MORPHOLOGY", None)
+            else:
+                os.environ["AI_NOISE_NO_MORPHOLOGY"] = prev
+            import morphology_teacher as mt
+            mt.get_teacher(refresh=True)
+
+
 if __name__ == "__main__":
     unittest.main()

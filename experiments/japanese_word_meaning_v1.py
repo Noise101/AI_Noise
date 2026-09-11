@@ -41,6 +41,8 @@ import urllib.parse
 import urllib.request
 from collections import Counter
 
+import morphology_teacher as morphology
+
 from web_cache import WEB_CACHE, NetworkBudgetExceeded
 
 VERSION = 2                   # belief-revision layer
@@ -214,17 +216,29 @@ def _compatible(a: str, b: str) -> bool:
     return {a, b} == {"人", "生き物"}          # a person is a creature
 
 
-_GLUED_PARTICLE = re.compile(r"^(と|て|は|も|に|を|が|で|の|や)([一-鿿゠-ヿぁ-ゟ]{2,})$")
+_GLUED_PARTICLE = re.compile(r"^(と|て|は|も|に|を|が|で|の|や)([一-鿿゠-ヿぁ-ゟ]{1,})$")
 
 
 def _norm(w: str) -> str:
     w = (w or "").strip()
-    # the parser glues a quotative/comitative particle to a following PRONOUN in
-    # dialogue ("と彼" -> "とかれ", "とわたし").  Strip it only then -- real nouns
-    # like とけい(時計) / となり(隣) keep their と.
+    # the parser glues a quotative/comitative/topic particle to a following
+    # word ("と彼" -> "とかれ", "も気になった" -> "も気").  Real nouns like
+    # とけい(時計) / となり(隣) keep their と -- the difference is structural,
+    # not lexical, so ask the same morphological analyser the event parser
+    # uses: if it segments the candidate as (particle, remainder) rather than
+    # one word, the particle survived a parser boundary miss and the
+    # remainder is the real word.  With no analyser installed, fall back to
+    # the narrower pronoun-only heuristic this always had.
     m = _GLUED_PARTICLE.match(w)
-    if m and m.group(2) in _STOP:
-        return m.group(2)
+    if m:
+        if m.group(2) in _STOP:
+            return m.group(2)
+        analysis = morphology.analyse(w)
+        if analysis and len(analysis.morphemes) >= 2:
+            first, second = analysis.morphemes[0], analysis.morphemes[1]
+            if (first.surface == m.group(1) and first.pos == "助詞"
+                    and second.surface == m.group(2)):
+                return m.group(2)
     return w
 
 

@@ -236,6 +236,40 @@ get a validated genus. Whether the extra structural yield actually moves the
 frozen retelling/probe/prediction numbers needs several read cycles on the
 restarted worker to observe.
 
+## Frozen dialogue probe was contaminated by a vocabulary bug (2026-09-11)
+
+`japanese_dialogue_v1`'s `overall_understood_rate` looked stagnant/negative
+(`before_after_gain: -0.166`) with no obvious cause. Root cause: two of its 12
+permanently-frozen probe concepts, `も気` and `も返事`, were not real words —
+the particle scanner had left a topic particle (も) glued to the front of a
+real noun (気/返事), and `japanese_word_meaning_v1._norm`'s glued-particle
+stripper only fired when the remainder was a known STOP word (its original
+purpose: `と彼` → `かれ`), so these survived as "words" and were reinforced by
+`reading_usage` evidence into `understood: True` beliefs. Once frozen into the
+probe's concept set (by design, to stop the metric's goalposts moving), no
+amount of further reading could ever fix them — they are not real words no
+matter how much text is read.
+
+Fixed generally, not by special-casing these two strings: `_norm` now asks the
+same morphological analyser the event parser uses whether a `(particle)(word)`
+candidate structurally segments as two tokens (particle + noun) rather than
+one; if so, the particle is stripped regardless of whether the remainder
+happens to be a stop word. Real words that merely start with the same kana as
+a particle (とけい, となり) are unaffected — the analyser tokenises them as one
+word. `japanese_dialogue_v1.VERSION` 3 → 4 archives the contaminated frozen
+set to `.local/audit/` (the same version-bump-retires mechanism used
+elsewhere) and re-freezes from the now-clean concept pool; the two corrupted
+beliefs were also removed from the live `.local/reading-word-meaning.json` as
+a one-time data-hygiene fix (they were never real observations to begin with).
+
+This does not mean every "flat" or "declining" number in this project is a
+bug: `cognition_probe`'s `challenge_before_after_gain: -0.096` that surfaced
+in the same conversation is ordinary sampling noise on a 42-item, admittedly
+non-capability diagnostic tier (its own `note` field says so) that has
+fluctuated between 0.095 and 0.227 for 65 measurements running — the tier that
+matters, `selection`, is trending `improving`. Read the full history before
+calling a small-n diagnostic swing a regression.
+
 ## Safety and integrity
 
 - Web access is read-only. Do not post, purchase, change permissions, or mutate external services.

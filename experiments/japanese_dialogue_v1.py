@@ -29,7 +29,15 @@ import time
 import urllib.request
 from collections import Counter
 
-VERSION = 3                     # v3 (P1-2): echo-aware scoring, per-intent required
+VERSION = 4                     # v4: word_meaning._norm fixed a bug that let a
+                                # topic/case particle glued to a following noun
+                                # ("も気", "も返事" -- really 気/返事 with a
+                                # stray leading も) be believed as its own
+                                # "understood" word; two of this frozen set's
+                                # 12 concepts were exactly that, permanently
+                                # capping the probe on non-words no amount of
+                                # reading could ever fix.  Re-freezes clean.
+                                # v3 (P1-2): echo-aware scoring, per-intent required
                                 # response, utterance-quality split, frozen tasks
 FROZEN_CONCEPTS = 12
 MIN_UNDERSTOOD_TO_START = 25
