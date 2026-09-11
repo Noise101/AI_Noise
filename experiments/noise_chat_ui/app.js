@@ -4,7 +4,24 @@ const input = document.querySelector('#message');
 const send = document.querySelector('#send');
 let loaded = false;
 
-function message(role, text, pending = false) {
+const intentLabels = {
+  greeting: '挨拶', claim: '説明', ask_meaning: '意味の質問',
+  open_question: '未解決の質問', elliptical_question: '例を尋ねる質問',
+  recall_knowledge: '記憶の確認', confirm_understanding: '理解の確認',
+  ask_curiosity: '好奇心の確認', correction: '訂正', parse_feedback: '解析への訂正',
+  preference: 'あなたの好み', recall_preference: '好みの確認',
+  learning_status: '学習状況', activity_status: '現在の活動',
+  ask_noise_preference: 'Noiseの好み', unresolved: 'まだ解釈できない発話',
+};
+
+function interpretationText(read) {
+  if (!read || !read.intent) return '';
+  const kind = intentLabels[read.intent] || read.intent;
+  const topic = read.topic ? ` ・話題「${read.topic}」` : '';
+  return `Noiseの読み: ${kind}${topic}`;
+}
+
+function message(role, text, pending = false, read = null) {
   const article = document.createElement('article');
   article.className = `message ${role}${pending ? ' pending' : ''}`;
   const speaker = document.createElement('div');
@@ -14,6 +31,13 @@ function message(role, text, pending = false) {
   bubble.className = 'bubble';
   bubble.textContent = text;
   article.append(speaker, bubble);
+  const explanation = interpretationText(read);
+  if (role === 'noise' && explanation) {
+    const meta = document.createElement('div');
+    meta.className = 'interpretation';
+    meta.textContent = explanation;
+    article.append(meta);
+  }
   transcript.append(article);
   transcript.scrollTop = transcript.scrollHeight;
   return article;
@@ -24,7 +48,7 @@ function renderTurns(turns) {
   if (turns.length) transcript.replaceChildren();
   for (const turn of turns) {
     message('user', turn.user || '');
-    message('noise', turn.noise || '');
+    message('noise', turn.noise || '', false, turn.interpretation || null);
   }
   loaded = true;
 }
@@ -83,6 +107,14 @@ form.addEventListener('submit', async (event) => {
     if (!response.ok) throw new Error(result.error || '送信に失敗しました');
     waiting.querySelector('.bubble').textContent = result.reply;
     waiting.classList.remove('pending');
+    const read = result.state?.conversation?.last_exchange?.interpretation;
+    const explanation = interpretationText(read);
+    if (explanation) {
+      const meta = document.createElement('div');
+      meta.className = 'interpretation';
+      meta.textContent = explanation;
+      waiting.append(meta);
+    }
     renderState(result.state);
   } catch (error) {
     waiting.querySelector('.bubble').textContent = `会話できませんでした: ${error.message}`;

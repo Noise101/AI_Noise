@@ -80,6 +80,42 @@ class NoiseChatTests(unittest.TestCase):
         _, state = chat.converse("こんにちは", state)
         self.assertEqual(state["stats"]["claims_heard"], 1)
 
+    def test_real_failed_dialogue_now_tracks_topic_and_understanding(self):
+        state = None
+        _, state = chat.converse("美味は、人間の感覚", state)
+        recalled, state = chat.converse("何を覚えた？", state)
+        self.assertIn("美味は人間の感覚", recalled)
+        understood, state = chat.converse("美味はわかった？", state)
+        self.assertIn("覚えたことと理解したことは別", understood)
+        self.assertEqual(state["last_turn"]["interpretation"]["topic"], "美味")
+
+    def test_greeting_changes_with_conversation_state(self):
+        first, state = chat.converse("こんにちは", None)
+        _, state = chat.converse("レモンは果物だよ", state)
+        second, state = chat.converse("こんにちは", state)
+        self.assertNotEqual(first, second)
+        self.assertIn("レモン", second)
+
+    def test_elliptical_question_separates_modifier_and_head(self):
+        reply, state = chat.converse("美味しい食べ物は？", None)
+        read = state["last_turn"]["interpretation"]
+        self.assertEqual(read["intent"], "elliptical_question")
+        self.assertEqual(read["topic"], "食べ物")
+        self.assertIn("美味しいに当てはまる食べ物", reply)
+
+    def test_parsing_feedback_is_retained_as_error(self):
+        _, state = chat.converse("今使っている", None)
+        reply, state = chat.converse("切り方がおかしい、今、使って、いる", state)
+        self.assertIn("切り分けを誤り", reply)
+        self.assertEqual(state["errors"][-1]["kind"], "parsing")
+
+    def test_learning_status_uses_actual_memory(self):
+        memory = {"beliefs": {"椅子": {"understood": True, "genus": "道具",
+                                      "last_cycle": 4}}}
+        reply, state = chat.converse("今日は何を学んだ？", None, memory)
+        self.assertIn("椅子", reply)
+        self.assertEqual(chat.summary(state)["last_intent"], "learning_status")
+
 
 if __name__ == "__main__":
     unittest.main()

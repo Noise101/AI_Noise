@@ -203,6 +203,11 @@ _CACHED: "object | None" = None
 def get_teacher(refresh: bool = False):
     """The best available analyser, or a null backend.  Cached per process."""
     global _CACHED
+    if refresh:
+        _CACHED = None
+        cache = globals().get("_ANALYSE_CACHE")
+        if isinstance(cache, dict):
+            cache.clear()
     if _CACHED is not None and not refresh:
         return _CACHED
     if os.environ.get("AI_NOISE_NO_MORPHOLOGY") == "1":

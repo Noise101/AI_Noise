@@ -29,6 +29,21 @@ class NullBackendTest(unittest.TestCase):
         self.assertEqual(analysis.evidence_score, 0.0)
         self.assertFalse(analysis.verified)
 
+    def test_refresh_discards_results_cached_by_the_previous_backend(self):
+        previous = os.environ.get("AI_NOISE_NO_MORPHOLOGY")
+        os.environ["AI_NOISE_NO_MORPHOLOGY"] = "1"
+        try:
+            mt.get_teacher(refresh=True)
+            self.assertIsNone(mt.analyse("キャッシュ更新確認"))
+            self.assertIn("キャッシュ更新確認", mt._ANALYSE_CACHE)
+        finally:
+            if previous is None:
+                os.environ.pop("AI_NOISE_NO_MORPHOLOGY", None)
+            else:
+                os.environ["AI_NOISE_NO_MORPHOLOGY"] = previous
+            mt.get_teacher(refresh=True)
+        self.assertNotIn("キャッシュ更新確認", mt._ANALYSE_CACHE)
+
 
 def _teacher_available() -> bool:
     prev = os.environ.pop("AI_NOISE_NO_MORPHOLOGY", None)

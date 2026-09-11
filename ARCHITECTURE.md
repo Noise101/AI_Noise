@@ -319,15 +319,24 @@ its rates are not inherited. `AI_NOISE_JA_DIALOGUE=0` off.
 
 ### Direct, meaningful conversation (`noise_chat_v1`)
 
-`local_worker_v21.py talk "..."` is deliberately narrower than free
-generation.  Noise can greet, ask about an unknown topic, remember an owner's
+`local_worker_v21.py talk "..."` and the local GUI use a stateful, bounded
+dialogue engine rather than a stateless greeting/regex loop. Noise records an
+explicit interpretation for every turn, carries the current topic and pending
+question across turns, composes greetings from actual conversation/reading
+state, separates shortened-question modifiers from their head noun, and can
+report what it remembers, what it merely heard, and what it has independently
+grounded. A user can inspect the interpretation in the GUI and explicit parsing
+feedback is retained as an error so the same reading is not silently presented
+as established. Noise can also ask about an unknown topic, remember an owner's
 explicit claim or preference, recall it later, and retain an explicit
-correction as an error.  A claim is stored as `owner_testimony` with
+correction as an error. A claim is stored as `owner_testimony` with
 `conversation_memory_not_world_fact`; it never enters the word-meaning ledger,
 the semantic vectors, rules, or capability probes merely because a human said
 it.  Contradicted conversation claims are retracted but retained in history.
-Until generation itself becomes reliably meaningful, an honest short template
-or question is preferred to fluent-looking nonsense.
+Replies are composed only from these typed states and bounded clauses. Until
+generation itself becomes reliably meaningful, an honest grounded response or
+question is preferred to fluent-looking nonsense; dialogue fluency is not
+reported as learned world knowledge.
 
 ## Decision replay, not state replay
 

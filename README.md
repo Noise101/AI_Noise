@@ -69,7 +69,7 @@ python3 experiments/noise_chat_ui.py start
 python3 experiments/noise_chat_ui.py stop
 ```
 
-現在扱えるのは短い挨拶、説明、好き嫌い、記憶の確認、訂正です。人の発言は
+会話エンジンv2は、現在の話題、返答待ちの質問、人間から聞いた説明、読書から独立に得た根拠、過去の解析誤りを別々に保持します。GUIは各返答の下にNoiseの発話解釈と話題を表示し、記憶しただけの内容を「理解した」とは表示しません。従来の`.local/human-conversation.json`は消去せず自動移行します。人の発言は
 `owner_testimony`として記憶され、検証なしに世界知識へ昇格しません。GUIが停止しても
 自動学習ワーカーは停止しません。
 
