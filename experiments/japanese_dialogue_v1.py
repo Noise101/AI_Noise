@@ -34,11 +34,16 @@ VERSION = 3                     # v3 (P1-2): echo-aware scoring, per-intent requ
 FROZEN_CONCEPTS = 12
 MIN_UNDERSTOOD_TO_START = 25
 STRATEGIES = ("genus", "property", "relation", "question")
-PARTNER_TIMEOUT = 30
-# the big local model takes ~55s per JA reply -- far too slow for a per-cycle
-# call.  A small model answers a one-sentence statement in a few seconds and is
-# plenty for "was this understood".  Override with AI_NOISE_JA_DIALOGUE_MODEL.
-PARTNER_MODEL = os.environ.get("AI_NOISE_JA_DIALOGUE_MODEL", "qwen3:4b")
+PARTNER_TIMEOUT = None      # no artificial cap -- wait for the reply, however long
+# run_practice calls the partner at most once per cycle, so a slower/larger
+# model costs one long wait per cycle, not a loop of them.  The owner's
+# standing choice is qwen3.8:27b, accepting its ~55s replies; an earlier
+# revision added a 30s cap that was never the owner's decision, and it
+# silently scored two whole probe rounds 0.0 by cutting the model off before
+# it could answer.  The call now blocks until the model actually replies or
+# the connection itself fails, instead of being cut off on a clock. Override
+# with AI_NOISE_JA_DIALOGUE_MODEL if a different partner model is ever wanted.
+PARTNER_MODEL = os.environ.get("AI_NOISE_JA_DIALOGUE_MODEL", "qwen3.8:27b")
 HISTORY_CAP = 200
 TURNS_CAP = 60
 

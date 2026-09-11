@@ -30,7 +30,7 @@ Do not repeatedly run the full profile when only documentation or one isolated p
 
 ## Optional local AI
 
-Ollama may be used only as a proposal generator. The default helper model is `qwen3:4b`, overridable with `AI_NOISE_LOCAL_MODEL`. A local proposal has `verified=false` and `evidence_score=0.0`; it cannot update a belief until ordinary sources validate it.
+Ollama may be used only as a proposal generator. The default helper model is `qwen3.8:27b`, overridable with `AI_NOISE_LOCAL_MODEL`. The per-cycle Japanese dialogue partner (`japanese_dialogue_v1`) uses the same model by default (`AI_NOISE_JA_DIALOGUE_MODEL` to override it independently) and blocks until it replies rather than timing out. A local proposal has `verified=false` and `evidence_score=0.0`; it cannot update a belief until ordinary sources validate it.
 
 Use local AI for bounded candidate generation, query variants, or compacting material that is already stored in the evidence ledger. Do not use it as the judge, source, or final answer. If its JSON is invalid, labels merely repeat the queried surface, or it is unavailable, return zero proposals and continue without it.
 

@@ -330,7 +330,7 @@ python3 local_worker_v21.py stop
 
 ## v25: ローカルAIとの会話練習
 
-`local_conversation_v25.py`は、各新規カリキュラムで一度、Noise自身の最弱能力と最も強い好奇心から発話をテンプレート生成し、Ollama `qwen3:4b`と短い一往復を行います。返答、相手からの質問、観察した語形を`.local/dialogue-ledger.json`へ保存します。
+`local_conversation_v25.py`は、各新規カリキュラムで一度、Noise自身の最弱能力と最も強い好奇心から発話をテンプレート生成し、Ollama `qwen3.8:27b`(`AI_NOISE_LOCAL_MODEL`で上書き可)と短い一往復を行います。返答、相手からの質問、観察した語形を`.local/dialogue-ledger.json`へ保存します。
 
 ローカルAIは会話相手であり教師・採点者・情報源ではありません。全発言は`verified=false`、`evidence_score=0.0`で、辞書的意味や因果知識を直接更新できません。Ollamaが停止中なら会話だけを飛ばし、通常の学習は継続します。無効化する場合は`start`または`run`へ`--no-local-conversation`を付けます。
 
