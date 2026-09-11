@@ -285,9 +285,9 @@ _NON_QUESTION_KA_WORDS = ("確か", "静か", "豊か", "愚か", "朗らか", "
 def _is_question_form(text: str) -> bool:
     """Whether the utterance FUNCTIONS as a question -- structurally, not by
     the presence of a written ？.  Japanese speech and casual text routinely
-    end a real question in ですか/ますか/でしょうか, a bare 終助詞 か, or the
-    colloquial かな/かしら, with no question mark at all; relying on ？ alone
-    silently drops most ordinary questions into "unresolved"."""
+    end a real question in ですか/ますか/でしょうか, a bare 終助詞 か or の, or
+    the colloquial かな/かしら, with no question mark at all; relying on ？
+    alone silently drops most ordinary questions into "unresolved"."""
     if _QUESTION_END.search(text):
         return True
     stripped = text.rstrip("。.!！ \t\n")
@@ -302,7 +302,103 @@ def _is_question_form(text: str) -> bool:
             return last.surface == "か" and last.pos in ("助詞", "助動詞")
         return True                     # no analyser: a bare -か tail with no
                                         # counter-indication is treated as one
+    if stripped.endswith("の") and len(stripped) >= 2:
+        # 終助詞 の ("何ができるの") is a casual question; 連体化 の ("私のもの
+        # の", nominalising/possessive) is not -- only the analyser tells
+        # them apart, so with none installed a bare の is left unresolved
+        # rather than risk reading every attributive の as a question
+        analysis = morphology.analyse(stripped)
+        if analysis and analysis.morphemes:
+            last = analysis.morphemes[-1]
+            return (last.surface == "の" and last.pos == "助詞"
+                    and last.pos_detail == "終助詞")
+        return False
     return False
+
+
+# --- structural small-talk detection ----------------------------------------
+# Matching a fixed surface string ("ありがとうございます") is exactly why
+# "こんばんわ" (spelling) and "何が出来るの" (a conjugation regex missed) kept
+# failing live -- every new ending/politeness level/spelling is its own patch
+# forever.  These check morphology's LEMMA (dictionary form, invariant across
+# conjugation, honorific prefixes, and politeness level) and structural shape
+# instead, with the original literal regex kept as the fallback when no
+# analyser is installed (AI_NOISE_NO_MORPHOLOGY=1) -- invariant 1 holds.
+_GREETING_LEMMAS = {"こんにちは", "こんにちわ", "こんばんは", "こんばんわ",
+                    "おはよう", "やあ", "はじめまして"}
+_THANKS_LEMMAS = {"ありがとう", "有難う"}
+_WELLBEING_LEMMAS = {"元気", "調子"}
+_CAPABILITY_LEMMAS = {"できる", "出来る"}
+_IDENTITY_PRONOUNS = {"あなた", "きみ", "君", "noise"}
+_IDENTITY_NOUNS = {"名前", "なまえ"}
+_TRAILING_POS = ("助動詞", "記号", "助詞")
+
+
+def _lemmas_of(morphemes: list, pos: "tuple[str, ...]") -> set[str]:
+    return {(m.base or m.surface) for m in morphemes if m.pos in pos}
+
+
+def _leading_interjection(morphemes: list) -> "tuple[object, int] | None":
+    """The first 感動詞, skipping a leading intensifying adverb ("どうも
+    ありがとう", "本当にありがとう") -- returns (morpheme, index) or None."""
+    for i, m in enumerate(morphemes):
+        if m.pos == "副詞":
+            continue
+        return (m, i) if m.pos == "感動詞" else None
+    return None
+
+
+def _is_greeting(text: str) -> bool:
+    a = morphology.analyse(text.rstrip("。.!！ \t\n"))
+    if not a or not a.morphemes:
+        return bool(_GREET.match(text))
+    hit = _leading_interjection(a.morphemes)
+    if not hit or (hit[0].base or hit[0].surface) not in _GREETING_LEMMAS:
+        return False
+    return all(m.pos in _TRAILING_POS for m in a.morphemes[hit[1] + 1:])   # +ございます等
+
+
+def _is_thanks(text: str) -> bool:
+    a = morphology.analyse(text.rstrip("。.!！ \t\n"))
+    if not a or not a.morphemes:
+        return bool(_THANKS.match(text))
+    hit = _leading_interjection(a.morphemes)
+    if not hit or (hit[0].base or hit[0].surface) not in _THANKS_LEMMAS:
+        return False
+    return all(m.pos in _TRAILING_POS for m in a.morphemes[hit[1] + 1:])   # +ございました等
+
+
+def _is_wellbeing_question(text: str) -> bool:
+    a = morphology.analyse(text.rstrip("。.!！？? \t\n"))
+    if not a or not a.morphemes:
+        return bool(_ASK_WELLBEING.match(text))
+    lemmas = _lemmas_of(a.morphemes, ("名詞",))
+    if not (lemmas & _WELLBEING_LEMMAS):
+        return False
+    # 元気 alone (as a claim -- "元気な子") is not this; it must stand as the
+    # sentence's own topic/predicate, not a modifier before another noun
+    return len(a.morphemes) <= 6 and _is_question_form(text)
+
+
+def _is_capability_question(text: str) -> bool:
+    a = morphology.analyse(text.rstrip("。.!！？? \t\n"))
+    if not a or not a.morphemes:
+        return bool(_ASK_CAPABILITY.search(text))
+    lemmas = _lemmas_of(a.morphemes, ("動詞",))
+    return bool(lemmas & _CAPABILITY_LEMMAS) and _is_question_form(text)
+
+
+def _is_identity_question(text: str) -> bool:
+    a = morphology.analyse(text.rstrip("。.!！？? \t\n"))
+    if not a or not a.morphemes:
+        return bool(_ASK_IDENTITY.match(text))
+    ms = a.morphemes
+    if not ms or (ms[0].base or ms[0].surface).lower() not in _IDENTITY_PRONOUNS:
+        return False
+    lemmas = _lemmas_of(ms, ("名詞", "代名詞"))
+    # あなたの(お)名前は / あなたは誰(ですか/なの) / Noiseとは何ですか -- all ask
+    # about identity, not a word's meaning, despite sharing 何/誰 with _WHAT
+    return bool(lemmas & (_IDENTITY_NOUNS | {"誰", "だれ", "何", "なに"}))
 
 
 def _topic(text: str) -> str:
@@ -386,15 +482,15 @@ def _interpret(text: str, state: dict) -> dict:
         return {"intent": "correction", "confidence": 0.95,
                 "reason": correction.group(1),
                 "claim": _claim_from_text(_clean(correction.group(2)), state, False)}
-    if _GREET.match(text):
+    if _is_greeting(text):
         return {"intent": "greeting", "confidence": 1.0}
-    if _ASK_IDENTITY.match(text):
+    if _is_identity_question(text):
         return {"intent": "ask_identity", "confidence": 0.95}
-    if _ASK_WELLBEING.match(text):
+    if _is_wellbeing_question(text):
         return {"intent": "ask_wellbeing", "confidence": 0.9}
-    if _THANKS.match(text):
+    if _is_thanks(text):
         return {"intent": "thanks", "confidence": 0.95}
-    if _ASK_CAPABILITY.search(text):
+    if _is_capability_question(text):
         return {"intent": "ask_capability", "confidence": 0.85}
     # generic ("さっきの話に戻って") must be checked before named -- it would
     # otherwise also match _GO_BACK_NAMED with "さっき"/"前"/"元" captured as a

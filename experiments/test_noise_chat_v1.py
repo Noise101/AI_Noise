@@ -245,6 +245,94 @@ class _FakePhraser:
         return self._reply
 
 
+class StructuralSmallTalkTests(unittest.TestCase):
+    """Small-talk intents keyed by morphological LEMMA + structural shape, not
+    a literal surface string -- matching one exact spelling/conjugation/
+    politeness level is exactly why "こんばんわ" and "何が出来るの" kept
+    failing live; every new ending was its own future patch.
+
+    `AI_NOISE_NO_MORPHOLOGY` is a process-wide env var another test module in
+    the same full-suite run may set (`test_japanese_reader_v1` forces it off
+    for its own determinism) -- setUp forces a real backend for these tests
+    and undoes the pollution afterwards (same pattern as
+    test_japanese_event_v1.MorphologyDrivenParseTest)."""
+
+    def setUp(self):
+        import os
+        import morphology_teacher as mt
+        self._prev_env = os.environ.pop("AI_NOISE_NO_MORPHOLOGY", None)
+        mt.get_teacher(refresh=True)
+        if mt.get_teacher().name == "none":
+            self._restore_env()
+            self.skipTest("no morphological analyser vendored/installed")
+
+    def tearDown(self):
+        self._restore_env()
+
+    def _restore_env(self):
+        import os
+        import morphology_teacher as mt
+        if self._prev_env is None:
+            os.environ.pop("AI_NOISE_NO_MORPHOLOGY", None)
+        else:
+            os.environ["AI_NOISE_NO_MORPHOLOGY"] = self._prev_env
+        mt.get_teacher(refresh=True)
+
+    def test_greeting_survives_politeness_and_the_common_wa_misspelling(self):
+        for text in ("こんばんわ", "こんにちわ", "おはようございます"):
+            _, state = chat.converse(text, None)
+            self.assertEqual(state["last_turn"]["interpretation"]["intent"], "greeting")
+
+    def test_thanks_survives_politeness_level_and_a_leading_intensifier(self):
+        for text in ("ありがとうございました", "ありがとうね", "どうもありがとうございます",
+                     "本当にありがとう"):
+            _, state = chat.converse(text, None)
+            self.assertEqual(state["last_turn"]["interpretation"]["intent"], "thanks")
+
+    def test_wellbeing_question_survives_casual_and_polite_forms(self):
+        for text in ("元気かな", "お元気ですか", "調子はどうですか"):
+            _, state = chat.converse(text, None)
+            self.assertEqual(state["last_turn"]["interpretation"]["intent"], "ask_wellbeing")
+
+    def test_capability_question_survives_a_bare_no_ending(self):
+        # の as a casual 終助詞 question marker, not the ？-anchored regex this
+        # used to require
+        for text in ("何が出来ますか", "何ができるの"):
+            _, state = chat.converse(text, None)
+            self.assertEqual(state["last_turn"]["interpretation"]["intent"], "ask_capability")
+
+    def test_identity_question_covers_pronoun_and_noise_by_name(self):
+        for text in ("あなたのお名前は", "君は誰なの", "Noiseとは何ですか"):
+            _, state = chat.converse(text, None)
+            self.assertEqual(state["last_turn"]["interpretation"]["intent"], "ask_identity")
+
+    def test_attributive_no_is_not_misread_as_a_question(self):
+        # 連体化 の (possessive/nominalising) is not 終助詞 の -- only the
+        # analyser tells them apart; this must not become ask_capability or
+        # any other question-routed intent
+        self.assertFalse(chat._is_question_form("これは私のものの"))
+
+    def test_structural_checks_fall_back_to_the_literal_regex_without_an_analyser(self):
+        import os
+        prev = os.environ.get("AI_NOISE_NO_MORPHOLOGY")
+        os.environ["AI_NOISE_NO_MORPHOLOGY"] = "1"
+        try:
+            import morphology_teacher as mt
+            mt.get_teacher(refresh=True)
+            self.assertTrue(chat._is_greeting("こんにちは"))
+            self.assertTrue(chat._is_thanks("ありがとうございます"))
+            self.assertTrue(chat._is_wellbeing_question("お元気ですか"))
+            self.assertTrue(chat._is_capability_question("何ができるの"))
+            self.assertTrue(chat._is_identity_question("あなたの名前は"))
+        finally:
+            if prev is None:
+                os.environ.pop("AI_NOISE_NO_MORPHOLOGY", None)
+            else:
+                os.environ["AI_NOISE_NO_MORPHOLOGY"] = prev
+            import morphology_teacher as mt
+            mt.get_teacher(refresh=True)
+
+
 class PhrasingLayerTests(unittest.TestCase):
     """PhrasingModel is a presentation layer only -- content-verified, never
     a source of new information (ARCHITECTURE.md "Optional local-model

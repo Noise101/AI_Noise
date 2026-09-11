@@ -341,8 +341,11 @@ reported as learned world knowledge.
 Whether an utterance FUNCTIONS as a question is decided structurally
 (`_is_question_form`), not by the presence of a written `？` -- ordinary
 Japanese speech and casual text routinely end a real question in
-です か/ますか/でしょうか, a bare 終助詞 か, or the colloquial かな/かしら, and
-omit the mark entirely. Relying on `？` alone silently dropped very common
+です か/ますか/でしょうか, a bare 終助詞 か or の, or the colloquial かな/かしら,
+and omit the mark entirely (の is ambiguous with the attributive/nominalising
+連体化 の -- only the analyser tells them apart, so a bare の is read as a
+question only when it is confirmed 終助詞, and never guessed at all with no
+analyser installed). Relying on `？` alone silently dropped very common
 questions ("元気ですか", "あなたの名前は") into the unresolved fallback. A
 sentence-final remark/reaction particle (ね/よね/なあ -- "今日はいい天気です
 ね") is a phatic remark, not testimony, and is never stored as a claim even
@@ -352,6 +355,23 @@ answer). A stored claim's predicate is rejected if it is itself question-shaped
 -- a loose regex match must not turn the user's own unanswered question back
 into "testimony" about its subject. The unresolved fallback asks the user to
 rephrase rather than declaring the utterance unreadable.
+
+**Small-talk intents are keyed by morphological lemma + structure, not a
+literal surface string.** Matching one exact spelling, conjugation, or
+politeness level ("ありがとうございます") is a permanent source of live
+failures on ordinary variation -- casual spelling ("こんばんわ" for こんばんは),
+politeness level ("ありがとうございました" / "ありがとうね" / "どうも
+ありがとうございます"), or a different conjugation of the same predicate
+("できます" / "出来るの", both lemma できる). `_is_greeting`, `_is_thanks`,
+`_is_wellbeing_question`, `_is_capability_question`, and
+`_is_identity_question` check the analyser's dictionary-form lemma and part
+of speech (an interjection's lemma is in a small closed set, a predicate's
+lemma is できる regardless of how it was conjugated, a leading pronoun plus a
+名前/誰 lemma) rather than anchoring a regex to one written form of the
+sentence. Each keeps its original literal-regex behaviour as the fallback
+when no analyser is installed (`AI_NOISE_NO_MORPHOLOGY=1`) -- narrower
+coverage without the analyser is expected and acceptable; a wrong or
+fabricated classification is not.
 
 **Multi-topic memory (`topic_stack`).** A single `current_topic` string cannot
 represent "go back to what we were discussing before" -- every topic switch
