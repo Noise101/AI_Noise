@@ -255,6 +255,15 @@ by the usual gate (beat the baseline on a frozen, source-disjoint split):
   (the general model's corpus is a permanent superset of the narrative story
   set — measuring against it sat at `measurement_invalid_baseline_corpus_mismatch`
   forever).
+- **`semantic_representation_v1`** — a dependency-free 20-dimensional
+  skip-gram model trained incrementally on subject/object roles, verbs and
+  co-occurrences from `heuristic_self` events only.  It is the first shared
+  learned representation between reading and cognition: nearest grounded
+  neighbours may propose a coarse class to the cognitive controller, while
+  dictionary/LLM genera are never prediction targets.  Re-read source
+  fingerprints prevent duplicate experience, parser-version changes reset the
+  derived vectors, and the anchor holdout is diagnostic only.  Capability is
+  still awarded solely by `capability_probe_v1`'s source/tier-separated gate.
 - **`active_curriculum_v1`** — retires closed-class curiosity gags ("in the")
   and turns the frozen model's held-out misses into search seeds, so discovery
   targets what the model gets wrong rather than what is frequent.

@@ -31,7 +31,9 @@ import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
-VERSION = 1
+import semantic_representation_v1 as semantic
+
+VERSION = 2
 PROBLEMS_PER_CYCLE = 8
 MAX_REASONING_STEPS = 12
 RULE_MIN_BOOKS = 2
@@ -408,11 +410,12 @@ def generate_problems(ctx: CognitiveContext, rules: list[dict], limit: int) -> l
 # problem type, from the loop's own graded outcomes.  A contextual bandit:
 # context = problem type, arms = strategies, reward = verified-correct.
 # --------------------------------------------------------------------------
-STRATEGIES = ("deliberate", "compose", "lookup")   # tie-break order: safest first
+STRATEGIES = ("deliberate", "semantic", "compose", "lookup")
 _EXPLORE = 0.15                 # epsilon: try a non-best strategy this often
 _STRATEGY_FLAGS = {"lookup": {}, "compose": {"compose": True},
+                   "semantic": {"semantic_mode": True},
                    "deliberate": {"deliberate": True}}
-_STRATEGY_RANK = {"deliberate": 2, "compose": 1, "lookup": 0}
+_STRATEGY_RANK = {"deliberate": 3, "semantic": 2, "compose": 1, "lookup": 0}
 
 
 def _controller(state: dict) -> dict:
@@ -462,10 +465,13 @@ def controller_summary(state: dict) -> dict:
 # --------------------------------------------------------------------------
 def solve(problem: dict, wm: dict, rules: list[dict], corrections: list[str],
           heur_store: dict | None = None, compose: bool = False,
-          deliberate: bool = False, strategy: str | None = None) -> dict:
+          deliberate: bool = False, strategy: str | None = None,
+          semantic_state: dict | None = None) -> dict:
+    semantic_mode = False
     if strategy in _STRATEGY_FLAGS:
         f = _STRATEGY_FLAGS[strategy]
         compose, deliberate = f.get("compose", False), f.get("deliberate", False)
+        semantic_mode = f.get("semantic_mode", False)
     steps: list[str] = []
     t, concept = problem["type"], problem.get("concept", "")
     rules_by_id = {r["rule_id"]: r for r in rules}
@@ -477,7 +483,13 @@ def solve(problem: dict, wm: dict, rules: list[dict], corrections: list[str],
         steps.append(f"past correction: {corrections[0]}")
 
     def classify(word: str) -> str:
-        g = _infer_genus(wm, word, allow_belief=ab)
+        if semantic_mode:
+            proposal = semantic.infer_genus(word, semantic_state, wm)
+            steps.append(f"usage-vector[{word}] -> {proposal.get('genus') or '?'} "
+                         f"(support={proposal.get('support', 0)})")
+            if proposal.get("genus"):
+                return proposal["genus"]
+        g = _infer_genus(wm, word, allow_belief=ab, semantic_state=semantic_state)
         if not deliberate:
             return g
         # deliberate: hypotheses -> counter-evidence -> best survivor.  Use it
@@ -490,8 +502,15 @@ def solve(problem: dict, wm: dict, rules: list[dict], corrections: list[str],
 
     if t == "genus_recall":
         b = (wm.get("beliefs") or {}).get(concept, {})
-        steps.append(f"lookup belief[{concept}] -> {b.get('genus') or '?'} (understood={b.get('understood')})")
-        if b.get("understood"):
+        if semantic_mode:
+            proposal = semantic.infer_genus(concept, semantic_state, wm)
+            steps.append(f"usage-vector[{concept}] -> {proposal.get('genus') or '?'} "
+                         f"(support={proposal.get('support', 0)})")
+            if proposal.get("genus"):
+                answer, conf = proposal["genus"], proposal.get("confidence", 0.0)
+        else:
+            steps.append(f"lookup belief[{concept}] -> {b.get('genus') or '?'} (understood={b.get('understood')})")
+        if not semantic_mode and b.get("understood"):
             answer, conf = b.get("genus", ""), round(float(b.get("confidence", 0.5)), 3)
         if deliberate and (not b.get("understood") or _contradicted(answer, concept, wm, hs, steps)):
             g, gc = deliberate_genus(concept, wm, hs, rules, steps)
@@ -568,7 +587,8 @@ def _contradicted(genus: str, word: str, wm: dict, heur_store: dict, steps: list
     return False
 
 
-def _infer_genus(wm: dict, word: str, allow_belief: bool = True) -> str:
+def _infer_genus(wm: dict, word: str, allow_belief: bool = True,
+                 semantic_state: dict | None = None) -> str:
     """Belief genus if Noise understands the word (and `allow_belief`);
     otherwise compose it from the genera of its understood neighbours.  The
     probe passes allow_belief=False so it measures composition, not lookup."""
@@ -582,6 +602,12 @@ def _infer_genus(wm: dict, word: str, allow_belief: bool = True) -> str:
             votes[_canon_class(nb["genus"])] += 1
     if votes:
         return votes.most_common(1)[0][0]
+    # Composition does not require the controller to pick a new arm first: if
+    # sparse symbolic neighbours cannot answer, the learned usage space is the
+    # next bounded proposal.  This is crucial during cold-start exploration.
+    proposal = semantic.infer_genus(word, semantic_state, wm)
+    if proposal.get("genus"):
+        return proposal["genus"]
     return b.get("genus", "") if (b and allow_belief) else ""
 
 
@@ -855,11 +881,17 @@ def _pick_concept(wm: dict, events: list, previous: dict, cycle: int) -> str:
 
 
 def run_cognitive_cycle(cycle: int, wm_state: dict, heur_store: dict, shelf: dict,
-                        just_read: str, previous: dict | None) -> dict:
+                        just_read: str, previous: dict | None,
+                        semantic_state: dict | None = None) -> dict:
     state = dict(previous or {})
     state.setdefault("version", VERSION)
     if state.get("version") != VERSION:
-        state = {"version": VERSION}
+        # v2 adds a reasoning arm; old rules, errors and controller evidence are
+        # still valid.  Preserve them instead of erasing learned experience.
+        state.setdefault("migration_history", []).append({
+            "from": state.get("version"), "to": VERSION, "cycle": cycle,
+            "reason": "add predictive semantic strategy; preserve prior cognition"})
+        state["version"] = VERSION
     state.setdefault("rules", [])
     state.setdefault("experiences", [])
     state.setdefault("corrections_index", {})
@@ -885,7 +917,8 @@ def run_cognitive_cycle(cycle: int, wm_state: dict, heur_store: dict, shelf: dic
             p.setdefault("book_id", just_read or "")
             corr = corrections_for(state, p["type"], ctx.concept_genus)
             strat = choose_strategy(state, p["type"], salt=p["pid"] + str(cycle))
-            sol = solve(p, wm_state, state["rules"], corr, heur_store, strategy=strat)
+            sol = solve(p, wm_state, state["rules"], corr, heur_store, strategy=strat,
+                        semantic_state=semantic_state)
             correct = _grade(p, sol["answer"])
             record_strategy_outcome(state, p["type"], strat, correct)
             ev = self_evaluate(p, sol, ctx.retrieved, wm_state)

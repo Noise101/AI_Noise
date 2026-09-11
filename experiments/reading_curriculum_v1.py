@@ -53,6 +53,13 @@ SENT = re.compile(r"[。！？]")
 SUBORDINATE = re.compile(
     r"(ので|けれど|けれども|ながら|のに|ように|ため|という"
     r"|し、|が、|ば、|たら、|なら、|ても、|でも、|から、|と、)")
+# A short sentence is not necessarily child-level Japanese.  Historical kana,
+# literary auxiliaries and omitted agents made poems / pre-war prose look like
+# picture books under the old length-only score.
+ARCHAIC = re.compile(
+    r"(候[ふはへ]|給[ふひへ]|けり|べし|べき|べから|らむ|けむ|なり[。、]|たり[。、]"
+    r"|まゐ|ゐる|ゑ|ヰ|ヱ|舊|國|爲|來|云ふ|思ふ|言ふ|行くべ)")
+HISTORICAL_CHARS = re.compile(r"[ゐゑヰヱ舊國爲來體學會讀寫聲氣樂萬與]")
 
 GRADUATE_COMPREHENSION = 0.75      # a book is "understood" at/above this
 # bumped when the graduation SCORE definition changes -- readable books shelved
@@ -128,6 +135,13 @@ def text_difficulty(text: str, event_count: int, known_words: set[str],
     else:
         vocab = set(WORD.findall(text))
     unknown = [w for w in vocab if w not in known_words]
+    explicit_subject_ratio = 1.0
+    if events:
+        explicit_subject_ratio = sum(bool(e.get("subject_explicit", True)) for e in events) / len(events)
+    archaic_per_sentence = len(ARCHAIC.findall(text)) / n_sent
+    # Keep the character feature conservative: a single old glyph is a clue,
+    # not proof that the whole passage is difficult.
+    historical_density = len(HISTORICAL_CHARS.findall(text)) / max(1, total_chars)
     features = {
         "sentences": len(sentences),
         "mean_sentence_chars": round(total_chars / n_sent, 1),
@@ -137,14 +151,22 @@ def text_difficulty(text: str, event_count: int, known_words: set[str],
         "known_word_coverage": round(1 - len(unknown) / max(1, len(vocab)), 3),
         "events_per_sentence": round(event_count / n_sent, 2),
         "subordinate_density": round(len(SUBORDINATE.findall(text)) / n_sent, 2),
+        "explicit_subject_ratio": round(explicit_subject_ratio, 3),
+        "archaic_markers_per_sentence": round(archaic_per_sentence, 3),
+        "historical_char_density": round(historical_density, 3),
+        "difficulty_version": 2,
     }
     # Calibrated so a 敬体 folktale retelling (short sentences, light kanji) sits
     # near 1.5-2.0, a translated fairy tale near 3, literary prose (ごんぎつね)
     # near 4, 宮沢賢治 near 5.  Adjust the four coefficients, not add terms.
+    literary_penalty = (0.75 * min(2.5, archaic_per_sentence)
+                        + 8.0 * min(0.12, historical_density)
+                        + 1.2 * max(0.0, 0.55 - explicit_subject_ratio))
     level = (0.7
              + 0.030 * min(45, features["mean_sentence_chars"])
              + 4.0 * features["kanji_density"]
-             + 0.9 * features["subordinate_density"])
+             + 0.9 * features["subordinate_density"]
+             + literary_penalty)
     features["estimated_level"] = round(max(1.0, min(MAX_LEVEL, level)), 2)
     return features
 
@@ -250,7 +272,7 @@ def register_books(curriculum: dict, books: list[dict], cycle: int) -> int:
     return added
 
 
-CURRICULUM_SCHEMA_VERSION = 4
+CURRICULUM_SCHEMA_VERSION = 5
 
 # fail-closed provenance: an event is Noise's own experience ONLY if it carries
 # an explicit `heuristic_self` stamp.  A missing / unknown / teacher / LLM /
@@ -389,6 +411,21 @@ def migrate_reading_state(curriculum: dict, events_store: dict, extract) -> dict
             b.pop("difficulty_stale", None)
             reparsed += 1
 
+    # The v5 difficulty repair must affect selection, not merely decorate a
+    # report.  Unfinished material newly found above the ZPD is safely shelved;
+    # graduated books keep their historical standing and remain eligible for
+    # retention checks.
+    difficulty_reshelved = 0
+    reach = float(curriculum.get("level", 1.0)) + LEVEL_STEP
+    for b in shelf.values():
+        if (b.get("status") != "graduated"
+                and float(b.get("estimated_level", MAX_LEVEL)) > reach
+                and b.get("status") not in ("unparsable",)):
+            if b.get("status") != "shelved_above_level":
+                difficulty_reshelved += 1
+            b["status"] = "shelved_above_level"
+            b["shelved_at_level"] = curriculum.get("level", 1.0)
+
     # --- 4. audit graduated books (v2 pass, still needed on a fresh v0/v1 state) ---
     re_eval = 0
     for bid, b in shelf.items():
@@ -410,6 +447,7 @@ def migrate_reading_state(curriculum: dict, events_store: dict, extract) -> dict
               "provenance_policy": PROVENANCE_POLICY,
               "books_read": len(read_ids), "books_unread": len(unread_ids),
               "books_reparsed": reparsed, "books_difficulty_stale": difficulty_stale,
+              "books_reshelved_by_difficulty_v2": difficulty_reshelved,
               "provenance_quarantined_books": provenance_quarantined_books,
               "provenance_quarantined_events": provenance_quarantined_events,
               "known_words_before": words_before, "known_words_after": words_after,

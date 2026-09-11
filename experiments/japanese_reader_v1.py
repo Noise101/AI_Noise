@@ -37,6 +37,7 @@ import cognition_v1 as cognition
 import capability_probe_v1 as capability_probe
 import japanese_dialogue_v1 as ja_dialogue
 import japanese_prediction_v1 as ja_prediction
+import semantic_representation_v1 as semantic_representation
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RUNTIME = ROOT / ".local"
@@ -48,6 +49,7 @@ SEQUENCE_FILE = "reading-sequence.json"                 # general character mode
 NARRATIVE_SEQUENCE_FILE = "reading-narrative-sequence.json"   # P1-1: retell-only model
 WORD_MEANING_FILE = "reading-word-meaning.json"
 COGNITION_FILE = "cognition-state.json"
+SEMANTIC_FILE = "semantic-representation.json"
 PROBE_FILE = "cognition-probe.json"
 JA_DIALOGUE_FILE = "japanese-dialogue.json"
 PREDICTION_FILE = "reading-prediction.json"
@@ -611,6 +613,18 @@ def run_once(runtime: Path) -> dict:
         wm_report = {**(prev_wm or {}), "status": "error", "error": repr(exc)}
     _write(runtime / WORD_MEANING_FILE, wm_report)
 
+    # A compact predictive representation learned only from Noise's own parsed
+    # events.  It supplies hypotheses to cognition; dictionary/LLM labels are
+    # never training targets and the diagnostic below never grants capability.
+    semantic_report = _read(runtime / SEMANTIC_FILE)
+    if semantic_representation.enabled():
+        try:
+            semantic_report = semantic_representation.learn(
+                heur_store, wm_report, semantic_report, PARSER_VERSION, cycle)
+        except Exception as exc:
+            semantic_report = {**(semantic_report or {}), "status": "error", "error": repr(exc)}
+        _write(runtime / SEMANTIC_FILE, semantic_report)
+
     # knowledge -> capability loop: retrieve -> abstract -> generate a problem ->
     # reason -> self-evaluate -> store the attempt.  Measured by a FROZEN probe,
     # not by rule count.  AI_NOISE_COGNITION=0 turns it off.
@@ -634,9 +648,11 @@ def run_once(runtime: Path) -> dict:
         try:
             cog_report = cognition.run_cognitive_cycle(
                 cycle=cycle, wm_state=wm_report, heur_store=heur_store,
-                shelf=cur["shelf"], just_read=book_id, previous=cog_report)
+                shelf=cur["shelf"], just_read=book_id, previous=cog_report,
+                semantic_state=semantic_report)
             probe_report = capability_probe.maybe_run(
-                cycle, wm_report, heur_store, cur["shelf"], cog_report, probe_report)
+                cycle, wm_report, heur_store, cur["shelf"], cog_report, probe_report,
+                semantic_state=semantic_report)
         except Exception as exc:                  # isolate: a failure never stalls reading
             cog_report = {**(cog_report or {}), "status": "error", "error": repr(exc)}
         _write(runtime / COGNITION_FILE, cog_report)
@@ -739,6 +755,11 @@ def run_once(runtime: Path) -> dict:
                           "test_words", "measured", "mean_gain", "z",
                           "significant_now", "capability_confirmed",
                           "sample_explanations", "prediction_feedback_applied")},
+        "semantic_representation": {k: (semantic_report or {}).get(k) for k in
+                         ("status", "version", "parser_version", "word_count",
+                          "context_count", "pairs_seen", "sources_trained_this_cycle",
+                          "positive_pairs_this_cycle", "pending_sources",
+                          "model_fingerprint", "diagnostic", "reset_reason", "note", "error")},
         "cognition": {k: (cog_report or {}).get(k) for k in
                       ("status", "concept", "rules_total", "rules_reusable",
                        "experiences_total", "problems_this_cycle", "correct_this_cycle",

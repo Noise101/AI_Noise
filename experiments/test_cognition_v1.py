@@ -66,6 +66,19 @@ class AbstractionTest(unittest.TestCase):
 
 
 class ReasoningTest(unittest.TestCase):
+    def test_semantic_strategy_can_propose_from_learned_usage_neighbours(self):
+        wm = {"beliefs": {
+            "子犬": _belief("生き物"), "子猫": _belief("生き物"),
+            "野猿": _belief("生き物"), "机台": _belief("道具")}}
+        sem = {"word_vectors": {
+            "こいぬ": [1.0, 0.0], "子犬": [.99, .01], "子猫": [.97, .03],
+            "野猿": [.94, .06], "机台": [0.0, 1.0]}}
+        prob = {"type": "genus_recall", "concept": "こいぬ",
+                "options": list(cog.COARSE), "gold": "生き物", "grade": "coarse", "prompt": "?"}
+        sol = cog.solve(prob, wm, [], [], strategy="semantic", semantic_state=sem)
+        self.assertEqual(sol["answer"], "生き物")
+        self.assertTrue(any("usage-vector" in step for step in sol["steps"]))
+
     def test_odd_one_out_names_the_minority_class(self):
         prob = {"type": "odd_one_out", "concept": "きつね",
                 "options": ["きつね", "からす", "つくえ"], "gold": "つくえ", "grade": "exact",
@@ -180,6 +193,16 @@ class ControllerTest(unittest.TestCase):
 
 
 class LoopTest(unittest.TestCase):
+    def test_v1_state_migrates_without_erasing_experience(self):
+        old = {"version": 1, "rules": [{"rule_id": "kept", "status": "candidate",
+                "form": "「道具」が光る", "subject_genus": "道具", "verb": "光る",
+                "object_genus": "", "support": 3, "books": ["old"],
+                "confidence": .4, "counterexamples": []}],
+               "experiences": [{"result": "correct"}], "loop_history": []}
+        got = cog.run_cognitive_cycle(2, WM, STORE, SHELF, "", old)
+        self.assertTrue(any(r.get("rule_id") == "kept" for r in got["rules"]))
+        self.assertTrue(got.get("migration_history"))
+
     def test_full_cycle_runs_and_round_trips(self):
         r1 = cog.run_cognitive_cycle(1, WM, STORE, SHELF, "b1", None)
         self.assertEqual(r1["status"], "ran")

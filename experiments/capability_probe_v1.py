@@ -200,7 +200,8 @@ def _sortkey(p: dict) -> str:
     return hashlib.md5(p["pid"].encode()).hexdigest()
 
 
-def _model_fingerprint(wm_state: dict, cog_state: dict, words: list[str]) -> str:
+def _model_fingerprint(wm_state: dict, cog_state: dict, words: list[str],
+                       semantic_state: dict | None = None) -> str:
     """Changes ONLY when something that could move the probe's ANSWERS moved:
     the coarse genus + rough confidence of the words it asks about, the
     controller's LEARNED POLICY (its argmax strategy per problem type, not the
@@ -211,6 +212,12 @@ def _model_fingerprint(wm_state: dict, cog_state: dict, words: list[str]) -> str
     for w in sorted(set(words)):
         b = beliefs.get(w) or {}
         parts.append(f"{w}:{cog._canon_class(b.get('genus',''))}:{round(float(b.get('confidence',0)),1)}")
+        # Fingerprint only the answer-relevant semantic proposal for fixed probe
+        # words.  A global training-step counter would cause meaningless
+        # re-measurement on every cycle; a changed proposal may not.
+        if (semantic_state or {}).get("word_vectors", {}).get(w):
+            proposal = cog.semantic.infer_genus(w, semantic_state, wm_state)
+            parts.append(f"sem:{w}:{proposal.get('genus','')}:{proposal.get('support',0)}")
     pol = (cog_state or {}).get("controller", {}).get("policy", {}) or {}
     for pt in sorted(pol):
         try:
@@ -297,7 +304,8 @@ def build_probe(cycle: int, wm_state: dict, heur_store: dict, shelf: dict,
     }
 
 
-def _run_set(problems: list[dict], wm_state: dict, heur_store: dict, cog_state: dict) -> dict:
+def _run_set(problems: list[dict], wm_state: dict, heur_store: dict, cog_state: dict,
+             semantic_state: dict | None = None) -> dict:
     rules = (cog_state or {}).get("rules", [])
     per_level: dict[str, dict] = {}
     correct = base_correct = unresolved = 0
@@ -305,7 +313,8 @@ def _run_set(problems: list[dict], wm_state: dict, heur_store: dict, cog_state: 
         corr = cog.corrections_for(cog_state or {}, p["type"],
                                    cog._genus(wm_state, p.get("concept", "")))
         strat = cog.choose_strategy(cog_state or {}, p["type"], explore=False)
-        sol = cog.solve(p, wm_state, rules, corr, heur_store, strategy=strat)
+        sol = cog.solve(p, wm_state, rules, corr, heur_store, strategy=strat,
+                        semantic_state=semantic_state)
         ok = cog._grade(p, sol["answer"])
         base_ok = cog._grade(p, p.get("baseline", ""))
         correct += ok
@@ -348,7 +357,8 @@ def _trend(history: list, key: str = "derive_rate") -> "str | None":
 
 
 def maybe_run(cycle: int, wm_state: dict, heur_store: dict, shelf: dict,
-              cog_state: dict, previous: dict | None) -> dict:
+              cog_state: dict, previous: dict | None,
+              semantic_state: dict | None = None) -> dict:
     probe = dict(previous or {})
     if probe.get("version") != VERSION or "selection" not in probe:
         built = build_probe(cycle, wm_state, heur_store, shelf,
@@ -379,7 +389,7 @@ def maybe_run(cycle: int, wm_state: dict, heur_store: dict, shelf: dict,
     # ---- A. challenge: a plain interval diagnostic ------------------------
     due = not ch_hist or (cycle - (ch_hist[-1].get("cycle") or 0)) >= PROBE_INTERVAL
     if due and ch:
-        pt = _run_set(ch, wm_state, heur_store, cog_state)
+        pt = _run_set(ch, wm_state, heur_store, cog_state, semantic_state)
         pt["cycle"] = cycle
         ch_hist.append(pt)
         probe["challenge_history"] = ch_hist[-HISTORY_CAP:]
@@ -387,10 +397,10 @@ def maybe_run(cycle: int, wm_state: dict, heur_store: dict, shelf: dict,
     # ---- B. unbiased selection: measured only when the model could have moved,
     #         so we never re-roll a frozen set waiting for a lucky p-value -----
     sel_words = sorted({w for p in sel for w in p.get("words", [])})
-    model_fp = _model_fingerprint(wm_state, cog_state, sel_words)
+    model_fp = _model_fingerprint(wm_state, cog_state, sel_words, semantic_state)
     last_fp = sel_hist[-1]["model_fingerprint"] if sel_hist else None
     if not sel_hist or model_fp != last_fp:
-        pt = _run_set(sel, wm_state, heur_store, cog_state)
+        pt = _run_set(sel, wm_state, heur_store, cog_state, semantic_state)
         pt.update(cycle=cycle, model_fingerprint=model_fp,
                   clears_threshold=_selection_clears(pt))
         sel_hist.append(pt)
@@ -419,7 +429,7 @@ def maybe_run(cycle: int, wm_state: dict, heur_store: dict, shelf: dict,
 
     if selection_pass and tier_separation_valid:
         if probe.get("final_result") is None and len(fin) >= MIN_FINAL_PROBLEMS:
-            res = _run_set(fin, wm_state, heur_store, cog_state)
+            res = _run_set(fin, wm_state, heur_store, cog_state, semantic_state)
             res.update(opened_at_cycle=cycle, model_fingerprint=model_fp,
                        clears_threshold=_selection_clears(res),
                        same_direction=res["lift"] > 0 and res["derive_rate"] >= SELECTION_DERIVE_THRESHOLD)
@@ -431,7 +441,7 @@ def maybe_run(cycle: int, wm_state: dict, heur_store: dict, shelf: dict,
               and probe.get("reserve_result") is None
               and len(rsv) >= MIN_FINAL_PROBLEMS
               and model_fp != probe["final_result"].get("model_fingerprint")):
-            res = _run_set(rsv, wm_state, heur_store, cog_state)
+            res = _run_set(rsv, wm_state, heur_store, cog_state, semantic_state)
             res.update(opened_at_cycle=cycle, model_fingerprint=model_fp,
                        clears_threshold=_selection_clears(res),
                        same_direction=res["lift"] > 0 and res["derive_rate"] >= SELECTION_DERIVE_THRESHOLD)

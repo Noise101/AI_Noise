@@ -29,6 +29,19 @@ def _self(events):
 
 
 class ReadingCurriculumTest(unittest.TestCase):
+    def test_archaic_short_prose_is_not_mistaken_for_picture_book_language(self):
+        modern = "きつねが森へ行きました。きつねは友だちに会いました。"
+        archaic = "狐、森へ行きけり。友に会ひ給ひたり。國へ歸るべし。"
+        self.assertGreater(rc.text_difficulty(archaic, 3, set())["estimated_level"],
+                           rc.text_difficulty(modern, 2, set())["estimated_level"] + .6)
+
+    def test_many_implicit_subject_events_raise_processing_difficulty(self):
+        text = "森へ行きました。木を見ました。実を取りました。"
+        explicit = [{"subject": "きつね", "verb": "行く", "subject_explicit": True}] * 3
+        implicit = [{"subject": "きつね", "verb": "行く", "subject_explicit": False}] * 3
+        self.assertGreater(rc.text_difficulty(text, 3, set(), implicit)["estimated_level"],
+                           rc.text_difficulty(text, 3, set(), explicit)["estimated_level"])
+
     def test_difficulty_ranks_a_retelling_below_literary_prose(self):
         easy = rc.text_difficulty(SIMPLE, 3, set())
         hard = rc.text_difficulty(HARDER, 3, set())

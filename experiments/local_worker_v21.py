@@ -360,6 +360,19 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
             + "（証言は上限重みで信念化、独自の読解証拠のみが「理解」を成立させる）")
         for gloss in (wm.get("sample_explanations") or [])[:2]:
             lines.append(f"  例: {gloss}")
+    sem = reading_status.get("semantic_representation", {}) or {}
+    if sem:
+        if sem.get("status") == "error":
+            lines.append(f"意味表現モデル : エラー（{sem.get('error', '詳細不明')}）")
+        else:
+            dg = sem.get("diagnostic") or {}
+            lines.append(
+                f"意味表現モデル : 語 {sem.get('word_count', 0)}／利用文脈 {sem.get('context_count', 0)}／"
+                f"経験対 {sem.get('pairs_seen', 0)}（未処理教材 {sem.get('pending_sources', 0)}）")
+            lines.append(
+                f"  近傍分類診断 : {dg.get('correct', 0)}/{dg.get('test_words', 0)}、"
+                f"単純基準 {dg.get('baseline_correct', 0)}/{dg.get('test_words', 0)}、"
+                f"適用 {dg.get('covered', 0)}語（診断のみ・能力合格には不使用）")
     cg = reading_status.get("cognition", {}) or {}
     if cg.get("status") in ("ran", "no_concept"):
         pr = reading_status.get("cognition_probe", {}) or {}
@@ -1581,7 +1594,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
             key: read_json(runtime / "reading-status.json").get(key) for key in
             ("cycle", "reading", "curriculum", "comprehension", "retelling", "sequence",
              "narrative_sequence", "narrative_sequence_training", "prediction",
-             "word_meaning", "cognition", "cognition_probe", "japanese_dialogue",
+             "word_meaning", "semantic_representation", "cognition", "cognition_probe", "japanese_dialogue",
              "caregiver", "caregiver_questions", "llm_scaffold_totals",
              "aided_reading", "schema_migration", "self_vs_aided", "aided_store", "provenance", "sequence_retirement_log", "sequence_ever_trained_fingerprint", "sequence_boundary_fingerprint", "sequence_ever_trained_collections")},
         "storage": read_json(runtime / "storage-status.json"),
@@ -1944,7 +1957,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                                               ("cycle", "books_fetched", "reading", "level_advance",
                                                "curriculum", "comprehension", "retelling", "sequence",
                                                "narrative_sequence", "narrative_sequence_training", "prediction",
-                                               "word_meaning", "cognition", "cognition_probe", "japanese_dialogue",
+                                               "word_meaning", "semantic_representation", "cognition", "cognition_probe", "japanese_dialogue",
                                                "caregiver", "caregiver_questions", "llm_scaffold_totals",
                                                "aided_reading", "schema_migration", "self_vs_aided", "aided_store", "provenance", "sequence_retirement_log", "sequence_ever_trained_fingerprint", "sequence_boundary_fingerprint", "sequence_ever_trained_collections")}
             except Exception as reading_error:  # isolate the parallel loop
