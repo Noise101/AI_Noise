@@ -116,6 +116,59 @@ class NoiseChatTests(unittest.TestCase):
         self.assertIn("椅子", reply)
         self.assertEqual(chat.summary(state)["last_intent"], "learning_status")
 
+    # -- structural question-form detection (no written ？ required) --------
+    def test_desu_ka_question_without_a_question_mark_is_recognised(self):
+        reply, state = chat.converse("元気ですか", None)
+        self.assertEqual(state["last_turn"]["interpretation"]["intent"], "ask_wellbeing")
+
+    def test_bare_ka_ending_is_a_question_via_morphology(self):
+        self.assertTrue(chat._is_question_form("これは犬か"))
+
+    def test_ka_ending_content_words_are_not_misread_as_questions(self):
+        self.assertFalse(chat._is_question_form("これは静かだ"))
+        self.assertFalse(chat._is_question_form("何かある"))
+
+    def test_kana_colloquial_ending_is_a_question(self):
+        self.assertTrue(chat._is_question_form("これは何かな"))
+
+    def test_self_identity_question_is_not_read_as_a_vocabulary_lookup(self):
+        reply, state = chat.converse("あなたの名前は", None)
+        self.assertEqual(state["last_turn"]["interpretation"]["intent"], "ask_identity")
+        self.assertIn("Noise", reply)
+
+    def test_thanks_and_capability_questions_get_a_direct_reply(self):
+        reply, _ = chat.converse("ありがとう", None)
+        self.assertIn("どういたしまして", reply)
+        reply, _ = chat.converse("何ができるの", None)
+        self.assertEqual(len(reply), len(reply.strip()))
+        self.assertNotIn("文の役割", reply)
+
+    # -- a remark is not testimony, even mid-context ------------------------
+    def test_a_sentence_final_remark_particle_is_not_stored_as_a_claim(self):
+        reply, state = chat.converse("今日はいい天気ですね", None)
+        self.assertEqual(state["last_turn"]["interpretation"]["intent"], "unresolved")
+        self.assertEqual(state.get("claims", {}), {})
+
+    def test_a_remark_does_not_get_misfiled_as_the_answer_to_a_pending_question(self):
+        _, state = chat.converse("犬とは何ですか", None)
+        self.assertEqual(state.get("awaiting", {}).get("topic"), "犬")
+        reply, state = chat.converse("今日はいい天気ですね", state)
+        self.assertNotIn("犬", state.get("claims", {}))
+
+    def test_a_question_shaped_predicate_is_never_stored_as_testimony(self):
+        _, state = chat.converse("犬とは何ですか", None)
+        self.assertNotIn("犬", state.get("claims", {}))
+
+    def test_unresolved_fallback_asks_the_user_to_rephrase(self):
+        # topic extraction falls back to a regex match when no morphological
+        # analyser is available (AI_NOISE_NO_MORPHOLOGY, possibly set process-
+        # wide by another test module) -- assert on what both fallback
+        # branches share, not the topic-bearing phrasing specifically
+        reply, state = chat.converse("静かですね", None)
+        self.assertEqual(state["last_turn"]["interpretation"]["intent"], "unresolved")
+        self.assertIn("もらえますか", reply)
+        self.assertNotIn("文の役割を決められませんでした", reply)
+
 
 if __name__ == "__main__":
     unittest.main()

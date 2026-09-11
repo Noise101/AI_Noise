@@ -338,6 +338,21 @@ generation itself becomes reliably meaningful, an honest grounded response or
 question is preferred to fluent-looking nonsense; dialogue fluency is not
 reported as learned world knowledge.
 
+Whether an utterance FUNCTIONS as a question is decided structurally
+(`_is_question_form`), not by the presence of a written `？` -- ordinary
+Japanese speech and casual text routinely end a real question in
+です か/ますか/でしょうか, a bare 終助詞 か, or the colloquial かな/かしら, and
+omit the mark entirely. Relying on `？` alone silently dropped very common
+questions ("元気ですか", "あなたの名前は") into the unresolved fallback. A
+sentence-final remark/reaction particle (ね/よね/なあ -- "今日はいい天気です
+ね") is a phatic remark, not testimony, and is never stored as a claim even
+when it grammatically parses as one, and even when a prior turn is waiting for
+an answer (a remark following a pending question is not assumed to be that
+answer). A stored claim's predicate is rejected if it is itself question-shaped
+-- a loose regex match must not turn the user's own unanswered question back
+into "testimony" about its subject. The unresolved fallback asks the user to
+rephrase rather than declaring the utterance unreadable.
+
 ## Decision replay, not state replay
 
 `.local/events.jsonl` is an append-only, cross-module log (`{ts, curricula, module, event_type, before, after, reason}` per line) of discrete state-changing decisions: a benchmark locking, a selected model switching. It exists to answer "when and why did the system decide this" without trusting a human's memory of a status snapshot, and it coexists with (does not replace) each module's own bounded `revision_history`-style fields, which the algorithms themselves still read.

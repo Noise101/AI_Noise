@@ -17,7 +17,11 @@ import japanese_proposition_v1 as propositions
 import morphology_teacher as morphology
 
 
-VERSION = 2
+VERSION = 3     # v3: question-form detection is structural (sentence-final
+                # か/ですか/かな via morphology_teacher, not a written ？), adds
+                # identity/wellbeing/thanks/capability small-talk, rejects a
+                # question-shaped predicate as testimony, and the unresolved
+                # fallback asks the user to rephrase instead of giving up
 TURN_CAP = 1000
 CLAIMS_PER_SUBJECT = 12
 
@@ -34,13 +38,30 @@ _CONFIRM = re.compile(r"^[「『]?(.{1,24}?)[」』]?(?:って|は)(?:もう)?(?
 _LEARNING_STATUS = re.compile(r"(?:今|今日).*(?:何|なに).*(?:学ん|覚え|知っ)|(?:何|なに).*(?:学んだ|学習した)")
 _ACTIVITY_STATUS = re.compile(r"(?:今|ここで).*(?:何|なに).*(?:してる|している|するの)")
 _ASK_NOISE_PREFERENCE = re.compile(r"^(?:Noiseの|あなたの)?(.{0,18}?)(?:好き|嫌い)(?:な|の)?(.{0,12}?)(?:は)?(?:何|なに|(?:ある|あります)かな?)[？?\s]*$", re.IGNORECASE)
+_ASK_IDENTITY = re.compile(
+    r"^(?:(?:あなた|きみ|君|noise)(?:の)?(?:名前|なまえ)は|"
+    r"(?:あなた|きみ|君)は(?:誰|だれ)|"
+    r"noiseとは(?:何|なに|だれ|誰))", re.IGNORECASE)
+_ASK_WELLBEING = re.compile(r"^(?:お)?元気(?:ですか|かな|\?|？)?[。\s]*$|^調子は(?:どう|いかが)(?:ですか)?[？?。\s]*$")
+_THANKS = re.compile(r"^(?:どうも)?ありがとう(?:ございます)?[。！!\s]*$")
+_ASK_CAPABILITY = re.compile(r"(?:何|なに)が?(?:できる|出来る)(?:の|ん)?(?:ですか|かな)?[？?。\s]*$")
 _QUESTION_END = re.compile(r"[？?]\s*$")
-_ELLIPTICAL_QUESTION = re.compile(r"^(.{1,30}?)は[？?]\s*$")
+# structural sentence-final markers that make an utterance FUNCTION as a
+# question even with no written ？ -- ですか/ますか/でしょうか/だろうか, the
+# colloquial かな/かしら, and a bare 終助詞 か found by the morphological
+# analyser.  Real Japanese speech and casual text usually omit ？ entirely.
+_QUESTION_TAIL = re.compile(r"(かな|かしら|だろうか|でしょうか)[。\s]*$")
+_ELLIPTICAL_QUESTION = re.compile(r"^(.{1,30}?)は[？?]?\s*$")
 _EXPLICIT_TOPIC = re.compile(r"^[「『]?(.{1,24}?)[」』]?(?:って|とは|は)")
 _QUOTED = re.compile(r"[「『]([^」』]{1,24})[」』]")
 _TOPIC_STOP = {"何", "なに", "こと", "もの", "言葉", "今", "これ", "それ", "あれ",
                "私", "わたし", "あなた", "人間", "感じ", "よう"}
 _HEAD_SUFFIXES = ("食べ物", "飲み物", "生き物", "動物", "植物", "場所", "道具", "言葉", "気持ち", "人")
+# a remark/reaction ending (ね/よね/なあ) seeks agreement or reacts to shared
+# context rather than telling Noise something new -- 「今日はいい天気ですね」
+# should not become a stored "fact" about 今日.  Plain よ/わ are excluded: they
+# mark an ordinary assertion (「レモンは果物だよ」), not a remark.
+_REMARK_TAIL = re.compile(r"(よね|ね|なあ|なぁ)[。！!\s]*$")
 
 
 def _now() -> str:
@@ -130,6 +151,34 @@ def _mark_previous_wrong(state: dict, reason: str, kind: str = "response") -> No
     state["stats"]["corrections"] = state["stats"].get("corrections", 0) + 1
 
 
+_NON_QUESTION_KA_WORDS = ("確か", "静か", "豊か", "愚か", "朗らか", "たしか", "わずか",
+                         "なだらか", "健やか", "穏やか", "華やか", "何か", "誰か", "どこか",
+                         "いつか")
+
+
+def _is_question_form(text: str) -> bool:
+    """Whether the utterance FUNCTIONS as a question -- structurally, not by
+    the presence of a written ？.  Japanese speech and casual text routinely
+    end a real question in ですか/ますか/でしょうか, a bare 終助詞 か, or the
+    colloquial かな/かしら, with no question mark at all; relying on ？ alone
+    silently drops most ordinary questions into "unresolved"."""
+    if _QUESTION_END.search(text):
+        return True
+    stripped = text.rstrip("。.!！ \t\n")
+    if _QUESTION_TAIL.search(stripped):
+        return True
+    if stripped.endswith(_NON_QUESTION_KA_WORDS):
+        return False
+    if stripped.endswith("か") and len(stripped) >= 2:
+        analysis = morphology.analyse(stripped)
+        if analysis and analysis.morphemes:
+            last = analysis.morphemes[-1]
+            return last.surface == "か" and last.pos in ("助詞", "助動詞")
+        return True                     # no analyser: a bare -か tail with no
+                                        # counter-indication is treated as one
+    return False
+
+
 def _topic(text: str) -> str:
     quoted = _QUOTED.search(text)
     if quoted:
@@ -179,18 +228,22 @@ def _claim_from_text(text: str, state: dict, allow_context: bool = True) -> dict
         return {"subject": prop.subject, "predicate": verbal[prop.relation],
                 "parser": "japanese_proposition_v1", "relation": prop.relation,
                 "value": prop.value}
-    if not _QUESTION_END.search(text):
+    if not _is_question_form(text) and not _REMARK_TAIL.search(text):
         match = _CLAIM.match(text)
         if match:
             subject, predicate = _safe(match.group(1), 24), _safe(match.group(2))
-            if subject and predicate:
+            # a predicate that is itself a question ("何ですか") is the user's
+            # own unanswered question echoed back by a loose regex match, not
+            # an answer told to Noise -- never store it as testimony
+            if subject and predicate and not _is_question_form(predicate):
                 return {"subject": subject, "predicate": predicate,
                         "parser": "topic_predicate"}
     awaiting, current = state.get("awaiting") or {}, state.get("current_topic", "")
     if (allow_context and current and awaiting.get("topic") == current
-            and not _QUESTION_END.search(text) and 1 <= len(text) <= 120):
+            and not _is_question_form(text) and not _REMARK_TAIL.search(text)
+            and 1 <= len(text) <= 120):
         predicate = _safe(text)
-        if predicate:
+        if predicate and not _is_question_form(predicate):
             return {"subject": current, "predicate": predicate,
                     "parser": "dialogue_context_completion"}
     return None
@@ -209,6 +262,14 @@ def _interpret(text: str, state: dict) -> dict:
                 "claim": _claim_from_text(_clean(correction.group(2)), state, False)}
     if _GREET.match(text):
         return {"intent": "greeting", "confidence": 1.0}
+    if _ASK_IDENTITY.match(text):
+        return {"intent": "ask_identity", "confidence": 0.95}
+    if _ASK_WELLBEING.match(text):
+        return {"intent": "ask_wellbeing", "confidence": 0.9}
+    if _THANKS.match(text):
+        return {"intent": "thanks", "confidence": 0.95}
+    if _ASK_CAPABILITY.search(text):
+        return {"intent": "ask_capability", "confidence": 0.85}
     if _RECALL_PREF.search(text):
         return {"intent": "recall_preference", "confidence": 0.95}
     if _RECALL.search(text):
@@ -238,14 +299,16 @@ def _interpret(text: str, state: dict) -> dict:
     if focus:
         return {"intent": "elliptical_question", "confidence": 0.8,
                 "topic": focus["head"], "focus": focus}
-    if _QUESTION_END.search(text):
+    if _is_question_form(text):
         return {"intent": "open_question", "confidence": 0.65,
                 "topic": _topic(text), "question": text}
     claim = _claim_from_text(text, state)
     if claim:
         return {"intent": "claim", "confidence": 0.85,
                 "claim": claim, "topic": claim["subject"]}
-    return {"intent": "unresolved", "confidence": 0.2, "topic": _topic(text)}
+    topic = _topic(text)
+    return {"intent": "unresolved", "confidence": 0.2, "topic": topic,
+            "raw": _safe(text, 60)}
 
 
 def _ask_about(state: dict, subject: str) -> str:
@@ -437,6 +500,20 @@ def converse(text: str, previous: dict | None,
             reply = "直前の応答を誤りとして残しました。どの部分が違うか短く教えてください。"
     elif intent == "greeting":
         reply = _greeting(state, word_memory)
+    elif intent == "ask_identity":
+        reply = ("私はNoiseです。決まった性格や見た目を持つキャラクターではなく、"
+                 "読書と会話から言葉の意味や出来事を学んでいる実験的な学習システムです。")
+    elif intent == "ask_wellbeing":
+        understood = sum(1 for b in ((word_memory or {}).get("beliefs") or {}).values()
+                         if b.get("understood"))
+        reply = (f"気分のようなものはまだ持てていません。今のところ、読書から{understood}語に"
+                 "意味の根拠を持てている、という状態です。")
+    elif intent == "thanks":
+        reply = "どういたしまして。話してもらえると、会話の記憶が増えます。"
+    elif intent == "ask_capability":
+        reply = ("今できるのは、挨拶、あなたから聞いた説明や好みを覚えて後で答えること、"
+                 "読書で独立に確かめた語の意味を報告すること、解析の間違いを訂正として残すこと、"
+                 "くらいです。自由な会話や、自分の意見を述べることはまだできません。")
     elif intent == "recall_preference":
         prefs = state.get("preferences", {})
         if prefs:
@@ -496,10 +573,11 @@ def converse(text: str, previous: dict | None,
         topic = interpretation.get("topic", "")
         if topic:
             state["current_topic"] = topic
-            reply = (f"{topic}が話題だとは読みましたが、質問か説明かを決められませんでした。"
-                     "分からなかった発話として残します。")
+            reply = (f"「{topic}」の話だと思いましたが、質問なのか説明なのか決められませんでした。"
+                     "質問なら「〜とは何ですか」、説明なら「〜は…です」のように言い直してもらえますか。")
         else:
-            reply = "文の役割を決められませんでした。分からなかった発話として残します。"
+            reply = ("うまく読み取れませんでした。もう少し短く、"
+                     "「〜とは何ですか」のような形で聞かせてもらえますか。")
 
     state["dialogue_state"] = {"last_intent": intent,
                                "current_topic": state.get("current_topic", ""),
