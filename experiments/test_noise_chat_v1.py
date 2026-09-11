@@ -1,4 +1,15 @@
+import os
 import unittest
+
+# every call to chat.converse() below that omits `phraser` would otherwise
+# default to a real PhrasingModel(); on a machine that actually has Ollama
+# running with the model pulled (as this one does), PhrasingModel.available()
+# returns True and every such test becomes a real, unbounded network call to
+# a 27B model (PARTNER_TIMEOUT-less by design -- see japanese_dialogue_v1) --
+# unit tests must not depend on an external service being up.  Tests that
+# specifically exercise the phrasing layer use an explicit `_FakePhraser` and
+# are unaffected by this flag.
+os.environ.setdefault("AI_NOISE_SKIP_LOCAL_LLM", "1")
 
 import noise_chat_v1 as chat
 
@@ -168,6 +179,111 @@ class NoiseChatTests(unittest.TestCase):
         self.assertEqual(state["last_turn"]["interpretation"]["intent"], "unresolved")
         self.assertIn("もらえますか", reply)
         self.assertNotIn("文の役割を決められませんでした", reply)
+
+    # -- multi-topic conversational memory (topic_stack) --------------------
+    def test_follow_up_surfaces_a_new_fact_about_the_current_topic(self):
+        _, state = chat.converse("猫は動物です", None)
+        _, state = chat.converse("猫は可愛いです", state)
+        reply, state = chat.converse("それについてもっと教えて", state)
+        self.assertEqual(state["last_turn"]["interpretation"]["intent"], "follow_up")
+        self.assertIn("可愛い", reply)
+        # a second follow-up does not repeat the same fact
+        reply2, state = chat.converse("他には？", state)
+        self.assertNotIn("可愛い", reply2)
+
+    def test_named_go_back_resumes_an_earlier_topic(self):
+        _, state = chat.converse("犬とは何ですか", None)
+        _, state = chat.converse("猫は動物です", state)
+        self.assertEqual(state["current_topic"], "猫")
+        reply, state = chat.converse("犬の話に戻って", state)
+        self.assertEqual(state["last_turn"]["interpretation"]["intent"], "go_back_topic")
+        self.assertEqual(state["current_topic"], "犬")
+        self.assertIn("犬", reply)
+
+    def test_generic_go_back_targets_the_previous_topic_not_a_literal_saki(self):
+        _, state = chat.converse("犬とは何ですか", None)
+        _, state = chat.converse("猫は動物です", state)
+        reply, state = chat.converse("さっきの話に戻って", state)
+        self.assertEqual(state["last_turn"]["interpretation"]["intent"], "go_back_topic")
+        self.assertEqual(state["current_topic"], "犬")
+        self.assertNotIn("さっき", reply)
+
+    def test_go_back_to_a_never_discussed_topic_says_so(self):
+        _, state = chat.converse("犬とは何ですか", None)
+        reply, state = chat.converse("象の話に戻って", state)
+        self.assertIn("まだ話していません", reply)
+        self.assertEqual(state["current_topic"], "犬")     # unchanged
+
+    def test_topic_stack_moves_touched_topics_to_the_front(self):
+        _, state = chat.converse("犬とは何ですか", None)
+        _, state = chat.converse("猫は動物です", state)
+        self.assertEqual(state["topic_stack"], ["犬", "猫"])
+        _, state = chat.converse("犬の話に戻って", state)
+        self.assertEqual(state["topic_stack"], ["猫", "犬"])
+
+    def test_follow_up_with_no_topic_asks_what_to_expand_on(self):
+        reply, state = chat.converse("もっと教えて", None)
+        self.assertEqual(state["last_turn"]["interpretation"]["intent"], "follow_up")
+        self.assertIn("話題を教えてください", reply)
+
+
+class _FakePhraser:
+    def __init__(self, reply=None, avail=True):
+        self._reply, self._avail = reply, avail
+
+    def available(self):
+        return self._avail
+
+    def rephrase(self, template):
+        return self._reply
+
+
+class PhrasingLayerTests(unittest.TestCase):
+    """PhrasingModel is a presentation layer only -- content-verified, never
+    a source of new information (ARCHITECTURE.md "Optional local-model
+    boundary")."""
+
+    def test_a_verified_rephrase_that_keeps_all_content_words_is_used(self):
+        template = "犬はまだよく分かりません。どんなものですか。"
+        good = "犬については、まだよく分からないので、どんなものか教えてください。"
+        self.assertEqual(chat._phrase_naturally(template, _FakePhraser(good)), good)
+
+    def test_a_rephrase_that_drops_a_content_word_is_rejected(self):
+        template = "犬はまだよく分かりません。どんなものですか。"
+        dropped = "まだよく分かりません。"           # 犬 is gone
+        self.assertEqual(chat._phrase_naturally(template, _FakePhraser(dropped)), template)
+
+    def test_an_unavailable_model_leaves_the_template_unchanged(self):
+        template = "犬はまだよく分かりません。どんなものですか。"
+        self.assertEqual(
+            chat._phrase_naturally(template, _FakePhraser("何か", avail=False)), template)
+
+    def test_empty_or_none_rephrase_leaves_the_template_unchanged(self):
+        template = "犬はまだよく分かりません。どんなものですか。"
+        self.assertEqual(chat._phrase_naturally(template, _FakePhraser(None)), template)
+        self.assertEqual(chat._phrase_naturally(template, _FakePhraser("")), template)
+
+    def test_a_wildly_longer_rephrase_is_rejected_even_if_content_survives(self):
+        template = "犬はまだよく分かりません。どんなものですか。"
+        bloated = ("犬" * 200)
+        self.assertEqual(chat._phrase_naturally(template, _FakePhraser(bloated)), template)
+
+    def test_converse_uses_the_injected_phraser_and_keeps_the_template_for_audit(self):
+        good = "猫の話、まだよく分かってないので、どんな子か教えてね。"
+        reply, state = chat.converse("猫とは何ですか", None, None, _FakePhraser(good))
+        self.assertEqual(reply, good)
+        self.assertIn("template_reply", state["last_turn"])
+        self.assertNotEqual(state["last_turn"]["template_reply"], good)
+
+    def test_phrasing_disabled_by_env_flag(self):
+        import os
+        os.environ["AI_NOISE_CHAT_PHRASING"] = "0"
+        try:
+            template = "犬はまだよく分かりません。どんなものですか。"
+            self.assertEqual(
+                chat._phrase_naturally(template, _FakePhraser("犬は謎ですね。")), template)
+        finally:
+            os.environ.pop("AI_NOISE_CHAT_PHRASING", None)
 
 
 if __name__ == "__main__":

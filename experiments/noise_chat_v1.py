@@ -4,26 +4,43 @@
 Noise records a bounded interpretation before answering.  Replies come from
 conversation episodes and independently grounded reading beliefs; a human claim
 is remembered as testimony and never promoted directly to a world fact.
+
+A local model may re-express an already-fully-decided reply in more natural
+Japanese (`PhrasingModel` / `_phrase_naturally`) -- it is a presentation layer,
+never a source of content: every content word in the template reply must
+survive verbatim in the rephrase or the template is used unchanged.  This is
+the same evidence-score-0 boundary as the rest of the project's local-model
+uses (ARCHITECTURE.md "Optional local-model boundary"): the LLM never decides
+WHAT Noise says, only offers one way of saying it.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
 import time
+import urllib.request
 from datetime import datetime
 
 import japanese_proposition_v1 as propositions
 import morphology_teacher as morphology
 
 
-VERSION = 3     # v3: question-form detection is structural (sentence-final
+VERSION = 4     # v4: topic_stack gives multi-topic memory (follow_up,
+                # go_back_topic) instead of a single current_topic string;
+                # PhrasingModel/_phrase_naturally lets a local model re-express
+                # an already-decided reply more naturally, content-verified
+                # against the template it may replace (never a content source)
+                # v3: question-form detection is structural (sentence-final
                 # か/ですか/かな via morphology_teacher, not a written ？), adds
                 # identity/wellbeing/thanks/capability small-talk, rejects a
                 # question-shaped predicate as testimony, and the unresolved
                 # fallback asks the user to rephrase instead of giving up
 TURN_CAP = 1000
 CLAIMS_PER_SUBJECT = 12
+TOPIC_STACK_CAP = 8
 
 _GREET = re.compile(r"^(こんにちは|こんばんは|おはよう(?:ございます)?|やあ|はじめまして)[！!。\s]*$")
 _WHAT = re.compile(r"^[「『]?(.{1,24}?)[」』]?(?:って|とは|は)(?:何|なに)(?:ですか|なの|だ|です)?[？?。\s]*$")
@@ -62,6 +79,92 @@ _HEAD_SUFFIXES = ("食べ物", "飲み物", "生き物", "動物", "植物", "�
 # should not become a stored "fact" about 今日.  Plain よ/わ are excluded: they
 # mark an ordinary assertion (「レモンは果物だよ」), not a remark.
 _REMARK_TAIL = re.compile(r"(よね|ね|なあ|なぁ)[。！!\s]*$")
+# multi-topic conversational memory: a follow-up that continues the CURRENT
+# topic ("もっと教えて", "それについては？", "他には？") vs. one that explicitly
+# returns to an EARLIER topic ("さっきの話に戻って", "犬の話に戻ろう") -- both
+# need `topic_stack`, not just the single `current_topic` string, to mean
+# anything.
+_FOLLOW_UP = re.compile(
+    r"^(?:それ(?:について)?|そのこと)?(?:もっと|他には|ほかには|さらに|続けて)"
+    r"(?:教えて|話して|ある)?[。！!？?\s]*$|"
+    r"^詳しく(?:教えて)?[。！!？?\s]*$|^それは[？?]?[。\s]*$|^それも[。！!？?\s]*$")
+_GO_BACK_NAMED = re.compile(r"^(.{1,20}?)の話に戻(?:って|ろう)[。！!\s]*$")
+_GO_BACK_GENERIC = re.compile(
+    r"^(?:さっき|前|元|最初)の話(?:に戻(?:って|ろう)|は)?[？?。\s]*$")
+
+# the reply is not parsed by the phrasing check, only compared -- approximate
+# its content words as kanji/katakana runs, same technique as
+# japanese_dialogue_v1._content_terms (particles/okurigana are hiragana and
+# drop out, which is exactly what should be free to change in a rephrase)
+_KANJI_RUN = re.compile(r"[一-鿿々]+")
+_KATA_RUN = re.compile(r"[゠-ヿー]{2,}")
+
+
+def _content_terms(text: str) -> set[str]:
+    return set(_KANJI_RUN.findall(text)) | set(_KATA_RUN.findall(text))
+
+
+class PhrasingModel:
+    """Local-model presentation layer for an already-decided reply.  Same
+    boundary as `japanese_dialogue_v1.JapanesePartner`: evidence score 0,
+    never a source of content.  `rephrase` returns None on any failure so the
+    caller always has a safe original template to fall back to."""
+
+    def __init__(self, base_url: str = "http://127.0.0.1:11434", model: str | None = None):
+        self.base_url = base_url.rstrip("/")
+        self.model = model or os.environ.get("AI_NOISE_LOCAL_MODEL", "qwen3.8:27b")
+
+    def available(self) -> bool:
+        if os.environ.get("AI_NOISE_SKIP_LOCAL_LLM"):
+            return False
+        try:
+            with urllib.request.urlopen(f"{self.base_url}/api/tags", timeout=2) as r:
+                return any(m.get("name") == self.model for m in json.load(r).get("models", []))
+        except Exception:
+            return False
+
+    def rephrase(self, template: str) -> str | None:
+        prompt = ("次の日本語の文を、内容と事実を一切変えずに、より自然な話し言葉に"
+                  "言い換えてください。新しい情報や意見を足さないでください。数字や"
+                  "固有名詞はそのまま残してください。英語は使わないでください。\n"
+                  f"元の文: {template[:400]}")
+        schema = {"type": "object", "properties": {"reply": {"type": "string"}},
+                  "required": ["reply"]}
+        payload = json.dumps({"model": self.model, "prompt": prompt, "stream": False,
+                              "think": False, "format": schema,
+                              "options": {"temperature": 0.3, "num_predict": 200}}).encode()
+        req = urllib.request.Request(f"{self.base_url}/api/generate", data=payload,
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=None) as r:
+                parsed = json.loads(json.load(r).get("response", "{}"))
+            return str(parsed.get("reply", "")).strip()[:600] or None
+        except Exception:
+            return None
+
+
+def _phrase_naturally(template: str, phraser: "PhrasingModel | None" = None) -> str:
+    """Re-express `template` more naturally IF a verified rephrase is
+    available; otherwise return it unchanged.  The rephrase is accepted only
+    if every content word (kanji/katakana run) of the template survives in it
+    verbatim and its length is not wildly different -- a cheap, mechanical
+    content-fidelity check, not a semantic one, but sufficient to catch the
+    failure modes that matter: dropped facts, invented facts, or a bad/empty
+    generation. AI_NOISE_CHAT_PHRASING=0 disables this layer entirely."""
+    if os.environ.get("AI_NOISE_CHAT_PHRASING") == "0" or not template:
+        return template
+    phraser = phraser if phraser is not None else PhrasingModel()
+    if not phraser.available():
+        return template
+    required = _content_terms(template)
+    if not required:
+        return template
+    rephrased = phraser.rephrase(template)
+    if not rephrased or not required <= _content_terms(rephrased):
+        return template
+    if not (0.4 * len(template) <= len(rephrased) <= 3 * len(template)):
+        return template
+    return rephrased
 
 
 def _now() -> str:
@@ -72,8 +175,22 @@ def _blank() -> dict:
     return {"version": VERSION, "turns": [], "claims": {}, "preferences": {},
             "unknown_topics": {}, "question_history": {}, "errors": [],
             "current_topic": "", "awaiting": None, "topic_progress": {},
+            "topic_stack": [],
             "stats": {"turns": 0, "claims_heard": 0, "corrections": 0,
                       "recalls": 0, "greetings": 0, "interpretations": 0}}
+
+
+def _touch_topic(state: dict, topic: str) -> None:
+    """Make `topic` current and move it to the top of the recency stack --
+    the structural memory that lets a later turn say 「さっきの話に戻って」 or
+    「それについてもっと」 and mean something, instead of only ever knowing the
+    single most recent topic."""
+    if not topic:
+        return
+    state["current_topic"] = topic
+    stack = [t for t in state.setdefault("topic_stack", []) if t != topic]
+    stack.append(topic)
+    state["topic_stack"] = stack[-TOPIC_STACK_CAP:]
 
 
 def _migrate(previous: dict | None) -> dict:
@@ -88,6 +205,7 @@ def _migrate(previous: dict | None) -> dict:
     state["current_topic"] = old.get("current_topic") or ""
     state["awaiting"] = old.get("awaiting")
     state["topic_progress"] = old.get("topic_progress") or {}
+    state["topic_stack"] = [t for t in (old.get("topic_stack") or []) if t][-TOPIC_STACK_CAP:]
     if not state["current_topic"]:
         for turn in reversed(state["turns"]):
             subject = next((x.get("subject") for x in reversed(turn.get("learned") or [])
@@ -97,6 +215,8 @@ def _migrate(previous: dict | None) -> dict:
                 break
     if not state["current_topic"] and state["claims"]:
         state["current_topic"] = next(reversed(state["claims"]))
+    if not state["topic_stack"] and state["current_topic"]:
+        state["topic_stack"] = [state["current_topic"]]
     return state
 
 
@@ -132,7 +252,7 @@ def _remember_claim(state: dict, subject: str, predicate: str, turn_id: str,
         claims.append(claim)
         state["claims"][subject] = claims[-CLAIMS_PER_SUBJECT:]
     state["stats"]["claims_heard"] = state["stats"].get("claims_heard", 0) + 1
-    state["current_topic"] = subject
+    _touch_topic(state, subject)
     state["awaiting"] = None
     state.setdefault("topic_progress", {}).setdefault(subject, {})["testimony_heard"] = True
     return claim
@@ -270,6 +390,18 @@ def _interpret(text: str, state: dict) -> dict:
         return {"intent": "thanks", "confidence": 0.95}
     if _ASK_CAPABILITY.search(text):
         return {"intent": "ask_capability", "confidence": 0.85}
+    # generic ("さっきの話に戻って") must be checked before named -- it would
+    # otherwise also match _GO_BACK_NAMED with "さっき"/"前"/"元" captured as a
+    # literal (and never-discussed) topic name
+    if _GO_BACK_GENERIC.match(text):
+        return {"intent": "go_back_topic", "confidence": 0.85, "requested_topic": ""}
+    named_back = _GO_BACK_NAMED.match(text)
+    if named_back:
+        return {"intent": "go_back_topic", "confidence": 0.9,
+                "requested_topic": _safe(named_back.group(1), 24)}
+    if _FOLLOW_UP.match(text):
+        return {"intent": "follow_up", "confidence": 0.85,
+                "topic": state.get("current_topic", "")}
     if _RECALL_PREF.search(text):
         return {"intent": "recall_preference", "confidence": 0.95}
     if _RECALL.search(text):
@@ -319,7 +451,7 @@ def _ask_about(state: dict, subject: str) -> str:
                ("contrast", f"{subject}ではないものと、何が違いますか。"),
                ("use", f"{subject}は、いつ、何と一緒に現れますか。"))
     facet, reply = prompts[min(count - 1, len(prompts) - 1)]
-    state["current_topic"] = subject
+    _touch_topic(state, subject)
     state["awaiting"] = {"kind": facet, "topic": subject, "asked_at": _now()}
     state.setdefault("question_history", {}).setdefault(subject, []).append(
         {"at": _now(), "question": reply, "attempt": count, "facet": facet})
@@ -343,7 +475,7 @@ def _recall_knowledge(state: dict) -> str:
 
 def _meaning_answer(state: dict, subject: str, memory: dict | None) -> str:
     live, belief = _live_claims(state, subject), _belief(memory, subject)
-    state["current_topic"] = subject
+    _touch_topic(state, subject)
     if live and belief.get("understood"):
         return (f"あなたからは「{live[-1]['predicate']}」と聞き、読書では{subject}を"
                 f"{belief.get('genus')}として扱っています。二つの経路が一致するかは確認中です。")
@@ -360,7 +492,7 @@ def _meaning_answer(state: dict, subject: str, memory: dict | None) -> str:
 
 def _understanding_answer(state: dict, subject: str, memory: dict | None) -> str:
     live, belief = _live_claims(state, subject), _belief(memory, subject)
-    state["current_topic"] = subject
+    _touch_topic(state, subject)
     if belief.get("understood"):
         return (f"はい。読書の用例から、{subject}を{belief.get('genus', '何か')}として扱えます。"
                 f"ただし確信は{belief.get('confidence', 0):.2f}で、訂正可能です。")
@@ -370,12 +502,64 @@ def _understanding_answer(state: dict, subject: str, memory: dict | None) -> str
     return f"いいえ。{subject}について、まだ説明も独立した根拠も持っていません。"
 
 
+def _follow_up_answer(state: dict, memory: dict | None) -> str:
+    """「もっと教えて」「それは？」-- keep expanding on the CURRENT topic rather
+    than repeating what was already said or falling back to a generic
+    unresolved reply.  Surfaces one not-yet-mentioned live claim, then the
+    reading belief, then rotates `_ask_about`'s facets; never repeats the
+    same fact twice in a row."""
+    topic = state.get("current_topic", "")
+    if not topic:
+        return "何について、もっと知りたいですか。話題を教えてください。"
+    live, belief = _live_claims(state, topic), _belief(memory, topic)
+    progress = state.setdefault("topic_progress", {}).setdefault(topic, {})
+    mentioned = progress.setdefault("mentioned_predicates", [])
+    unmentioned = [c for c in reversed(live) if c["predicate"] not in mentioned]
+    if unmentioned:
+        claim = unmentioned[0]
+        mentioned.append(claim["predicate"])
+        return f"{topic}については、あなたから「{claim['predicate']}」とも聞いています。"
+    if belief.get("understood") and not progress.get("belief_mentioned"):
+        progress["belief_mentioned"] = True
+        return (f"読書では、{topic}を{belief.get('genus')}として扱っています。"
+                f"根拠の強さは{belief.get('confidence', 0):.2f}です。")
+    if live or belief.get("understood"):
+        return f"{topic}について、今のところこれ以上お伝えできることはありません。"
+    return _ask_about(state, topic)
+
+
+def _go_back_answer(state: dict, requested_topic: str, memory: dict | None) -> str:
+    """「さっきの話に戻って」「犬の話に戻って」-- resume an earlier topic from
+    `topic_stack` (structural conversational memory), not just the single
+    most recent one."""
+    stack = state.get("topic_stack", [])
+    if requested_topic:
+        if requested_topic not in stack:
+            return f"「{requested_topic}」については、まだ話していません。"
+        target = requested_topic
+    else:
+        earlier = [t for t in stack if t != state.get("current_topic", "")]
+        if not earlier:
+            return "戻れる前の話題が見つかりませんでした。"
+        target = earlier[-1]
+    _touch_topic(state, target)
+    live = _live_claims(state, target)
+    belief = _belief(memory, target)
+    if live:
+        return (f"「{target}」の話に戻ります。あなたから「{live[-1]['predicate']}」と"
+                "聞いていたところでした。")
+    if belief.get("understood"):
+        return (f"「{target}」の話に戻ります。読書では{belief.get('genus')}として"
+                "扱っています。")
+    return f"「{target}」の話に戻ります。まだ分かっていないところからでした。"
+
+
 def _curiosity_answer(state: dict, memory: dict | None) -> str:
     unresolved = [(n, w) for w, n in state.get("unknown_topics", {}).items()
                   if w not in _TOPIC_STOP and not _live_claims(state, w)]
     if unresolved:
         _, topic = max(unresolved)
-        state["current_topic"] = topic
+        _touch_topic(state, topic)
         return f"いま会話では「{topic}」を知りたいです。まだ説明を得ていません。"
     current = state.get("current_topic", "")
     if current and _live_claims(state, current) and not _belief(memory, current).get("understood"):
@@ -386,7 +570,7 @@ def _curiosity_answer(state: dict, memory: dict | None) -> str:
                   if not b.get("understood") and 1 < len(w) <= 8 and w not in _TOPIC_STOP]
     if candidates:
         _, topic = min(candidates)
-        state["current_topic"] = topic
+        _touch_topic(state, topic)
         return f"読書で出会った「{topic}」を、まだ理解できていないので知りたいです。"
     return "いまは、次に何を知るべきかを選ぶ材料が足りません。"
 
@@ -437,7 +621,7 @@ def _activity_answer(state: dict, memory: dict | None) -> str:
 
 def _elliptical_answer(state: dict, focus: dict) -> str:
     head, modifier, phrase = focus["head"], focus["modifier"], focus["phrase"]
-    state["current_topic"] = head
+    _touch_topic(state, head)
     state["awaiting"] = {"kind": "example", "topic": head, "asked_at": _now(),
                          "constraint": modifier}
     if modifier:
@@ -464,8 +648,8 @@ def _recover_missed_claims(state: dict) -> None:
     state["recovered_turn_ids"] = list(recovered)[-TURN_CAP:]
 
 
-def converse(text: str, previous: dict | None,
-             word_memory: dict | None = None) -> tuple[str, dict]:
+def converse(text: str, previous: dict | None, word_memory: dict | None = None,
+             phraser: "PhrasingModel | None" = None) -> tuple[str, dict]:
     state = _migrate(previous)
     _recover_missed_claims(state)
     text = _clean(text)
@@ -514,6 +698,10 @@ def converse(text: str, previous: dict | None,
         reply = ("今できるのは、挨拶、あなたから聞いた説明や好みを覚えて後で答えること、"
                  "読書で独立に確かめた語の意味を報告すること、解析の間違いを訂正として残すこと、"
                  "くらいです。自由な会話や、自分の意見を述べることはまだできません。")
+    elif intent == "follow_up":
+        reply = _follow_up_answer(state, word_memory)
+    elif intent == "go_back_topic":
+        reply = _go_back_answer(state, interpretation.get("requested_topic", ""), word_memory)
     elif intent == "recall_preference":
         prefs = state.get("preferences", {})
         if prefs:
@@ -572,7 +760,7 @@ def converse(text: str, previous: dict | None,
     else:
         topic = interpretation.get("topic", "")
         if topic:
-            state["current_topic"] = topic
+            _touch_topic(state, topic)
             reply = (f"「{topic}」の話だと思いましたが、質問なのか説明なのか決められませんでした。"
                      "質問なら「〜とは何ですか」、説明なら「〜は…です」のように言い直してもらえますか。")
         else:
@@ -582,9 +770,15 @@ def converse(text: str, previous: dict | None,
     state["dialogue_state"] = {"last_intent": intent,
                                "current_topic": state.get("current_topic", ""),
                                "awaiting": state.get("awaiting")}
+    template_reply = reply
+    reply = _phrase_naturally(template_reply, phraser)
     turn = {"turn_id": turn_id, "at": _now(), "user": text, "noise": reply,
             "interpretation": interpretation, "learned": learned,
             "source": "direct_human_conversation"}
+    if reply != template_reply:
+        turn["template_reply"] = template_reply     # audit trail: what Noise
+                                                     # actually decided, before
+                                                     # the presentation layer
     state["turns"] = (state.get("turns", []) + [turn])[-TURN_CAP:]
     state["stats"]["turns"] = state["stats"].get("turns", 0) + 1
     state["last_turn"] = turn
@@ -599,5 +793,6 @@ def summary(state: dict | None) -> dict:
             "corrections": state["stats"].get("corrections", 0),
             "unknown_topics": len(state.get("unknown_topics") or {}),
             "current_topic": state.get("current_topic", ""),
+            "topic_stack": list(state.get("topic_stack") or []),
             "last_intent": (state.get("dialogue_state") or {}).get("last_intent"),
             "last_exchange": state.get("last_turn")}

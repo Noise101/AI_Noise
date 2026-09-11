@@ -353,6 +353,28 @@ answer). A stored claim's predicate is rejected if it is itself question-shaped
 into "testimony" about its subject. The unresolved fallback asks the user to
 rephrase rather than declaring the utterance unreadable.
 
+**Multi-topic memory (`topic_stack`).** A single `current_topic` string cannot
+represent "go back to what we were discussing before" -- every topic switch
+overwrote it. `_touch_topic` maintains a capped, most-recent-last recency
+stack; `follow_up` ("もっと教えて", "それについては？") expands on the topic
+still on top without repeating an already-surfaced fact, and `go_back_topic`
+("さっきの話に戻って", "犬の話に戻って") resumes an earlier one from the stack,
+generic or by name, and says plainly when the named topic was never discussed
+rather than starting one.
+
+**Local model as a presentation layer, not a content source
+(`PhrasingModel` / `_phrase_naturally`).** Once a reply's content is fully
+decided by the ordinary rule logic above, an available local model MAY
+re-express it in more natural Japanese -- but this sits on the same side of
+the local-model boundary as the induction-only analyser use above, not the
+belief-affecting side: every content word (kanji/katakana run) of the
+template reply must survive verbatim in the rephrase, and the length must
+stay in a sane range, or the original template is used unchanged. The model
+can change how something is said; it can never add, drop, or alter what is
+said. The template is retained (`turn["template_reply"]`) whenever a rephrase
+replaces it, so what Noise actually decided stays auditable.
+`AI_NOISE_CHAT_PHRASING=0` disables this layer entirely.
+
 ## Decision replay, not state replay
 
 `.local/events.jsonl` is an append-only, cross-module log (`{ts, curricula, module, event_type, before, after, reason}` per line) of discrete state-changing decisions: a benchmark locking, a selected model switching. It exists to answer "when and why did the system decide this" without trusting a human's memory of a status snapshot, and it coexists with (does not replace) each module's own bounded `revision_history`-style fields, which the algorithms themselves still read.
