@@ -24,11 +24,16 @@ import time
 import urllib.request
 from datetime import datetime
 
+import conversation_embedding_v1 as association
 import japanese_proposition_v1 as propositions
 import morphology_teacher as morphology
 
 
-VERSION = 4     # v4: topic_stack gives multi-topic memory (follow_up,
+VERSION = 5     # v5: conversation_embedding_v1 gives a bounded, self-trained
+                # associative recall memory ("we talked about X before, is
+                # this related?") over topics/claims already held -- never a
+                # source of content, see _recall_prompt
+                # v4: topic_stack gives multi-topic memory (follow_up,
                 # go_back_topic) instead of a single current_topic string;
                 # PhrasingModel/_phrase_naturally lets a local model re-express
                 # an already-decided reply more naturally, content-verified
@@ -198,7 +203,7 @@ def _migrate(previous: dict | None) -> dict:
     state = _blank()
     for key in ("turns", "claims", "preferences", "unknown_topics",
                 "question_history", "errors", "recovered_turn_ids",
-                "last_turn", "dialogue_state"):
+                "last_turn", "dialogue_state", "embedding_memory"):
         if key in old:
             state[key] = old[key]
     state["stats"].update(old.get("stats") or {})
@@ -443,6 +448,31 @@ def _interpret(text: str, state: dict) -> dict:
             "raw": _safe(text, 60)}
 
 
+def _recall_prompt(state: dict, subject: str) -> str:
+    """A bounded associative-recall PROPOSAL, never a claim: the nearest
+    previously-discussed topic to `subject`, offered as a question the human
+    confirms or denies.  Restricted to topics Noise can truthfully say it has
+    actually discussed (claims heard + topic_stack); similarity alone never
+    merges the two topics or writes a claim about either.  A topic usually has
+    no embedding at all the first time it is ever mentioned -- there is
+    nothing yet to be similar to -- so this quietly does nothing until some
+    association has actually been learned, and never repeats the identical
+    suggestion for the same subject twice."""
+    known = (set(state.get("claims") or {}) | set(state.get("topic_stack") or [])) - {subject}
+    if not known:
+        return ""
+    hits = association.recall(subject, state.get("embedding_memory"), known_topics=known, top_k=1)
+    if not hits:
+        return ""
+    already = state.setdefault("topic_progress", {}).setdefault(subject, {}) \
+                   .setdefault("recalled_topics", [])
+    target = hits[0]["topic"]
+    if target in already:
+        return ""
+    already.append(target)
+    return f"ところで、以前「{target}」について話しましたが、関係ありますか。"
+
+
 def _ask_about(state: dict, subject: str) -> str:
     count = state.setdefault("unknown_topics", {}).get(subject, 0) + 1
     state["unknown_topics"][subject] = count
@@ -451,6 +481,9 @@ def _ask_about(state: dict, subject: str) -> str:
                ("contrast", f"{subject}ではないものと、何が違いますか。"),
                ("use", f"{subject}は、いつ、何と一緒に現れますか。"))
     facet, reply = prompts[min(count - 1, len(prompts) - 1)]
+    recall = _recall_prompt(state, subject)
+    if recall:
+        reply = f"{reply} {recall}"
     _touch_topic(state, subject)
     state["awaiting"] = {"kind": facet, "topic": subject, "asked_at": _now()}
     state.setdefault("question_history", {}).setdefault(subject, []).append(
@@ -770,6 +803,13 @@ def converse(text: str, previous: dict | None, word_memory: dict | None = None,
     state["dialogue_state"] = {"last_intent": intent,
                                "current_topic": state.get("current_topic", ""),
                                "awaiting": state.get("awaiting")}
+    # associative recall memory: bounded, incremental, replay-safe (turn_id).
+    # Learns only from claims/topic_stack Noise already holds -- never from
+    # the partner's or the phrasing model's output -- and never itself writes
+    # a claim; see _recall_prompt for the one place it is used.
+    state["embedding_memory"] = association.learn(
+        state.get("embedding_memory"), state.get("claims", {}),
+        state.get("topic_stack", []), turn_id=turn_id)
     template_reply = reply
     reply = _phrase_naturally(template_reply, phraser)
     turn = {"turn_id": turn_id, "at": _now(), "user": text, "noise": reply,

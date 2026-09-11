@@ -375,6 +375,23 @@ said. The template is retained (`turn["template_reply"]`) whenever a rephrase
 replaces it, so what Noise actually decided stays auditable.
 `AI_NOISE_CHAT_PHRASING=0` disables this layer entirely.
 
+**Self-trained associative recall memory (`conversation_embedding_v1`).** A
+small, dependency-free skip-gram embedding -- the same technique and the same
+score-0 role as `semantic_representation_v1` on the reading side, applied to
+`noise_chat_v1`'s own claims and `topic_stack` instead of read events (not
+replacing concept learning with a pretrained embedding: it is trained only on
+Noise's own conversation history, from nothing). When an unfamiliar topic
+comes up again, the nearest already-discussed topic (restricted to topics
+Noise can truthfully say it has talked about) is offered as a recall
+*question* -- "we talked about X before, is this related?" -- never an
+assertion that the two are the same concept, and it never writes, merges, or
+changes a claim by itself; the human's answer is what would, through the
+ordinary claim path, become testimony. A topic mentioned for the very first
+time has no embedding yet and legitimately produces no recall -- there is
+nothing to be similar to; the memory only helps from the second time a
+related topic surfaces onward, and the same recall is never repeated for the
+same subject once offered.
+
 ## Decision replay, not state replay
 
 `.local/events.jsonl` is an append-only, cross-module log (`{ts, curricula, module, event_type, before, after, reason}` per line) of discrete state-changing decisions: a benchmark locking, a selected model switching. It exists to answer "when and why did the system decide this" without trusting a human's memory of a status snapshot, and it coexists with (does not replace) each module's own bounded `revision_history`-style fields, which the algorithms themselves still read.

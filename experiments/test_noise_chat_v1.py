@@ -286,5 +286,48 @@ class PhrasingLayerTests(unittest.TestCase):
             os.environ.pop("AI_NOISE_CHAT_PHRASING", None)
 
 
+class AssociativeRecallMemoryTests(unittest.TestCase):
+    """conversation_embedding_v1: a bounded, score-0 recall PROPOSAL, never a
+    claim -- see conversation_embedding_v1.py and _recall_prompt."""
+
+    def _boost(self, state, rounds=200):
+        import conversation_embedding_v1 as assoc
+        for i in range(rounds):
+            state["embedding_memory"] = assoc.learn(
+                state.get("embedding_memory"), state.get("claims", {}),
+                state.get("topic_stack", []), turn_id=f"boost{i}")
+        return state
+
+    def test_asking_about_a_related_earlier_topic_again_offers_a_recall_prompt(self):
+        _, state = chat.converse("献とは何ですか", None)
+        _, state = chat.converse("鍵盤は道具です", state)
+        state = self._boost(state)
+        reply, state = chat.converse("献とは何ですか", state)
+        self.assertIn("鍵盤", reply)
+        self.assertIn("関係ありますか", reply)
+
+    def test_a_first_ever_mention_offers_no_recall_prompt(self):
+        # nothing has been discussed yet -- there is no association to recall,
+        # and none should be fabricated
+        reply, state = chat.converse("献とは何ですか", None)
+        self.assertNotIn("以前", reply)
+
+    def test_the_same_recall_is_not_repeated_for_the_same_subject(self):
+        _, state = chat.converse("献とは何ですか", None)
+        _, state = chat.converse("鍵盤は道具です", state)
+        state = self._boost(state)
+        first, state = chat.converse("献とは何ですか", state)
+        second, state = chat.converse("献とは何ですか", state)
+        self.assertIn("鍵盤", first)
+        self.assertNotIn("鍵盤", second)
+
+    def test_recall_never_creates_or_changes_a_claim(self):
+        _, state = chat.converse("献とは何ですか", None)
+        _, state = chat.converse("鍵盤は道具です", state)
+        state = self._boost(state)
+        _, state = chat.converse("献とは何ですか", state)
+        self.assertNotIn("献", state.get("claims", {}))   # still nothing told about 献
+
+
 if __name__ == "__main__":
     unittest.main()
