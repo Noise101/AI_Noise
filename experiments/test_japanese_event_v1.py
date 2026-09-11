@@ -1,7 +1,11 @@
+import os
 import unittest
 
 from japanese_event_v1 import (extract_clause, extract_story, learn_word_vocabulary,
-                               normalise_text, _dictionary_verb)
+                               normalise_text, _dictionary_verb,
+                               morphology_available, _morph_sentence_events,
+                               _morph_verb_lemma, _morph_subject_ok)
+import morphology_teacher as mt
 
 MOMOTARO = (
     "むかしむかし、あるところに、おじいさんとおばあさんがいました。"
@@ -196,6 +200,91 @@ class JapaneseEventTest(unittest.TestCase):
     def test_learned_vocabulary_contains_repeated_content_words(self):
         vocab = learn_word_vocabulary(MOMOTARO)
         self.assertTrue({"おばあさん", "おじいさん"} & vocab or "ももたろう" in vocab)
+
+
+class MorphologyDrivenParseTest(unittest.TestCase):
+    """The structural parse when an analyser is available (ARCHITECTURE.md
+    "Structural morphological analysis").  Segmentation/POS/lemma/case-role is
+    parse infrastructure here -- these tests check STRUCTURE recovery only,
+    never a semantic judgement (genus, plausibility, ...).
+
+    `AI_NOISE_NO_MORPHOLOGY` is a process-wide env var another test module in
+    the same `unittest` run may set (`test_japanese_reader_v1` forces it off
+    for its own determinism) -- checking `morphology_available()` once at
+    import/class-decoration time is not enough, since that pollution can land
+    between import and execution.  setUp forces a real backend for THIS class
+    and undoes the pollution; skip only if no analyser is vendored at all."""
+
+    def setUp(self):
+        self._prev_env = os.environ.pop("AI_NOISE_NO_MORPHOLOGY", None)
+        mt.get_teacher(refresh=True)
+        if not morphology_available():
+            self._restore_env()
+            self.skipTest("no morphological analyser vendored/installed")
+
+    def tearDown(self):
+        self._restore_env()
+
+    def _restore_env(self):
+        if self._prev_env is None:
+            os.environ.pop("AI_NOISE_NO_MORPHOLOGY", None)
+        else:
+            os.environ["AI_NOISE_NO_MORPHOLOGY"] = self._prev_env
+        mt.get_teacher(refresh=True)
+
+    def test_recovers_subject_across_a_relative_clause(self):
+        # 「あそびまわっていたこうもりが」 -- the head noun こうもり, not the
+        # relative-clause verb, must surface as the subject
+        story = "あるとき、あそびまわっていたこうもりが、あやまって地べたにおちて、"\
+                "そこにいたいたちに、つかまってしまいました。"
+        events = extract_story(story)
+        self.assertTrue(any(e.subject == "こうもり" and e.subject_explicit
+                            for e in events))
+        self.assertIn("おちる", [e.verb for e in events])
+
+    def test_te_chain_shares_the_sentence_subject(self):
+        # a kanji-bearing sentence so the morph path (not the kana-guard
+        # fallback) handles it
+        events = extract_story("猫が鼠を見つけて、追いかけて、捕まえました。")
+        chain = [e for e in events if e.subject == "猫"]
+        self.assertGreaterEqual(len(chain), 2)
+        self.assertTrue(all(e.subject_explicit for e in chain))
+
+    def test_volitional_form_is_repaired_to_dictionary_form(self):
+        # 行こう (volitional) must resolve to 行く, not the analyser's raw base
+        story = "きつねは森へ行こうと思いました。"
+        events = extract_story(story)
+        verbs = [e.verb for e in events]
+        self.assertTrue(any(v in ("行く", "いく") for v in verbs))
+
+    def test_long_all_kana_sentence_defers_to_the_heuristic_parser(self):
+        # janome's dictionary mis-segments kana-only prose (「いりくち」->
+        # いる+くちる) -- the morph path must hand these back rather than
+        # emit a fabricated lemma
+        sentence = "そこで、ねずみたちを、うまくおびきだしてやろうとかんがえました"
+        self.assertIsNone(_morph_sentence_events(sentence, "ねこ", None, None))
+
+    def test_short_all_kana_sentence_still_analysed(self):
+        # the kana guard only applies above the length floor
+        self.assertIsNotNone(_morph_sentence_events("ねこがきました。", None, None, None))
+
+    def test_morph_subject_ok_rejects_unstripped_clause_fragments(self):
+        self.assertFalse(_morph_subject_ok("命乞をするのを"))
+        self.assertFalse(_morph_subject_ok("くさばのつゆばかりすっていました"))
+        self.assertTrue(_morph_subject_ok("こうもり"))
+        self.assertTrue(_morph_subject_ok("いたち"))
+
+    def test_verb_lemma_handles_sahen_compound(self):
+        # a サ変接続 noun immediately followed by conjugated する is one verb
+        a = mt.analyse("いぬが勉強した。")
+        self.assertIsNotNone(a)
+        for i, m in enumerate(a.morphemes):
+            if m.surface == "し" and m.is_verb:
+                lemma, _ = _morph_verb_lemma(a.morphemes, i)
+                self.assertEqual(lemma, "勉強する")
+                break
+        else:
+            self.fail("analyser did not tokenise the サ変 verb as expected")
 
 
 if __name__ == "__main__":

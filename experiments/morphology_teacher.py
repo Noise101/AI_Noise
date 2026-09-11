@@ -36,10 +36,23 @@ class Morpheme:
     pos: str            # 名詞 / 動詞 / 助詞 / 助動詞 / 副詞 / 記号 / ...
     pos_detail: str      # 格助詞 / 係助詞 / 自立 / 非自立 / 一般 / ...
     base: str            # dictionary form (== surface when the analyser has none)
+    infl: str = ""       # inflection form: 基本形 / 連体形 / 連用形 / 未然形 / …
 
     @property
     def is_verb(self) -> bool:
         return self.pos in ("動詞", "形容詞")
+
+    @property
+    def is_adnominal(self) -> bool:
+        """A verb/adjective in the form that modifies a following noun
+        (relative clause), e.g. 連体形 or a bare て/た that precedes a noun."""
+        return self.is_verb and self.infl in ("連体形",)
+
+    @property
+    def is_renyou(self) -> bool:
+        """連用形 / 連用中止 / て接続 -- a non-final verb that chains to the next
+        predicate while sharing the subject."""
+        return self.is_verb and ("連用" in self.infl or self.infl == "ガル接続")
 
     @property
     def is_case_particle(self) -> bool:
@@ -129,8 +142,11 @@ class _JanomeBackend:
             for tok in self._tk.tokenize(sentence):
                 parts = tok.part_of_speech.split(",")
                 base = tok.base_form if tok.base_form and tok.base_form != "*" else tok.surface
+                infl = getattr(tok, "infl_form", "") or ""
+                if infl == "*":
+                    infl = ""
                 morphemes.append(Morpheme(tok.surface, parts[0],
-                                          parts[1] if len(parts) > 1 else "*", base))
+                                          parts[1] if len(parts) > 1 else "*", base, infl))
             return MorphAnalysis("janome", morphemes)
         except Exception:
             return None
@@ -163,7 +179,9 @@ class _FugashiBackend:
                 pos2 = getattr(feat, "pos2", None) or "*"
                 base = (getattr(feat, "orthBase", None) or getattr(feat, "lemma", None)
                         or word.surface)
-                morphemes.append(Morpheme(word.surface, pos, pos2, base))
+                infl = getattr(feat, "cForm", None) or ""      # unidic: 連体形-一般 etc.
+                morphemes.append(Morpheme(word.surface, pos, pos2, base,
+                                          infl.split("-")[0] if infl else ""))
             return MorphAnalysis("fugashi", morphemes)
         except Exception:
             return None
@@ -201,8 +219,21 @@ def get_teacher(refresh: bool = False):
     return _CACHED
 
 
+_ANALYSE_CACHE: "dict[str, MorphAnalysis | None]" = {}
+_CACHE_CAP = 20000
+
+
 def analyse(sentence: str) -> "MorphAnalysis | None":
-    return get_teacher().analyse(sentence)
+    """Deterministic -- so cache by sentence.  The re-read cascade (a parser
+    version bump re-parses every read book) would otherwise re-tokenise the same
+    ~50k sentences every cycle."""
+    if sentence in _ANALYSE_CACHE:
+        return _ANALYSE_CACHE[sentence]
+    a = get_teacher().analyse(sentence)
+    if len(_ANALYSE_CACHE) >= _CACHE_CAP:
+        _ANALYSE_CACHE.clear()
+    _ANALYSE_CACHE[sentence] = a
+    return a
 
 
 if __name__ == "__main__":

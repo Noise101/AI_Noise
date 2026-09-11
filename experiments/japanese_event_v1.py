@@ -22,6 +22,7 @@ Design choices, all rule-based, no morphological analyser, no pretrained model:
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 
@@ -35,11 +36,13 @@ from dataclasses import dataclass, field
 #        った defaults to る; single-kanji topic は
 #   5 -> compound verbs (〜ておる, 〜ながら), copula ではなかった, ことができる,
 #        んだ -> ぶ/む/ぬ, 考える/思う in the table; adverbs out of the subject slot
-PARSER_VERSION = 8      # v8: leading sentence-adverbs / archaic connectives
+PARSER_VERSION = 9      # v9: morphology-driven structural parse when an analyser
+                        #     is installed (segmentation / POS / case roles / verb
+                        #     lemmas); pure-heuristic fallback per sentence.
+                        #     Relative-clause subjects, te-form chains and
+                        #     compound verbs are now recovered structurally.
+                        # v8: leading sentence-adverbs / archaic connectives
                         #     stripped off a glued noun ("ふとわたし" -> "わたし")
-                        # v7: sentences also split on blank lines (section
-                       # headings no longer glue to the first subject); time
-                       # adverbials (〜まで, 〜ごろ) rejected as subjects
 
 # character classes
 HIRAGANA = r"ぁ-ゖゝゞ"
@@ -644,27 +647,295 @@ def _sentence_events(sentence: str, recent_subject: str | None,
     return events
 
 
+# ==========================================================================
+# Morphology-driven structural parse (ARCHITECTURE.md "Structural morphological
+# analysis").  A deterministic dictionary tokenizer + POS + lemma is parse
+# INFRASTRUCTURE -- the same category as the English whitespace tokenizer, not a
+# semantic proposal.  It gives Noise a cleaner (subject, verb, object) reading;
+# every judgement about what those mean -- genus, plausibility, coreference by
+# description -- still runs on Noise's own heuristics / reading evidence.  The
+# pure-heuristic path below is the fallback when no analyser is installed
+# (AI_NOISE_NO_MORPHOLOGY=1, or nothing vendored) -- invariant 1 holds.
+# ==========================================================================
+_MORPH_CASE = ("が", "を", "に", "へ", "で", "と", "から", "より", "まで")
+_MORPH_AUX_VERBS = frozenset({"いる", "おる", "ある", "しまう", "くる", "来る", "いく",
+                              "行く", "ゆく", "みる", "見る", "おく", "くれる", "もらう",
+                              "あげる", "やる", "なさる", "下さる", "ください"})
+# lemmas the analyser strands when it mis-segments a conjugation ("ない" from a
+# negative, "まう"/"ちる" from 〜てしまう / 〜ておちる run together, "こう" from 行こう)
+_MORPH_JUNK_VERB = frozenset({"ない", "ぬ", "た", "だ", "ます", "です", "れる", "られる",
+                              "せる", "させる", "ようだ", "そうだ", "らしい", "べし",
+                              "まう", "ちる", "こう", "そう", "よう", "げ", "がる"})
+# valid verbs, but vacuous when stranded with no arguments (keep them only when
+# they carry an object / oblique / explicit subject)
+_MORPH_LIGHT_VERB = frozenset({"する", "なる", "ある", "いる", "おる", "くる", "ゆく",
+                               "いく", "だす", "とる", "できる", "しまう"})
+_MORPH_MAX_CHAIN = 5          # >5 chained verbs from one subject == a mis-parse
+
+
+def _morph_subject_ok(subject: str) -> bool:
+    """Reject a 'subject' that is really an unstripped clause fragment -- it
+    carries an inner case particle, a verb tail, or is implausibly long."""
+    if not subject or len(subject) > 8:
+        return False
+    if any(p in subject for p in ("を", "へ", "から", "まで", "より")):
+        return False
+    if subject.endswith(("て", "た", "で", "だ", "し", "き", "の", "り")) and len(subject) >= 4:
+        _, conf = _dictionary_verb(subject)
+        if conf >= 0.6:
+            return False
+    return subject not in _MORPH_NON_SUBJECT
+
+
+def _morph_verb_ok(lemma: str) -> bool:
+    if not lemma or len(lemma) < 2 or lemma in _MORPH_JUNK_VERB:
+        return False
+    if lemma in _SPEECH_STEMS.values() or lemma.endswith("する"):
+        return True
+    if lemma[-1] in "うくぐすつぬぶむるゔ":          # a plausible dictionary-form tail
+        _, conf = _dictionary_verb(lemma)
+        return conf >= 0.5 or len(lemma) >= 3
+    return False
+
+
+def morphology_available() -> bool:
+    if os.environ.get("AI_NOISE_NO_MORPHOLOGY") == "1":
+        return False
+    try:
+        import morphology_teacher as _mt
+        return _mt.get_teacher().name != "none"
+    except Exception:
+        return False
+
+
+_MORPH_NON_SUBJECT = NON_SUBJECT | {
+    "もの", "こと", "ところ", "とき", "ため", "はず", "わけ", "つもり", "ふう",
+    "それ", "これ", "あれ", "どれ", "この", "その", "あの", "うち", "なか", "ほう",
+    "とおり", "ばかり", "だけ", "ぐらい", "くらい"}
+# a leading NP unambiguously marked は/が in the raw text -- if the analyser's
+# walk never recovers ANY subject for a sentence shaped like this, it almost
+# always means it glued an out-of-dictionary proper noun (a character name)
+# into a nonsense verb complex ("ももたろうは" -> もも+たろ+う+はお(動詞)) rather
+# than reading は as the topic particle -- hand the sentence to the heuristic
+_LEADING_TOPIC = re.compile(r"^[^\s。、「」『』]{1,8}(は|が)")
+_VOLITIONAL = re.compile(r"[こごそとのぼもろおよ]う$")
+_O_ROW_TO_U = {"こ": "く", "ご": "ぐ", "そ": "す", "と": "つ", "の": "ぬ",
+               "ぼ": "ぶ", "も": "む", "ろ": "る", "お": "う"}
+
+
+def _morph_verb_lemma(ms: list, i: int) -> "tuple[str, int]":
+    """(dictionary form of the predicate starting at ms[i], index after its
+    whole complex).  The FIRST 自立 verb is the main verb; trailing 非自立 verbs
+    (〜ている / 〜てしまう / 〜てくる) and 助動詞 are auxiliaries; a preceding
+    サ変 noun makes it <noun>する."""
+    main = ms[i]
+    lemma = main.base or main.surface
+    if lemma and _VOLITIONAL.search(lemma) and lemma not in ("言う", "云う", "思う"):
+        # the analyser left the volitional ("行こう" -> base "いこう"): repair to
+        # the dictionary form.  お-row stem + う -> godan (いこ->いく); よ + う ->
+        # ichidan (たべよ->たべる)
+        stem = lemma[:-1]
+        if stem.endswith("よ"):
+            lemma = stem[:-1] + "る"
+        elif stem and stem[-1] in _O_ROW_TO_U:
+            lemma = stem[:-1] + _O_ROW_TO_U[stem[-1]]
+    if main.base == "する" and i > 0 and ms[i - 1].pos == "名詞" \
+            and ("サ変" in ms[i - 1].pos_detail or ms[i - 1].pos_detail == "サ変接続"):
+        lemma = _clean_noun(ms[i - 1].surface) + "する"
+    j = i + 1
+    while j < len(ms):
+        n = ms[j]
+        if n.pos == "助動詞" or (n.pos == "助詞" and n.pos_detail == "接続助詞"):
+            j += 1
+            continue
+        if n.is_verb and (n.pos_detail == "非自立" or n.base in _MORPH_AUX_VERBS):
+            j += 1
+            continue
+        break
+    return lemma, j
+
+
+def _morph_sentence_events(sentence: str, recent_subject: str | None,
+                           vocab: "set[str] | None",
+                           quotes: "list[str] | None") -> "list[JapaneseEvent] | None":
+    """Events from one sentence via the morphological analyser.  Returns None
+    when the analyser is unavailable or the analysis is degenerate, so the
+    caller falls back to the pure-heuristic parse for that sentence."""
+    try:
+        import morphology_teacher as _mt
+    except Exception:
+        return None
+    events: list[JapaneseEvent] = []
+    if quotes:
+        speech, sentence = _speech_events(sentence, quotes, recent_subject)
+        events.extend(speech)
+        if speech:
+            recent_subject = speech[-1].subject
+    plain = _QUOTE_PH.sub("それ", sentence).strip().rstrip(SENTENCE_END)
+    if len(plain) < 4:
+        return events
+    # janome's IPADIC dictionary segments kana-only prose very badly (「いりくち」
+    # -> いる+くちる): hand a long all-kana sentence back to the particle
+    # heuristic, which was built for exactly that register
+    if len(plain) >= 12 and not any("一" <= c <= "鿿" for c in plain):
+        return None
+    a = _mt.analyse(plain)
+    if not a or not a.morphemes:
+        return None
+    ms = a.morphemes
+    if not any(m.is_verb for m in ms):
+        return events or None
+
+    np_run = ""
+    prev_adnominal = False
+    pending: list[tuple[str, str]] = []          # (noun, particle) awaiting a verb
+    subject_here: str | None = None
+    sent_subj: str | None = None       # subject named somewhere in THIS sentence
+    sent_subj_chain = 0                 # predicates it has legitimately carried to
+    chain_n = 0
+    i, nms = 0, len(ms)
+    while i < nms:
+        m = ms[i]
+        nxt_m = ms[i + 1] if i + 1 < nms else None
+        # an i-adjective / na-adjective right before a noun modifies it -- not a
+        # predicate ("赤い はな", "しずかな 川")
+        adj_adnominal = (m.pos in ("形容詞", "連体詞") and nxt_m is not None
+                         and nxt_m.pos in ("名詞", "代名詞"))
+        if m.pos in ("名詞", "代名詞", "接頭詞") or (m.surface in ("々", "ケ", "ヶ")):
+            np_run = m.surface if prev_adnominal else np_run + m.surface
+            prev_adnominal = False
+            i += 1
+            continue
+        if m.pos == "助詞" and m.surface in ("の", "な") and m.pos_detail in ("連体化", "*"):
+            np_run = ""            # ねこ「の」首 -> the case-marked head is 首
+            i += 1
+            continue
+        if m.pos == "助動詞" and m.base == "だ" and "体言接続" in (m.infl or ""):
+            np_run = ""            # 元気な / しずかな -- attributive な: drop the
+            i += 1                 # modifier stem, the head noun starts fresh
+            continue
+        prev_adnominal = m.is_adnominal or adj_adnominal
+        if m.pos == "助詞" and m.surface in ("が", "は", "を", *_MORPH_CASE) and np_run:
+            head = _clean_noun(np_run)
+            np_run = ""
+            p = m.surface
+            if not (head and _noun_ok(head)):
+                i += 1
+                continue
+            if p in ("が", "は"):
+                stripped = _strip_modifier(head)
+                if not subject_here and head not in _MORPH_NON_SUBJECT \
+                        and not _TIME_ADVERBIAL.search(head):
+                    subject_here = stripped
+                    if stripped != sent_subj:
+                        sent_subj, sent_subj_chain = stripped, 0
+                elif p == "が" and stripped in PREDICATE_GA_NOUNS:
+                    pending.append((stripped, "が"))     # 「おなかがすいた」theme
+                # else: a second/blocked が-は NP -- drop it rather than let
+                # _assemble_event promote もの/こと/おなか to a bogus subject
+            elif p == "を":
+                pending.append((head, "を"))
+            elif p in _MORPH_CASE:
+                pending.append((head, p))
+            i += 1
+            continue
+        # 未然形 (mizenkei) must be followed by ない/れる/られる/せる/させる/う/よう
+        # -- one immediately followed by a case particle is the analyser
+        # mis-reading a hiragana-written NOUN as a verb stem (「やま」(山) -> 動詞
+        # やむ,未然形, then へ).  Not a predicate; leave it for the noun path.
+        mizen_misparse = (m.infl == "未然形" and nxt_m is not None
+                          and nxt_m.pos == "助詞" and nxt_m.surface in _MORPH_CASE)
+        if mizen_misparse:
+            i += 1
+            continue
+        if (m.pos == "動詞" and m.pos_detail == "自立" and not m.is_adnominal) or \
+                (m.pos == "形容詞" and not adj_adnominal and not m.is_adnominal):
+            np_run = ""
+            lemma, nxt = _morph_verb_lemma(ms, i)
+            i = nxt
+            # the subject is "named here" only for the first predicate that
+            # consumes this sentence's が/は NP (or for a clause that re-states
+            # it in `pending`); a 〜て / 連用 chain shares it but does not
+            # re-assert it, so those events thread rather than claim explicitness
+            here = subject_here
+            subj = here or recent_subject or ""
+            ev = _assemble_event(pending, lemma, 0.8, subj, sentence)
+            pending = []
+            subject_here = None
+            if not (ev and ev.verb and _morph_verb_ok(ev.verb)):
+                continue
+            if ev.verb in _MORPH_LIGHT_VERB and not (ev.obj or ev.roles):
+                continue                        # bare する/なる/… -- no event content
+            chain_n += 1
+            if chain_n > _MORPH_MAX_CHAIN:
+                continue
+            # explicit if this clause named the subject, or a 〜て / 連用 chain
+            # is still carrying a subject named earlier in the same sentence
+            # (bounded -- a long run of clauses is a mis-parse, not one chain)
+            carried = (ev.subject and ev.subject == sent_subj
+                       and sent_subj_chain < _MORPH_MAX_CHAIN)
+            named_here = bool(ev.subject) and (
+                ev.subject_explicit or (bool(here) and ev.subject == here) or carried)
+            if named_here and not _morph_subject_ok(ev.subject):
+                named_here = False
+            if ev.subject and ev.subject == sent_subj:
+                sent_subj_chain += 1
+            elif ev.subject_explicit:
+                sent_subj, sent_subj_chain = ev.subject, 0
+            events.append(JapaneseEvent(
+                ev.subject, ev.verb, ev.obj,
+                round(min(ev.confidence, 0.85 if named_here else 0.6), 3),
+                sentence.strip(), ev.roles,
+                subject_explicit=named_here))
+            if ev.subject and (named_here or not recent_subject):
+                recent_subject = ev.subject
+            continue
+        if m.pos == "記号" and m.surface in ("、", "，"):
+            np_run = ""
+        i += 1
+    made = [e for e in events if e.verb]
+    # the raw text unambiguously topic/subject-marks its leading NP but the
+    # walk never recovered ANY subject from it -- almost always an
+    # out-of-dictionary proper noun glued into a nonsense verb (see
+    # `_LEADING_TOPIC`); the heuristic's character-level particle scan does
+    # not depend on the word being in a dictionary
+    if made and sent_subj is None and _LEADING_TOPIC.match(plain):
+        return None
+    # if this sentence's analysis produced mostly subjectless events the
+    # heuristic parser may do better on it -- hand it back
+    if len(made) >= 3 and sum(1 for e in made if e.subject_explicit) / len(made) < 0.34:
+        return None
+    return events
+
+
 def extract_story(text: str, known_words: "set[str] | None" = None,
                   use_teacher: bool = False) -> list[JapaneseEvent]:
     """Ordered events for a whole story, threading the omitted subject across
     clauses and sentences.  Direct speech (「…」と言った) is pulled out first so a
     quote's own 。 does not split the sentence.
 
-    `use_teacher=True` runs a disclosed morphological analyser (evidence score 0)
-    over the same sentences afterwards and lets it correct verb dictionary forms
-    and strip relative-clause fragments from subjects.  It is OFF by default:
-    the frozen benchmarks, the character RNN, and boundary induction only ever
-    see the heuristic parse (ARCHITECTURE.md invariants 1, 16, 17)."""
+    When a morphological analyser is installed (and AI_NOISE_NO_MORPHOLOGY is not
+    set) the structural parse uses it -- segmentation, POS, case roles and verb
+    lemmas -- and falls back to the pure particle heuristic per sentence when the
+    analysis is degenerate.  `use_teacher=True` additionally applies the older
+    per-book teacher refinement to the final list (kept for callers that pass
+    it; the morph path already covers verb forms and relative-clause heads)."""
     dequoted, quotes = _protect_quotes(normalise_text(text))
     vocab = known_words if known_words is not None else learn_word_vocabulary(
         _QUOTE_PH.sub("", dequoted))
+    morph = morphology_available()
     events: list[JapaneseEvent] = []
     recent_subject: str | None = None
     for raw in SENT_SPLIT.split(dequoted):
         sentence = raw.strip()
         if len(_QUOTE_PH.sub("", sentence)) < 4:
             continue
-        for event in _sentence_events(sentence, recent_subject, vocab, quotes):
+        sent_events = None
+        if morph:
+            sent_events = _morph_sentence_events(sentence, recent_subject, vocab, quotes)
+        if sent_events is None:
+            sent_events = _sentence_events(sentence, recent_subject, vocab, quotes)
+        for event in sent_events:
             events.append(event)
             if event.subject:
                 recent_subject = event.subject

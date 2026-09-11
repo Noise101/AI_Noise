@@ -185,6 +185,57 @@ wording — a word is still "understood" only on its own reading evidence.
 Still TODO if this is not enough: a graded developmental corpus, or parser
 object-extraction.
 
+## Parser v9 — structural morphological analysis (2026-09-11)
+
+The pure particle-anchor heuristic could not break down the multi-clause,
+relative-clause-heavy sentences that make up most of the corpus (measured
+explicit-subject rate ~57% on the `shelved_stuck` shelf). `japanese_event_v1`
+now uses the vendored/system morphological analyser (`morphology_teacher.py`)
+as **structural parse infrastructure** when it is installed — see
+`ARCHITECTURE.md` "Structural morphological analysis vs. semantic proposal" for
+the invariant-10 boundary this draws: deterministic segmentation/POS/lemma is
+not a claim about meaning, so its output is stamped `heuristic_self` like the
+old heuristic parse and may feed learning; interpretation of what the recovered
+structure *means* still runs entirely on Noise's own heuristics.
+
+`_morph_sentence_events` recovers case-marked subject/verb/object structure
+per sentence and falls back to the particle heuristic when the analysis looks
+degenerate — several concrete failure modes of the vendored IPADIC dictionary
+were found and gated on the live corpus, not assumed away:
+
+- a long **kana-only** sentence is frequently mis-segmented (「いりくち」→
+  いる+くちる) — deferred to the heuristic above a length floor;
+- a volitional form (「行こう」) surfaces as a raw, un-conjugated base — repaired
+  to the dictionary form;
+- a 未然形 token immediately followed by a case particle is almost always a
+  hiragana-written **noun** misread as a verb stem (「やま」(山) → 動詞やむ,未然形
+  before へ) — rejected as a predicate;
+- an **out-of-dictionary proper noun** (a character name) glues into a nonsense
+  verb complex (「ももたろうは」→ もも+たろ+う+はお(動詞)) — detected by comparing
+  against the raw text's own unambiguous topic/subject marking
+  (`_LEADING_TOPIC`) and deferred to the heuristic;
+- a relative-clause head, a chain of more than `_MORPH_MAX_CHAIN` predicates, or
+  an unstripped clause fragment standing in for a subject are all rejected
+  (`_strip_modifier`, `_morph_subject_ok`).
+
+`PARSER_VERSION` 8 → 9. `reevaluate_stale_parses` puts every `shelved_stuck` /
+`unparsable` book at/below the level back into rotation and drops its cached
+events, so the shelf re-reads under the new parser rather than inheriting old
+failures; `floor_level` protects the already-earned level from the parser's
+level re-walk. Measured on the 25 fetchable `shelved_stuck` books at the live
+level (2026-09-11): heuristic-only 616 events / 354 explicit-subject (57%) vs.
+morph-assisted 977 events / 676 explicit-subject (69%) — more events recovered
+per book AND a materially higher fraction with a named (not guessed) subject.
+`AI_NOISE_NO_MORPHOLOGY=1` still forces the pure-heuristic path; new tests in
+`test_japanese_event_v1.MorphologyDrivenParseTest` cover the recovery cases and
+every gate above.
+
+Not yet done: object-genus coverage (still the bottleneck noted above) is
+unaffected by this change — it improves *structure* recovery, not which nouns
+get a validated genus. Whether the extra structural yield actually moves the
+frozen retelling/probe/prediction numbers needs several read cycles on the
+restarted worker to observe.
+
 ## Safety and integrity
 
 - Web access is read-only. Do not post, purchase, change permissions, or mutate external services.
