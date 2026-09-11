@@ -76,6 +76,17 @@ own `heuristic_self` events and the corpus's richest source of concrete common n
 Every word's meaning is a belief with a confidence and a source trail (`beliefs[w]`),
 folded onto a small closed coarse ontology (生き物 / 道具 / 場所 / …).
 
+`japanese_proposition_v1` complements action events with conservative ordinary
+stative clauses: `猫は動物です`, `レモンは黄色い`, `犬には足がある`, and
+`本は机の上にある`.  It uses only structural morphology (or a smaller regex
+fallback), rejects multi-clause/ambiguous predicates, and records each assertion
+as a revisable `proposition_self` observation.  An assertion is not truth: direct
+class evidence requires repetition in distinct read sources, and contradictory
+or negative observations remain available for revision.  The per-cycle context
+counters are rebuilt from the distinct current corpus rather than incrementing
+again when the same corpus is replayed; rereading one book cannot manufacture
+independent support.
+
 - **Testimony** — a ja.wiktionary / ja.wikipedia genus, and (when a local model is
   up) its answer to *one* closed-set discrimination question — enters the belief at
   a **capped weight** (`TESTIMONY_CAP`, currently 0.35). It is a hypothesis, held

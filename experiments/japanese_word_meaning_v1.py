@@ -83,7 +83,7 @@ EVIDENCE_HEADROOM = 0.65      # reading evidence fills the rest
 UNDERSTOOD_CONF = 0.60        # confidence at/above this ...
 UNDERSTOOD_EVIDENCE = 0.25    # ... AND this much independent reading evidence
 
-_CONTENT = re.compile(r"^[ぁ-ゟ゠-ヿ一-鿿]{2,}$")
+_CONTENT = re.compile(r"^[ぁ-ゟ゠-ヿ一-鿿]+$")
 _STOP = frozenset((
     "こと", "もの", "ところ", "とき", "ため", "よう", "そう", "これ", "それ", "あれ",
     "どれ", "だれ", "なに", "ここ", "そこ", "あそこ", "どこ",
@@ -234,11 +234,13 @@ def _is_content(w: str) -> bool:
 
 
 def _is_wordlike(w: str) -> bool:
-    """A single word, not a phrase or a parse fragment: 2..6 chars, no の / 、;
+    """A single word, not a phrase or a parse fragment: 1..6 chars, no の / 、;
+    a one-character word must be kanji/katakana (犬・猫・本・山 are basic words);
     no dangling case particle on a LONGER run (はと/ひと/あと are real words);
     not と+katakana-name."""
     w = _norm(w)
-    return (_is_content(w) and 2 <= len(w) <= 6 and "の" not in w and "、" not in w
+    single_ok = len(w) != 1 or bool(re.match(r"^[゠-ヿ一-鿿]$", w))
+    return (_is_content(w) and single_ok and 1 <= len(w) <= 6 and "の" not in w and "、" not in w
             and not (len(w) >= 4 and w.endswith(("は", "が", "を", "に", "で")))
             and not re.match(r"^と[゠-ヿ]", w))
 
@@ -471,7 +473,8 @@ class _LLMClient:
 # --- learning + belief revision -----------------------------------------
 def _blank() -> dict:
     return {"version": VERSION, "selection_version": 0,
-            "contexts": {}, "entities": {}, "profiles": {}, "taxonomy": {},
+            "contexts": {}, "entities": {}, "profiles": {}, "proposition_classes": {},
+            "taxonomy": {},
             "llm_class": {}, "beliefs": {},
             "researched": [], "llm_asked": [], "selection_words": [],
             "selection_refs": {}, "learning_curve": [],
@@ -494,13 +497,14 @@ def _migrate(state: dict) -> dict:
 
 
 def _observe(state: dict, stories: list[dict]) -> None:
-    ctx: dict[str, Counter] = {w: Counter(c) for w, c in state["contexts"].items()}
-    ent: Counter = Counter(state.get("entities", {}))
-    prof: dict[str, dict] = {w: {"subj": p.get("subj", 0), "obj": p.get("obj", 0),
-                                 "subj_verbs": Counter(p.get("subj_verbs", {})),
-                                 "obj_verbs": Counter(p.get("obj_verbs", {}))}
-                             for w, p in state.get("profiles", {}).items()}
-    for story in stories:
+    # Rebuild from the current distinct reading corpus.  The old code started
+    # from last cycle's counters and then replayed every old story, so one book
+    # read once became thousands of fake independent observations over time.
+    ctx: dict[str, Counter] = {}
+    ent: Counter = Counter()
+    prof: dict[str, dict] = {}
+    proposition_sources: dict[str, dict[str, set[str]]] = {}
+    for story_index, story in enumerate(stories):
         toks: list[str] = []
         for e in story.get("events", []):
             if not isinstance(e, dict) or e.get("provenance") != "heuristic_self":
@@ -517,6 +521,23 @@ def _observe(state: dict, stories: list[dict]) -> None:
                         p[f"{pk}_verbs"][verb] += 1
             toks += [_norm(t) for t in (e.get("subject"), e.get("obj"), e.get("verb"))
                      if _is_wordlike(t)]
+        source = story.get("url") or f"anonymous:{story_index}"
+        for proposition in story.get("propositions", []):
+            if (not isinstance(proposition, dict)
+                    or proposition.get("provenance") != "proposition_self"):
+                continue
+            subject = _norm(proposition.get("subject") or "")
+            value = _norm(proposition.get("value") or "")
+            if not (_is_wordlike(subject) and _is_wordlike(value)):
+                continue
+            ent[subject] += 1
+            ent[value] += 1
+            ctx.setdefault(subject, Counter())[value] += 1
+            ctx.setdefault(value, Counter())[subject] += 1
+            if proposition.get("relation") == "is":
+                coarse = _coarse(value)
+                if coarse:
+                    proposition_sources.setdefault(subject, {}).setdefault(coarse, set()).add(source)
         for i, w in enumerate(toks):
             near = toks[max(0, i - 4):i] + toks[i + 1:i + 5]
             ctx.setdefault(w, Counter()).update(x for x in near if x != w)
@@ -526,6 +547,9 @@ def _observe(state: dict, stories: list[dict]) -> None:
                              "subj_verbs": dict(Counter(p["subj_verbs"]).most_common(12)),
                              "obj_verbs": dict(Counter(p["obj_verbs"]).most_common(12))}
                          for w, p in prof.items() if p["subj"] or p["obj"]}
+    state["proposition_classes"] = {
+        word: {coarse: len(sources) for coarse, sources in classes.items()}
+        for word, classes in proposition_sources.items()}
 
 
 def _entity_vocab(state: dict, known_words: "set[str] | None") -> list[str]:
@@ -573,6 +597,9 @@ def _revise_belief(state: dict, word: str, cycle: int,
     prev = state["beliefs"].get(word, {})
     testimony = [] if suppress_testimony else _testimony_classes(state, word)
     read_cls, read_str = _reading_class(state["profiles"].get(word, {}))
+    direct_counts = Counter((state.get("proposition_classes") or {}).get(word, {}))
+    direct_cls, direct_n = direct_counts.most_common(1)[0] if direct_counts else ("", 0)
+    direct_str = min(EVIDENCE_HEADROOM, 0.18 * direct_n)
     nbr_cls, nbr_str = _neighbour_class(state, word)
     # prediction-failure feedback (japanese_prediction_v1): a word whose story
     # behaviour has kept contradicting its believed genus.  One capped channel --
@@ -588,6 +615,9 @@ def _revise_belief(state: dict, word: str, cycle: int,
     if read_cls:
         e_weight[read_cls] += read_str
         sources.setdefault(read_cls, []).append("reading_usage")
+    if direct_cls:
+        e_weight[direct_cls] += direct_str
+        sources.setdefault(direct_cls, []).append("reading_proposition")
     if nbr_cls:
         e_weight[nbr_cls] += nbr_str
         sources.setdefault(nbr_cls, []).append("neighbours")
@@ -606,7 +636,8 @@ def _revise_belief(state: dict, word: str, cycle: int,
     # outweigh "椅子 is picked up, moved, offered" (a direct observation).
     def _own(cls: str) -> float:
         return min(TESTIMONY_CAP, t_weight.get(cls, 0.0)) + \
-            (min(EVIDENCE_HEADROOM, read_str_eff) if read_cls == cls else 0.0)
+            (min(EVIDENCE_HEADROOM, read_str_eff) if read_cls == cls else 0.0) + \
+            (direct_str if direct_cls == cls else 0.0)
 
     classes = set(t_weight) | set(e_weight)
     if not classes:
@@ -627,7 +658,9 @@ def _revise_belief(state: dict, word: str, cycle: int,
     t_best = min(TESTIMONY_CAP, t_weight.get(best, 0.0))
     e_best = min(EVIDENCE_HEADROOM, e_weight.get(best, 0.0))
     understood = confidence >= UNDERSTOOD_CONF and (
-        (read_cls == best and read_str_eff >= UNDERSTOOD_EVIDENCE) or e_best >= UNDERSTOOD_EVIDENCE)
+        (read_cls == best and read_str_eff >= UNDERSTOOD_EVIDENCE)
+        or (direct_cls == best and direct_str >= UNDERSTOOD_EVIDENCE)
+        or e_best >= UNDERSTOOD_EVIDENCE)
 
     revisions = list(prev.get("revisions", []))
     if prev.get("genus") and prev["genus"] != best:

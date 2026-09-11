@@ -75,6 +75,9 @@ class JapaneseReaderTest(unittest.TestCase):
                       ("reread", "graduated", "shelved_no_progress"))
         self.assertTrue((self.runtime / reader.CURRICULUM_FILE).exists())
         self.assertTrue((self.runtime / reader.EVENTS_FILE).exists())
+        self.assertTrue((self.runtime / reader.PROPOSITIONS_FILE).exists())
+        self.assertIn("propositions", status)
+        self.assertEqual(status["propositions"]["read_books"], 1)
 
     def test_fetch_is_throttled_by_a_cooldown(self):
         reader.run_once(self.runtime)

@@ -146,6 +146,10 @@ class JapaneseEventTest(unittest.TestCase):
         self.assertEqual(event.verb, "とどく")
         self.assertNotIn("で", event.roles)
 
+    def test_nominal_and_adjective_predicates_are_not_fake_actions(self):
+        self.assertEqual(extract_story("猫は動物です。"), [])
+        self.assertEqual(extract_story("レモンは黄色い。"), [])
+
     def test_verb_normalisation_polite_and_plain(self):
         self.assertEqual(_dictionary_verb("行きました")[0], "行く")
         self.assertEqual(_dictionary_verb("食べました")[0], "食べる")

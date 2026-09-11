@@ -36,7 +36,9 @@ from dataclasses import dataclass, field
 #        った defaults to る; single-kanji topic は
 #   5 -> compound verbs (〜ておる, 〜ながら), copula ではなかった, ことができる,
 #        んだ -> ぶ/む/ぬ, 考える/思う in the table; adverbs out of the subject slot
-PARSER_VERSION = 9      # v9: morphology-driven structural parse when an analyser
+PARSER_VERSION = 10     # v10: copular/statative clauses are no longer fake actions;
+                        #      japanese_proposition_v1 represents them separately.
+                        # v9: morphology-driven structural parse when an analyser
                         #     is installed (segmentation / POS / case roles / verb
                         #     lemmas); pure-heuristic fallback per sentence.
                         #     Relative-clause subjects, te-form chains and
@@ -314,6 +316,11 @@ def _dictionary_verb(surface: str) -> tuple[str, float]:
         if stem and stem[-1] in a_to_u:
             return stem[:-1] + a_to_u[stem[-1]], 0.55
         return stem + "る", 0.5
+    # A nominal predicate is not an action verb (猫は動物です used to become
+    # 猫|動物です|).  Put this after real verb/auxiliary normalisation so
+    # とどきませんでした and 受けたのである remain actions.
+    if re.search(r"(?:ではありません|ではない|じゃない|である|でした|です|だった|だ)$", surface):
+        return "", 0.0
     if surface.endswith(("う", "く", "ぐ", "す", "つ", "ぬ", "ぶ", "む", "る")):
         return surface, 0.7                      # already dictionary-ish
     return surface, 0.2

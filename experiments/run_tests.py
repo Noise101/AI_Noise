@@ -27,6 +27,7 @@ QUICK_MODULES = [
     "test_dialogue_web_verification_v48",
     "test_coreference_v1",
     "test_japanese_event_v1",
+    "test_japanese_proposition_v1",
     "test_japanese_corpus_v1",
     "test_reading_curriculum_v1",
     "test_reading_comprehension_v1",

@@ -26,6 +26,7 @@ from web_cache import WEB_CACHE
 import japanese_benchmark_v1 as jb
 import japanese_corpus_v1 as corpus
 import japanese_event_v1 as jevent
+import japanese_proposition_v1 as jproposition
 import reading_curriculum_v1 as curriculum
 import reading_comprehension_v1 as comprehension
 import japanese_retell_v1 as retell
@@ -43,6 +44,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RUNTIME = ROOT / ".local"
 CURRICULUM_FILE = "reading-curriculum.json"
 EVENTS_FILE = "reading-events.json"
+PROPOSITIONS_FILE = "reading-propositions.json"
 COMPREHENSION_FILE = "reading-comprehension.json"
 RETELL_FILE = "reading-retelling.json"
 SEQUENCE_FILE = "reading-sequence.json"                 # general character model
@@ -75,6 +77,7 @@ VOCAB_FUEL_LEVELS = (2.0, 2.5, 3.0, 3.5, 4.0, 4.5)   # a wide concrete-noun span
 VOCAB_FUEL_BAND = 0.7
                             # fetching so the band can drain and the level rise
 AOZORA_WORKS_PER_AUTHOR = 10
+PROPOSITION_REPARSE_BATCH = 48  # bounded parser-upgrade backfill; ~5 cycles for current shelf
 
 
 def _read(path: Path) -> dict:
@@ -104,6 +107,15 @@ def _events_of(text: str) -> list[dict]:
         d["provenance"] = HEURISTIC_SELF
         out.append(d)
     return out
+
+
+def _propositions_of(text: str) -> list[dict]:
+    """Noise's structural parse of ordinary stative Japanese.
+
+    These observations complement action events; they never replace them and
+    never grant truth merely because a sentence asserted something.
+    """
+    return [dict(p.__dict__) for p in jproposition.extract_story(text)]
 
 
 def _heuristic_only(events: list[dict]) -> list[dict]:
@@ -336,6 +348,7 @@ def run_once(runtime: Path) -> dict:
     cycle = cur.get("cycle", 0) + 1
     cur["cycle"] = cycle
     events_store = _read_events()
+    proposition_store = _read(runtime / PROPOSITIONS_FILE)
 
     # a better parser deserves a fresh reading of the whole shelf: drop the event
     # cache, put books it had set aside back in rotation, and re-walk from the
@@ -351,6 +364,9 @@ def run_once(runtime: Path) -> dict:
     if cur.get("events_parser_version", 0) < PARSER_VERSION:
         events_store = {}
         cur["events_parser_version"] = PARSER_VERSION
+    if cur.get("proposition_parser_version", 0) < jproposition.VERSION:
+        proposition_store = {}
+        cur["proposition_parser_version"] = jproposition.VERSION
     for bid in curriculum.reevaluate_stale_parses(cur):
         events_store.pop(bid, None)
     curriculum.reset_level_for_new_parser(cur, cycle)
@@ -371,6 +387,7 @@ def run_once(runtime: Path) -> dict:
     _pruned = [bid for bid in events_store if bid not in _read_now]
     for bid in _pruned:
         events_store.pop(bid, None)
+        proposition_store.pop(bid, None)
     if _pruned or migration.get("migrated"):
         _write_events(events_store)
 
@@ -409,11 +426,13 @@ def run_once(runtime: Path) -> dict:
         model = comprehension.ComprehensionModel().fit(others) if len(others) >= 5 else None
         heuristic = _heuristic_only(events_store.get(book_id) or _events_of(book.get("text", "")))
         events_store.setdefault(book_id, heuristic)      # heuristic parse, always
+        proposition_store.setdefault(book_id, _propositions_of(book.get("text", "")))
 
         # ---- Noise's own reading: heuristic events ONLY drive comprehension,
         # graduation, level, schema, vocabulary, the model, the RNN and the
         # frozen benchmarks (ARCHITECTURE.md invariants 1, 10, 16) ----
         reading = curriculum.record_reading(cur, book_id, heuristic, cycle, model=model)
+        _read_now.add(book_id)
         reading["title"] = book["title"]
         reading["level"] = book["estimated_level"]
         retold = retell.retell(heuristic, max_sentences=10)
@@ -467,6 +486,16 @@ def run_once(runtime: Path) -> dict:
     # only an explicit `heuristic_self` stamp is Noise's own experience).
     real = set(events_store)
     heur_store = {bid: _heuristic_only(ev) for bid, ev in events_store.items()}
+    # Rebuild stative meaning incrementally.  A parser upgrade does not block a
+    # cycle by reparsing every long book at once; a bounded batch of the shortest
+    # missing read books is added on each pass until the legitimate corpus is covered.
+    missing_propositions = sorted(
+        (bid for bid in _read_now if bid not in proposition_store
+         and cur["shelf"].get(bid, {}).get("text")),
+        key=lambda bid: len(cur["shelf"][bid].get("text", "")))[:PROPOSITION_REPARSE_BATCH]
+    for bid in missing_propositions:
+        proposition_store[bid] = _propositions_of(
+            corpus._modernise(cur["shelf"][bid].get("text", "")))
     # Tatoeba readers are sentence bundles, not narratives -- they feed
     # vocabulary and the RNN but never the narrative comprehension / retelling
     # benchmarks (no protagonist, no order to recover).
@@ -480,7 +509,8 @@ def run_once(runtime: Path) -> dict:
     # are pruned from events_store on a parser bump and never re-selected, so
     # re-parse any short read book that is missing (its own heuristic parse of a
     # text it genuinely read is legitimate `heuristic_self` experience).
-    wm_stories = [{"url": cur["shelf"][bid]["url"], "events": ev}
+    wm_stories = [{"url": cur["shelf"][bid]["url"], "events": ev,
+                   "propositions": proposition_store.get(bid, [])}
                   for bid, ev in heur_store.items()
                   if bid in cur["shelf"] and len(ev) >= 3]
     for bid, b in cur["shelf"].items():
@@ -488,7 +518,8 @@ def run_once(runtime: Path) -> dict:
                 and b.get("text") and len(b["text"]) < 4000):
             evs = _heuristic_only(_events_of(corpus._modernise(b["text"])))
             if len(evs) >= 3:
-                wm_stories.append({"url": b["url"], "events": evs})
+                wm_stories.append({"url": b["url"], "events": evs,
+                                   "propositions": proposition_store.get(bid, [])})
     # renewable concrete-noun fuel: Tatoeba reader texts Noise parsed itself,
     # for word meaning only -- never a shelf book, never a benchmark story.
     from collections import Counter as _Counter
@@ -496,7 +527,8 @@ def run_once(runtime: Path) -> dict:
     for i, text in enumerate(cur.get("_vocab_fuel_texts", [])):
         evs = _heuristic_only(_events_of(corpus._modernise(text)))
         if len(evs) >= 3:
-            wm_stories.append({"url": f"vocab-fuel://{i}", "events": evs})
+            wm_stories.append({"url": f"vocab-fuel://{i}", "events": evs,
+                               "propositions": _propositions_of(corpus._modernise(text))})
             for e in evs:
                 for slot in ("subject", "obj"):
                     tok = (e.get(slot) or "").strip()
@@ -739,6 +771,7 @@ def run_once(runtime: Path) -> dict:
 
     _write(runtime / CURRICULUM_FILE, cur)
     _write_events(events_store)
+    _write(runtime / PROPOSITIONS_FILE, proposition_store)
     _write(runtime / COMPREHENSION_FILE, comp_report)
     _write(runtime / RETELL_FILE, retell_report)
     _write(runtime / SEQUENCE_FILE, seq_report)
@@ -755,6 +788,17 @@ def run_once(runtime: Path) -> dict:
                           "test_words", "measured", "mean_gain", "z",
                           "significant_now", "capability_confirmed",
                           "sample_explanations", "prediction_feedback_applied")},
+        "propositions": {
+            "version": jproposition.VERSION,
+            "books_parsed": len(proposition_store),
+            "read_books": len(_read_now),
+            "observations": sum(len(v) for v in proposition_store.values()),
+            "positive": sum(1 for values in proposition_store.values() for p in values
+                            if p.get("polarity") == "positive"),
+            "negative": sum(1 for values in proposition_store.values() for p in values
+                            if p.get("polarity") == "negative"),
+            "note": "普通の日本語の分類・性質・所有・場所。主張は観測であり真実扱いしない。",
+        },
         "semantic_representation": {k: (semantic_report or {}).get(k) for k in
                          ("status", "version", "parser_version", "word_count",
                           "context_count", "pairs_seen", "sources_trained_this_cycle",

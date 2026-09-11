@@ -348,6 +348,12 @@ def _japanese_reading_ja(reading_status: dict) -> list[str]:
         lines.append(f"補助読解の保存  : {ast_.get('total_readings')}件（{ast_.get('file')}、"
                      f"証拠0・学習非使用）")
     wm = reading_status.get("word_meaning", {}) or {}
+    props = reading_status.get("propositions", {}) or {}
+    if props:
+        lines.append(
+            f"普通文の意味観測: {props.get('observations', 0)}件／"
+            f"解析済み {props.get('books_parsed', 0)}/{props.get('read_books', 0)}冊"
+            f"（分類・性質・所有・場所。文章の主張をそのまま真実にはしない）")
     if wm.get("status") in ("measured", "insufficient_test_words"):
         cap = "確定" if wm.get("capability_confirmed") else (
             "有意" if wm.get("significant_now") else "未確定")
@@ -1602,7 +1608,7 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
             key: read_json(runtime / "reading-status.json").get(key) for key in
             ("cycle", "reading", "curriculum", "comprehension", "retelling", "sequence",
              "narrative_sequence", "narrative_sequence_training", "prediction",
-             "word_meaning", "semantic_representation", "cognition", "cognition_probe", "japanese_dialogue",
+             "word_meaning", "propositions", "semantic_representation", "cognition", "cognition_probe", "japanese_dialogue",
              "caregiver", "caregiver_questions", "llm_scaffold_totals",
              "aided_reading", "schema_migration", "self_vs_aided", "aided_store", "provenance", "sequence_retirement_log", "sequence_ever_trained_fingerprint", "sequence_boundary_fingerprint", "sequence_ever_trained_collections")},
         "human_conversation": noise_chat.summary(
@@ -1967,7 +1973,7 @@ def work(seed: str, runtime: Path, max_rounds: int, interval: float,
                                               ("cycle", "books_fetched", "reading", "level_advance",
                                                "curriculum", "comprehension", "retelling", "sequence",
                                                "narrative_sequence", "narrative_sequence_training", "prediction",
-                                               "word_meaning", "semantic_representation", "cognition", "cognition_probe", "japanese_dialogue",
+                                               "word_meaning", "propositions", "semantic_representation", "cognition", "cognition_probe", "japanese_dialogue",
                                                "caregiver", "caregiver_questions", "llm_scaffold_totals",
                                                "aided_reading", "schema_migration", "self_vs_aided", "aided_store", "provenance", "sequence_retirement_log", "sequence_ever_trained_fingerprint", "sequence_boundary_fingerprint", "sequence_ever_trained_collections")}
             except Exception as reading_error:  # isolate the parallel loop

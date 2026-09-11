@@ -32,6 +32,11 @@ class _FakeLLM:
 
 
 class CoarseOntologyTest(unittest.TestCase):
+    def test_basic_single_kanji_nouns_are_words(self):
+        for word in ("犬", "猫", "本", "山"):
+            self.assertTrue(wm._is_wordlike(word), word)
+        self.assertFalse(wm._is_wordlike("は"))
+
     def test_fine_genus_folds_onto_the_closed_set(self):
         self.assertEqual(wm._coarse("哺乳動物"), "生き物")
         self.assertEqual(wm._coarse("道具"), "道具")
@@ -200,6 +205,26 @@ class ExplainTest(unittest.TestCase):
 
 
 class LearnAndEvaluateTest(unittest.TestCase):
+    def test_observation_counts_do_not_inflate_when_a_cycle_replays_the_corpus(self):
+        state = wm._blank()
+        stories = [{"url": "book:1", "events": STORY}]
+        wm._observe(state, stories)
+        first = dict(state["entities"])
+        wm._observe(state, stories)
+        self.assertEqual(state["entities"], first)
+
+    def test_independent_propositions_ground_a_basic_class(self):
+        state = wm._blank()
+        proposition = {"subject": "レモン", "relation": "is", "value": "果物",
+                       "provenance": "proposition_self"}
+        stories = [{"url": "book:1", "events": [], "propositions": [proposition]},
+                   {"url": "book:2", "events": [], "propositions": [proposition]}]
+        wm._observe(state, stories)
+        self.assertEqual(state["proposition_classes"]["レモン"]["食べ物"], 2)
+        belief = wm._revise_belief(state, "レモン", 1)
+        self.assertEqual(belief["genus"], "食べ物")
+        self.assertIn("reading_proposition", belief["sources"])
+
     def test_stable_shape_offline_and_round_trips(self):
         llm = _FakeLLM(up=False)
         r1 = wm.learn_and_evaluate([{"events": STORY}] * 12, None, 1,
