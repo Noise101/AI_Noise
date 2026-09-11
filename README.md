@@ -54,6 +54,25 @@ python3 -m unittest discover -v
 
 通常開発では`python3 experiments/run_tests.py --profile quick --quiet`を使い、旧版を含む全評価は節目だけ実行します。ウェブ応答キャッシュ、要約出力、任意のローカルOllama補助を含む消費量方針は[RESOURCE_POLICY.md](RESOURCE_POLICY.md)を参照してください。
 
+### Noiseと話すローカルGUI
+
+自動学習とは独立したローカル画面を起動できます。外部サービスへ会話を送信せず、既存の
+`.local/human-conversation.json`へ会話経験を保存します。
+
+```bash
+python3 experiments/noise_chat_ui.py start
+```
+
+ブラウザで <http://127.0.0.1:8765/> を開きます。終了するときは次を実行します。
+
+```bash
+python3 experiments/noise_chat_ui.py stop
+```
+
+現在扱えるのは短い挨拶、説明、好き嫌い、記憶の確認、訂正です。人の発言は
+`owner_testimony`として記憶され、検証なしに世界知識へ昇格しません。GUIが停止しても
+自動学習ワーカーは停止しません。
+
 長い評価は、完了seed数を逐次表示します。
 
 ## 実験の発展

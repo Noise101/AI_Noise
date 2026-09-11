@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Noiseとの対話</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="chat-card" aria-label="Noiseとの会話">
+      <header class="chat-header">
+        <div class="identity">
+          <div class="mark" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div>
+            <p class="eyebrow">LOCAL COGNITIVE SYSTEM</p>
+            <h1>Noise</h1>
+          </div>
+        </div>
+        <div class="live"><i id="live-dot"></i><span id="live-label">接続中</span></div>
+      </header>
+
+      <div id="transcript" class="transcript" aria-live="polite">
+        <article class="message noise intro">
+          <div class="speaker">NOISE</div>
+          <div class="bubble">こんにちは。まだ短い会話しかできませんが、あなたとの会話を経験として覚えます。</div>
+        </article>
+      </div>
+
+      <div class="suggestions" aria-label="会話例">
+        <button type="button" data-prompt="こんにちは">こんにちは</button>
+        <button type="button" data-prompt="レモンは果物だよ">ことばを教える</button>
+        <button type="button" data-prompt="レモンって何？">覚えているか聞く</button>
+        <button type="button" data-prompt="私の好きなもの覚えてる？">記憶をたずねる</button>
+      </div>
+
+      <form id="chat-form" class="composer">
+        <label for="message" class="sr-only">Noiseへのメッセージ</label>
+        <textarea id="message" maxlength="500" rows="1" placeholder="短い日本語で話しかける…" required></textarea>
+        <button id="send" type="submit" aria-label="送信">
+          <span>送る</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 14-7-4 14-3-6-7-1Z"/><path d="m12 13 7-8"/></svg>
+        </button>
+      </form>
+      <p class="footnote">発言は会話の記憶です。検証されるまで世界の事実にはなりません。</p>
+    </section>
+
+    <aside class="side-panel">
+      <div class="side-head">
+        <p class="eyebrow">OBSERVATION</p>
+        <h2>いまのNoise</h2>
+        <p>できることと、まだできないことを混ぜずに表示します。</p>
+      </div>
+
+      <section class="ability-card">
+        <span class="level">会話段階 01</span>
+        <h3>短い会話と記憶</h3>
+        <p>挨拶、簡単な説明、好き嫌い、訂正を扱えます。自由会話にはまだ到達していません。</p>
+      </section>
+
+      <section class="metrics" aria-label="会話の記憶">
+        <div><strong id="turns">0</strong><span>会話</span></div>
+        <div><strong id="memories">0</strong><span>覚えた話題</span></div>
+        <div><strong id="corrections">0</strong><span>訂正の記憶</span></div>
+        <div><strong id="unknown">0</strong><span>知りたい話題</span></div>
+      </section>
+
+      <section class="worker-card">
+        <div class="worker-title"><span>自動学習</span><b id="worker-state">確認中</b></div>
+        <dl>
+          <div><dt>現在</dt><dd id="worker-phase">—</dd></div>
+          <div><dt>教材</dt><dd id="worker-seed">—</dd></div>
+        </dl>
+      </section>
+
+      <section class="unknown-card">
+        <h3>Noiseが知りたいこと</h3>
+        <div id="topic-list" class="topic-list"><span>まだありません</span></div>
+      </section>
+    </aside>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>
