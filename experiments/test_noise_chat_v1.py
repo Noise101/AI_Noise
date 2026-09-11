@@ -107,6 +107,13 @@ class NoiseChatTests(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertIn("レモン", second)
 
+    def test_the_common_wa_spelling_of_greetings_is_recognised(self):
+        # こんにちわ/こんばんわ (わ for は) is an extremely common casual
+        # spelling in real Japanese text -- a real user hit this failure live
+        for greeting in ("こんばんわ", "こんにちわ"):
+            _, state = chat.converse(greeting, None)
+            self.assertEqual(state["last_turn"]["interpretation"]["intent"], "greeting")
+
     def test_elliptical_question_separates_modifier_and_head(self):
         reply, state = chat.converse("美味しい食べ物は？", None)
         read = state["last_turn"]["interpretation"]
