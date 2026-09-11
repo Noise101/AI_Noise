@@ -14,7 +14,36 @@ os.environ.setdefault("AI_NOISE_SKIP_LOCAL_LLM", "1")
 import noise_chat_v1 as chat
 
 
-class NoiseChatTests(unittest.TestCase):
+class _MorphologyIsolatedTestCase(unittest.TestCase):
+    """Base for any test whose expectations depend on a real morphological
+    analyser being available.  `AI_NOISE_NO_MORPHOLOGY` is a process-wide env
+    var another test module in the same full-suite run may set
+    (test_japanese_reader_v1 forces it off for its own determinism) --
+    checking availability once at class/import time is not enough, since that
+    pollution can land between import and execution.  setUp forces a real
+    backend for these tests and undoes the pollution afterwards."""
+
+    def setUp(self):
+        import morphology_teacher as mt
+        self._prev_env = os.environ.pop("AI_NOISE_NO_MORPHOLOGY", None)
+        mt.get_teacher(refresh=True)
+        if mt.get_teacher().name == "none":
+            self._restore_env()
+            self.skipTest("no morphological analyser vendored/installed")
+
+    def tearDown(self):
+        self._restore_env()
+
+    def _restore_env(self):
+        import morphology_teacher as mt
+        if self._prev_env is None:
+            os.environ.pop("AI_NOISE_NO_MORPHOLOGY", None)
+        else:
+            os.environ["AI_NOISE_NO_MORPHOLOGY"] = self._prev_env
+        mt.get_teacher(refresh=True)
+
+
+class NoiseChatTests(_MorphologyIsolatedTestCase):
     def test_claim_is_remembered_as_testimony_not_world_fact(self):
         reply, state = chat.converse("レモンは果物だよ", None)
         self.assertIn("まだ私自身では確かめていません", reply)
@@ -245,38 +274,11 @@ class _FakePhraser:
         return self._reply
 
 
-class StructuralSmallTalkTests(unittest.TestCase):
+class StructuralSmallTalkTests(_MorphologyIsolatedTestCase):
     """Small-talk intents keyed by morphological LEMMA + structural shape, not
     a literal surface string -- matching one exact spelling/conjugation/
     politeness level is exactly why "こんばんわ" and "何が出来るの" kept
-    failing live; every new ending was its own future patch.
-
-    `AI_NOISE_NO_MORPHOLOGY` is a process-wide env var another test module in
-    the same full-suite run may set (`test_japanese_reader_v1` forces it off
-    for its own determinism) -- setUp forces a real backend for these tests
-    and undoes the pollution afterwards (same pattern as
-    test_japanese_event_v1.MorphologyDrivenParseTest)."""
-
-    def setUp(self):
-        import os
-        import morphology_teacher as mt
-        self._prev_env = os.environ.pop("AI_NOISE_NO_MORPHOLOGY", None)
-        mt.get_teacher(refresh=True)
-        if mt.get_teacher().name == "none":
-            self._restore_env()
-            self.skipTest("no morphological analyser vendored/installed")
-
-    def tearDown(self):
-        self._restore_env()
-
-    def _restore_env(self):
-        import os
-        import morphology_teacher as mt
-        if self._prev_env is None:
-            os.environ.pop("AI_NOISE_NO_MORPHOLOGY", None)
-        else:
-            os.environ["AI_NOISE_NO_MORPHOLOGY"] = self._prev_env
-        mt.get_teacher(refresh=True)
+    failing live; every new ending was its own future patch."""
 
     def test_greeting_survives_politeness_and_the_common_wa_misspelling(self):
         for text in ("こんばんわ", "こんにちわ", "おはようございます"):
@@ -422,6 +424,68 @@ class AssociativeRecallMemoryTests(unittest.TestCase):
         state = self._boost(state)
         _, state = chat.converse("献とは何ですか", state)
         self.assertNotIn("献", state.get("claims", {}))   # still nothing told about 献
+
+
+class LiveFailureRegressionTests(_MorphologyIsolatedTestCase):
+    """Real bugs a live conversation surfaced in one sitting -- each is its
+    own regression test so none of them comes back silently."""
+
+    def test_greeting_echoes_the_users_own_time_of_day_not_the_wall_clock(self):
+        # replying こんにちは to a こんばんわ greeting because the SERVER's
+        # clock disagrees with the user reads as ignoring what they said
+        reply, _ = chat.converse("こんばんわ", None)
+        self.assertIn("こんばんは", reply)
+        reply, _ = chat.converse("おはよう", None)
+        self.assertIn("おはよう", reply)
+
+    def test_a_single_kanji_topic_is_not_shadowed_by_an_unrelated_noun(self):
+        # "猫の話のほうがいいな" must extract 猫, not the direction noun 方/ほう
+        self.assertEqual(chat._topic("猫の話のほうがいいな"), "猫")
+
+    def test_a_te_form_verb_is_not_mistaken_for_the_tte_topic_particle(self):
+        # "知って" contains the two characters って in the middle of 知って(いる)
+        # -- that is not the quotative って topic marker, and reading it as
+        # one produces a garbage topic like "何を知"
+        self.assertEqual(chat._topic("何を知っている？"), "")
+
+    def test_recall_knowledge_answers_about_the_asked_subject_only(self):
+        _, state = chat.converse("猫は動物です", None)
+        _, state = chat.converse("犬は生き物です", state)
+        reply, state = chat.converse("猫について何を知っている？", state)
+        self.assertIn("猫", reply)
+        self.assertNotIn("犬", reply)
+
+    def test_recall_knowledge_with_no_claims_about_the_topic_says_so(self):
+        _, state = chat.converse("犬は生き物です", None)
+        reply, state = chat.converse("猫について何を知っている？", state)
+        self.assertIn("まだありません", reply)
+
+    def test_a_bare_pronoun_is_never_stored_as_a_claim_subject(self):
+        for text in ("それは覚えることではない。", "これは違う。", "あれは変だ。"):
+            _, state = chat.converse(text, None)
+            for pronoun in ("それ", "これ", "あれ"):
+                self.assertNotIn(pronoun, state.get("claims", {}))
+
+    def test_first_person_pronoun_is_never_stored_as_a_claim_subject(self):
+        # whose "私" it is (the user's, or Noise's) is not resolvable from the
+        # string alone -- this is conversational deixis, not a stable subject
+        _, state = chat.converse("私は、犬より、猫の話の方が良いです", None)
+        self.assertNotIn("私", state.get("claims", {}))
+
+    def test_recall_preference_recognises_the_compound_noun_suki_kirai(self):
+        # 好き嫌い ("likes and dislikes") is ONE compound-noun lemma, not the
+        # separate 好き/嫌い it decomposes to elsewhere -- checking only the
+        # bare words missed this real phrasing
+        _, state = chat.converse("私の好き嫌い覚えてる？", None)
+        self.assertEqual(state["last_turn"]["interpretation"]["intent"], "recall_preference")
+
+    def test_noise_preference_question_is_not_shadowed_by_identity(self):
+        # shares あなた+何 with a plain identity question ("Noiseとは何ですか")
+        # -- 好き/嫌い present means this asks about a PREFERENCE
+        _, state = chat.converse("あなたの好きなものは何？", None)
+        self.assertEqual(state["last_turn"]["interpretation"]["intent"], "ask_noise_preference")
+        _, state = chat.converse("Noiseとは何ですか", None)
+        self.assertEqual(state["last_turn"]["interpretation"]["intent"], "ask_identity")
 
 
 if __name__ == "__main__":

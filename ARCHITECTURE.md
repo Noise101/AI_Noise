@@ -371,7 +371,22 @@ lemma is できる regardless of how it was conjugated, a leading pronoun plus a
 sentence. Each keeps its original literal-regex behaviour as the fallback
 when no analyser is installed (`AI_NOISE_NO_MORPHOLOGY=1`) -- narrower
 coverage without the analyser is expected and acceptable; a wrong or
-fabricated classification is not.
+fabricated classification is not. Every remaining intent in `_interpret`
+(correction, parse feedback, recall of knowledge/preference, curiosity,
+learning/activity status, Noise's-own-preference, confirm-understanding,
+preference, "Xとは何", and the generic claim topic/predicate split) follows
+the same lemma-or-structure-first design, each with its literal regex kept
+only as the no-analyser fallback -- there is no remaining classifier in this
+module anchored to one exact written form as its primary path.
+
+A regex anchored to a written form can also fail the OTHER way: matching a
+substring that is not the token it looks like. `_topic`'s original explicit-
+marker regex matched the two characters "って" wherever they occurred,
+including embedded inside an unrelated verb's て-form ("何を知っている" ->
+"知って" contains って in the middle of one word, not the quotative って
+particle) -- silently producing a garbage topic ("何を知"). The fix finds は/
+って/とは as their OWN 助詞 token via the analyser, not a character search, so
+a token boundary is required, not merely a matching substring.
 
 **Multi-topic memory (`topic_stack`).** A single `current_topic` string cannot
 represent "go back to what we were discussing before" -- every topic switch
@@ -381,6 +396,27 @@ still on top without repeating an already-surfaced fact, and `go_back_topic`
 ("さっきの話に戻って", "犬の話に戻って") resumes an earlier one from the stack,
 generic or by name, and says plainly when the named topic was never discussed
 rather than starting one.
+
+**Recall answers the asked subject, not every subject Noise holds a claim
+about.** "猫について何を知っている？" must answer about 猫, not concatenate
+every unrelated claim Noise happens to hold (a real failure: a question about
+one topic produced a run-on sentence mixing claims about three others). When
+the question names a subject, `_recall_knowledge` answers about that subject
+alone (or says plainly it has heard nothing about it); only a bare "何を知っ
+ている？" with no named subject lists recent memories in general.
+
+**A bare pronoun (それ/これ/あれ/私/あなた) is never stored as a claim's
+subject key.** These have no stable referent in a stored claim -- whose "私"
+it is (the user's, or Noise's) is not resolvable from the string alone, and
+"それは覚えることではない" (the user objecting to what Noise just stored) must
+not itself become a claim keyed literally "それ". `japanese_proposition_v1`
+rightly allows 私 as a subject for general narrative text, where it is a
+stable first-person narrator; in direct conversation it is deixis, and
+`_claim_from_text` rejects it before either extraction path can store it.
+The same deixis applies to greeting register: `_greeting` echoes the
+time-of-day the USER greeted with, not the server's own wall clock -- replying
+"こんにちは" to their "こんばんは" because the two disagree reads as not having
+heard them.
 
 **Local model as a presentation layer, not a content source
 (`PhrasingModel` / `_phrase_naturally`).** Once a reply's content is fully

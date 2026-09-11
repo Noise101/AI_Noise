@@ -29,7 +29,19 @@ import japanese_proposition_v1 as propositions
 import morphology_teacher as morphology
 
 
-VERSION = 5     # v5: conversation_embedding_v1 gives a bounded, self-trained
+VERSION = 6     # v6: every remaining _interpret intent (correction, parse
+                # feedback, recall, curiosity, learning/activity status,
+                # Noise's-own-preference, confirm-understanding, preference,
+                # "Xとは何", the generic claim split) converted from a literal
+                # surface regex to lemma/structure-first matching, regex kept
+                # only as the no-analyser fallback; _topic finds は/って/とは
+                # as an actual 助詞 token, not a character search (which
+                # matched って embedded inside an unrelated word's て-form);
+                # recall_knowledge answers the asked subject, not every
+                # subject Noise holds a claim about; bare pronouns (それ/こ
+                # れ/あれ/私/あなた) rejected as a claim's subject key; greeting
+                # echoes the user's own time-of-day, not the wall clock
+                # v5: conversation_embedding_v1 gives a bounded, self-trained
                 # associative recall memory ("we talked about X before, is
                 # this related?") over topics/claims already held -- never a
                 # source of content, see _recall_prompt
@@ -401,21 +413,280 @@ def _is_identity_question(text: str) -> bool:
     return bool(lemmas & (_IDENTITY_NOUNS | {"誰", "だれ", "何", "なに"}))
 
 
+# --- the rest of _interpret's intents, same lemma/structure approach -------
+_CONTENT_POS = ("名詞", "動詞", "形容詞", "感動詞", "代名詞")
+_CORRECTION_LEMMAS = {"違う", "ちがう", "間違う", "間違い", "まちがい"}
+_PARSE_WORD_LEMMAS = {"切り方", "区切り", "分け方", "読み方", "解析"}
+_WRONG_LEMMAS = {"おかしい", "変", "違う", "間違い", "間違う"}
+_FIRST_PERSON_LEMMAS = {"私", "わたし", "俺", "僕"}
+_LIKE_DISLIKE_LEMMAS = {"好き", "嫌い", "好き嫌い"}
+_KNOW_LEMMAS = {"知る", "覚える"}
+_STATIVE_AUX_LEMMAS = {"いる", "ある"}          # 知っている/知ってる, 覚えてる
+_WANT_AUX = "たい"
+_CURIOSITY_OBJECT_LEMMAS = {"こと", "もの", "言葉"}
+_LEARN_LEMMAS = {"学ぶ", "学習"}
+_DO_LEMMA = "する"
+_NOW_HERE_LEMMAS = {"今", "ここ"}
+_EXIST_LEMMA = "ある"
+_UNDERSTAND_LEMMAS = {"分かる", "わかる", "理解", "覚える"}
+
+
+def _all_lemmas(morphemes: list) -> set[str]:
+    return _lemmas_of(morphemes, _CONTENT_POS)
+
+
+def _morphs(text: str):
+    a = morphology.analyse(text.rstrip("。.!！？? \t\n"))
+    return a.morphemes if a and a.morphemes else None
+
+
+def _correction_match(text: str) -> "tuple[str, str] | None":
+    """(reason, rest) if the utterance opens with a correction marker --
+    "違う/ちがう/間違い/まちがい/そうじゃない" in any conjugation or politeness
+    level -- or None.  `rest` is what follows the marker (and any of its own
+    trailing auxiliaries/punctuation), the actual corrected content."""
+    ms = _morphs(text)
+    if not ms:
+        m = _CORRECTION.match(text)
+        return (m.group(1), m.group(2)) if m else None
+    first = ms[0]
+    first_lemma = first.base or first.surface
+    is_marker = first.pos in ("動詞", "名詞", "形容詞") and first_lemma in _CORRECTION_LEMMAS
+    # そうじゃない: 副詞[そう] + 助詞[じゃ] + 助動詞[ない] has no lemma in the set
+    # above at all -- a fixed idiom, checked by its own token shape
+    is_souja_nai = (len(ms) >= 3 and ms[0].surface == "そう" and ms[1].surface == "じゃ"
+                    and (ms[2].base or ms[2].surface) == "ない")
+    if not (is_marker or is_souja_nai):
+        return None
+    marker_end = 3 if is_souja_nai else 1
+    reason = "そうじゃない" if is_souja_nai else first_lemma   # canonical, not raw
+                                                             # conjugated surface
+    end = marker_end
+    # a trailing ます/です/読点 etc. is the marker's own conjugation/pause, not
+    # part of the corrected content that follows
+    while end < len(ms) and ms[end].pos in ("助動詞", "助詞", "記号"):
+        end += 1
+    rest = "".join(m.surface for m in ms[end:]).strip()
+    return (reason, rest)
+
+
+_PARSE_WORD_RUN = re.compile("|".join(_PARSE_WORD_LEMMAS))
+
+
+def _is_parse_feedback(text: str) -> bool:
+    # 切り方/区切り/分け方/読み方/解析 are compound nouns the analyser splits
+    # (切り方 -> 切る + 方) with no lemma equal to the whole compound, and they
+    # carry no real conjugation of their own worth generalising -- a surface
+    # substring check is exactly as robust as this half needs to be.  違う/
+    # おかしい/変/間違い DO conjugate (違います, おかしかった, 間違ってる), so
+    # that half is still checked by lemma.
+    if not _PARSE_WORD_RUN.search(text):
+        return False
+    ms = _morphs(text)
+    if not ms:
+        return bool(_PARSE_FEEDBACK.search(text))
+    return bool(_all_lemmas(ms) & _WRONG_LEMMAS)
+
+
+def _is_recall_preference_question(text: str) -> bool:
+    ms = _morphs(text)
+    if not ms:
+        return bool(_RECALL_PREF.search(text))
+    lemmas = _all_lemmas(ms)
+    return bool(lemmas & _FIRST_PERSON_LEMMAS) and bool(lemmas & _LIKE_DISLIKE_LEMMAS) \
+        and bool(lemmas & (_KNOW_LEMMAS | {"何", "なに"}))
+
+
+def _wants_to_know(ms: list) -> bool:
+    """助動詞 たい attached anywhere -- 知りたい/覚えたい, any conjugation."""
+    return any((m.base or m.surface) == _WANT_AUX for m in ms if m.pos == "助動詞")
+
+
+def _is_recall_knowledge_question(text: str) -> bool:
+    """「知っている/覚えている/覚えたこと」-- a PRESENT-STATE recall, distinct
+    from _is_curiosity's desire form (たい) on the very same verb lemmas."""
+    ms = _morphs(text)
+    if not ms:
+        return bool(_RECALL.search(text))
+    verb_lemmas = _lemmas_of(ms, ("動詞",))
+    if not (verb_lemmas & _KNOW_LEMMAS) or _wants_to_know(ms):
+        return False
+    aux_lemmas = _lemmas_of(ms, ("動詞",)) - _KNOW_LEMMAS
+    has_stative = bool(aux_lemmas & _STATIVE_AUX_LEMMAS)
+    has_past = any((m.base or m.surface) == "た" for m in ms if m.pos == "助動詞")
+    return has_stative or has_past
+
+
+def _is_curiosity_question(text: str) -> bool:
+    ms = _morphs(text)
+    if not ms:
+        return bool(_CURIOSITY.search(text))
+    if _wants_to_know(ms) and (_lemmas_of(ms, ("動詞",)) & _KNOW_LEMMAS):
+        return True
+    lemmas = _all_lemmas(ms)
+    return _wants_to_know(ms) and bool(lemmas & _CURIOSITY_OBJECT_LEMMAS)
+
+
+def _is_learning_status_question(text: str) -> bool:
+    ms = _morphs(text)
+    if not ms:
+        return bool(_LEARNING_STATUS.search(text))
+    lemmas = _all_lemmas(ms)
+    return bool(lemmas & _LEARN_LEMMAS) and _is_question_form(text)
+
+
+def _is_activity_status_question(text: str) -> bool:
+    ms = _morphs(text)
+    if not ms:
+        return bool(_ACTIVITY_STATUS.search(text))
+    lemmas = _all_lemmas(ms)
+    if _DO_LEMMA not in _lemmas_of(ms, ("動詞",)):
+        return False
+    return bool(lemmas & _NOW_HERE_LEMMAS) and _is_question_form(text)
+
+
+def _ask_noise_preference_match(text: str) -> bool:
+    ms = _morphs(text)
+    if not ms:
+        return bool(_ASK_NOISE_PREFERENCE.match(text))
+    lemmas = _all_lemmas(ms)
+    if not (lemmas & _LIKE_DISLIKE_LEMMAS) or not _is_question_form(text):
+        return False
+    # "Noiseの/あなたの好きな食べ物は何/ある？" -- either an explicit と/どんな
+    # question word, or a leading Noise/あなた possessive makes it about
+    # Noise's own preference rather than a bare "何が好き？" (ask_meaning-ish,
+    # left to the generic paths)
+    leads_with_noise_or_you = bool(ms) and (ms[0].base or ms[0].surface).lower() \
+        in _IDENTITY_PRONOUNS
+    return leads_with_noise_or_you and bool(lemmas & ({"何", "なに"} | {_EXIST_LEMMA}))
+
+
+def _confirm_understanding_match(text: str) -> str | None:
+    """The topic, if this asks "did you already understand X" -- any
+    conjugation/politeness of 分かる/わかる/理解する/覚える, as a question."""
+    ms = _morphs(text)
+    if not ms:
+        m = _CONFIRM.match(text)
+        return _safe(m.group(1), 24) if m else None
+    lemmas = _all_lemmas(ms)
+    if not (lemmas & _UNDERSTAND_LEMMAS) or not _is_question_form(text):
+        return None
+    topic = _topic(text)
+    return topic or None
+
+
+def _preference_match(text: str) -> "tuple[str, str] | None":
+    """(item, "好き"/"嫌い") for the user's OWN preference statement -- the
+    が-marked NP immediately before a 好き/嫌い predicate, not a question."""
+    ms = _morphs(text)
+    if not ms:
+        m = _PREFERENCE.match(text)
+        return (_safe(m.group(1), 24), m.group(2)) if m else None
+    if _is_question_form(text):
+        return None
+    value = next((("好き" if (m.base or m.surface) == "好き" else "嫌い")
+                  for m in ms if m.pos == "名詞" and (m.base or m.surface) in _LIKE_DISLIKE_LEMMAS),
+                 None)
+    if not value:
+        return None
+    item_run = ""
+    for m in ms:
+        if m.pos == "助詞" and m.surface == "が" and item_run:
+            candidate = _safe(item_run, 24)
+            if candidate and candidate not in _FIRST_PERSON_LEMMAS:
+                return (candidate, value)
+            item_run = ""
+        elif m.pos in ("名詞", "代名詞"):
+            item_run += m.surface
+        else:
+            item_run = ""
+    return None
+
+
+def _what_meaning_match(text: str) -> str | None:
+    """The topic, if this asks a WORD's meaning ("Xとは/って/は何ですか") --
+    identity questions about Noise itself are already claimed earlier in
+    _interpret, so a pronoun subject never reaches here."""
+    ms = _morphs(text)
+    if not ms:
+        m = _WHAT.match(text)
+        return _safe(m.group(1), 24) if m else None
+    # 何/なに tag as pos=名詞, pos_detail=代名詞 in this analyser -- pos alone
+    # (as used for the identity check above) is what actually catches them
+    lemmas = _lemmas_of(ms, ("名詞", "代名詞"))
+    if not ({"何", "なに"} & lemmas) or not _is_question_form(text):
+        return None
+    topic = _topic(text)
+    return topic or None
+
+
+def _claim_topic_predicate_match(text: str) -> "tuple[str, str] | None":
+    """(subject, predicate) for a generic "Xは/とは Y" declarative -- the
+    structural fallback below `japanese_proposition_v1.extract_proposition`
+    (which only accepts a narrow, well-formed copula/existence grammar) for
+    looser predicates it does not attempt.  Finds the topic-marking は
+    (skipping the と of とは) via morphology instead of a regex character
+    count, so a name/word containing what looks like a particle mid-string
+    is not mistaken for the boundary."""
+    ms = _morphs(text)
+    if not ms:
+        m = _CLAIM.match(text)
+        return (_safe(m.group(1), 24), _safe(m.group(2))) if m else None
+    topic_i = next((i for i, m in enumerate(ms)
+                    if m.pos == "助詞" and m.surface == "は"), None)
+    if topic_i is None or topic_i == 0:
+        return None
+    subject_end = topic_i - 1 if ms[topic_i - 1].surface == "と" else topic_i
+    subject = _safe("".join(m.surface for m in ms[:subject_end]), 24)
+    pred_ms = ms[topic_i + 1:]
+    # a trailing copula (だ/です) and any sentence-final particle after it
+    # (だよ/だね) are the sentence's own ending, not part of what was told --
+    # matches the old regex's non-captured (?:です|だよ|だ)? suffix
+    pred_end = len(pred_ms)
+    while pred_end > 0 and pred_ms[pred_end - 1].pos == "助詞":
+        pred_end -= 1
+    if pred_end > 0 and pred_ms[pred_end - 1].pos == "助動詞" \
+            and (pred_ms[pred_end - 1].base or pred_ms[pred_end - 1].surface) in ("だ", "です"):
+        pred_end -= 1
+    predicate = _safe("".join(m.surface for m in pred_ms[:pred_end])) or \
+        _safe("".join(m.surface for m in pred_ms))
+    return (subject, predicate) if subject and predicate else None
+
+
 def _topic(text: str) -> str:
     quoted = _QUOTED.search(text)
     if quoted:
         return _safe(quoted.group(1), 24)
-    explicit = _EXPLICIT_TOPIC.match(text)
-    if explicit:
-        candidate = _safe(explicit.group(1), 24)
-        if candidate not in _TOPIC_STOP:
-            return candidate
     analysis = morphology.analyse(text)
-    if not analysis:
+    if not analysis or not analysis.morphemes:
+        explicit = _EXPLICIT_TOPIC.match(text)
+        if explicit:
+            candidate = _safe(explicit.group(1), 24)
+            if candidate not in _TOPIC_STOP:
+                return candidate
         return ""
-    for m in analysis.morphemes:
+    ms = analysis.morphemes
+    # a REAL は/って topic marker is its own 助詞 token -- a string regex
+    # for "って" matches its two characters wherever they occur, including
+    # embedded inside an unrelated word's て-form (知って いる has "って" in
+    # the middle of 知って, not as the って topic particle)
+    marker_i = next((i for i, m in enumerate(ms) if m.pos == "助詞"
+                     and (m.surface in ("は", "って")
+                          or (m.surface == "と" and i + 1 < len(ms)
+                              and ms[i + 1].surface == "は"))), None)
+    if marker_i is not None and marker_i > 0:
+        candidate = _safe("".join(m.surface for m in ms[:marker_i]), 24)
+        if candidate and candidate not in _TOPIC_STOP:
+            return candidate
+    for m in ms:
         candidate = _safe(m.base or m.surface, 16)
-        if m.pos in ("名詞", "代名詞") and candidate not in _TOPIC_STOP and len(candidate) >= 2:
+        if not (m.pos in ("名詞", "代名詞") and candidate not in _TOPIC_STOP):
+            continue
+        # a single-character word is a real topic only if it is kanji/
+        # katakana (猫, 犬, 山, 川) -- a lone hiragana character is never a
+        # standalone noun (avoids picking up a stray okurigana/particle
+        # fragment the analyser mis-split)
+        if len(candidate) >= 2 or re.match(r"^[一-鿿゠-ヿ]$", candidate):
             return candidate
     return ""
 
@@ -443,21 +714,28 @@ def _elliptical_focus(text: str) -> dict | None:
 
 def _claim_from_text(text: str, state: dict, allow_context: bool = True) -> dict | None:
     prop = propositions.extract_proposition(text)
-    if prop:
+    # それ/これ/あれ/私/あなた have no stable referent as a STORED claim key --
+    # "それは覚えることではない" must not become a literal claim keyed "それ",
+    # and whose "私" it even is (the user's, or Noise's) is not resolvable
+    # from the string alone.  japanese_proposition_v1 rightly allows 私 as a
+    # subject for general narrative text; here it is conversational deixis.
+    if prop and prop.subject not in _TOPIC_STOP:
         verbal = {"is": prop.value, "is-not": f"{prop.value}ではない",
                   "has": f"{prop.value}を持つ", "has-not": f"{prop.value}を持たない",
                   "at": f"{prop.value}にいる", "not-at": f"{prop.value}にいない"}
         return {"subject": prop.subject, "predicate": verbal[prop.relation],
                 "parser": "japanese_proposition_v1", "relation": prop.relation,
                 "value": prop.value}
-    if not _is_question_form(text) and not _REMARK_TAIL.search(text):
-        match = _CLAIM.match(text)
-        if match:
-            subject, predicate = _safe(match.group(1), 24), _safe(match.group(2))
+    prop_accepted = bool(prop and prop.subject not in _TOPIC_STOP)
+    if not prop_accepted and not _is_question_form(text) and not _REMARK_TAIL.search(text):
+        found = _claim_topic_predicate_match(text)
+        if found:
+            subject, predicate = found
             # a predicate that is itself a question ("何ですか") is the user's
             # own unanswered question echoed back by a loose regex match, not
             # an answer told to Noise -- never store it as testimony
-            if subject and predicate and not _is_question_form(predicate):
+            if (subject and predicate and subject not in _TOPIC_STOP
+                    and not _is_question_form(predicate)):
                 return {"subject": subject, "predicate": predicate,
                         "parser": "topic_predicate"}
     awaiting, current = state.get("awaiting") or {}, state.get("current_topic", "")
@@ -474,16 +752,22 @@ def _claim_from_text(text: str, state: dict, allow_context: bool = True) -> dict
 def _interpret(text: str, state: dict) -> dict:
     if not text:
         return {"intent": "empty", "confidence": 1.0}
-    correction = _CORRECTION.match(text)
-    if _PARSE_FEEDBACK.search(text):
+    if _is_parse_feedback(text):
         return {"intent": "parse_feedback", "confidence": 0.95,
                 "topic": state.get("current_topic", ""), "detail": text}
+    correction = _correction_match(text)
     if correction:
-        return {"intent": "correction", "confidence": 0.95,
-                "reason": correction.group(1),
-                "claim": _claim_from_text(_clean(correction.group(2)), state, False)}
+        reason, rest = correction
+        return {"intent": "correction", "confidence": 0.95, "reason": reason,
+                "claim": _claim_from_text(_clean(rest), state, False)}
     if _is_greeting(text):
         return {"intent": "greeting", "confidence": 1.0}
+    # "あなたの好きなものは何？" shares あなた+何 with plain identity questions
+    # ("Noiseとは何ですか") -- 好き/嫌い present means it is asking about a
+    # PREFERENCE, not identity, so this must be checked first
+    if _ask_noise_preference_match(text):
+        return {"intent": "ask_noise_preference", "confidence": 0.85,
+                "topic": _topic(text)}
     if _is_identity_question(text):
         return {"intent": "ask_identity", "confidence": 0.95}
     if _is_wellbeing_question(text):
@@ -504,31 +788,26 @@ def _interpret(text: str, state: dict) -> dict:
     if _FOLLOW_UP.match(text):
         return {"intent": "follow_up", "confidence": 0.85,
                 "topic": state.get("current_topic", "")}
-    if _RECALL_PREF.search(text):
+    if _is_recall_preference_question(text):
         return {"intent": "recall_preference", "confidence": 0.95}
-    if _RECALL.search(text):
-        return {"intent": "recall_knowledge", "confidence": 0.95}
-    if _CURIOSITY.search(text):
+    if _is_recall_knowledge_question(text):
+        return {"intent": "recall_knowledge", "confidence": 0.95, "topic": _topic(text)}
+    if _is_curiosity_question(text):
         return {"intent": "ask_curiosity", "confidence": 0.95}
-    if _LEARNING_STATUS.search(text):
+    if _is_learning_status_question(text):
         return {"intent": "learning_status", "confidence": 0.9}
-    if _ACTIVITY_STATUS.search(text):
+    if _is_activity_status_question(text):
         return {"intent": "activity_status", "confidence": 0.9}
-    if _ASK_NOISE_PREFERENCE.match(text):
-        return {"intent": "ask_noise_preference", "confidence": 0.85,
-                "topic": _topic(text)}
-    confirm = _CONFIRM.match(text)
-    if confirm:
-        return {"intent": "confirm_understanding", "confidence": 0.95,
-                "topic": _safe(confirm.group(1), 24)}
-    preference = _PREFERENCE.match(text)
+    confirm_topic = _confirm_understanding_match(text)
+    if confirm_topic:
+        return {"intent": "confirm_understanding", "confidence": 0.95, "topic": confirm_topic}
+    preference = _preference_match(text)
     if preference:
         return {"intent": "preference", "confidence": 0.95,
-                "item": _safe(preference.group(1), 24), "value": preference.group(2)}
-    what = _WHAT.match(text)
-    if what:
-        return {"intent": "ask_meaning", "confidence": 0.95,
-                "topic": _safe(what.group(1), 24)}
+                "item": preference[0], "value": preference[1]}
+    what_topic = _what_meaning_match(text)
+    if what_topic:
+        return {"intent": "ask_meaning", "confidence": 0.95, "topic": what_topic}
     focus = _elliptical_focus(text)
     if focus:
         return {"intent": "elliptical_question", "confidence": 0.8,
@@ -593,14 +872,29 @@ def _belief(memory: dict | None, subject: str) -> dict:
     return ((memory or {}).get("beliefs") or {}).get(subject, {})
 
 
-def _recall_knowledge(state: dict) -> str:
-    memories = [f"{subject}は{live[-1]['predicate']}" for subject, claims in
-                state.get("claims", {}).items()
-                if (live := [c for c in claims if not c.get("retracted")])]
+def _recall_knowledge(state: dict, topic: str = "") -> str:
+    claims = state.get("claims", {})
+    if topic and topic in claims:
+        # asked about a SPECIFIC subject -- answer about that one, not every
+        # subject Noise happens to hold a claim about
+        live = _live_claims(state, topic)
+        if not live:
+            return f"「{topic}」について、あなたから聞いた説明はまだありません。"
+        state["stats"]["recalls"] = state["stats"].get("recalls", 0) + 1
+        heard = "、".join(f"「{c['predicate']}」" for c in live[-3:])
+        return f"「{topic}」については、あなたから{heard}と聞いています。"
+    if topic:
+        return f"「{topic}」について、あなたから聞いた説明はまだありません。"
+    memories = [f"{subject}は{live[-1]['predicate']}" for subject, claims_ in claims.items()
+                if (live := [c for c in claims_ if not c.get("retracted")])]
     if not memories:
         return "あなたから聞いて覚えた説明は、まだありません。"
     state["stats"]["recalls"] = state["stats"].get("recalls", 0) + 1
-    return "あなたから聞いた説明では、" + "、".join(memories[-4:]) + "を覚えています。"
+    # each memory is a complete "Xは Y" statement, possibly with its own
+    # internal commas -- bracket each one so the boundary between memories
+    # stays unambiguous instead of running them all into one comma list
+    quoted = "、".join(f"「{m}」" for m in memories[-4:])
+    return f"あなたから聞いた説明では、{quoted}と覚えています。"
 
 
 def _meaning_answer(state: dict, subject: str, memory: dict | None) -> str:
@@ -705,9 +999,22 @@ def _curiosity_answer(state: dict, memory: dict | None) -> str:
     return "いまは、次に何を知るべきかを選ぶ材料が足りません。"
 
 
-def _greeting(state: dict, memory: dict | None) -> str:
-    hour = datetime.now().astimezone().hour
-    salutation = "おはよう" if 5 <= hour < 11 else "こんにちは" if hour < 18 else "こんばんは"
+_SALUTATION_ECHO = {"こんにちは": "こんにちは", "こんにちわ": "こんにちは",
+                    "こんばんは": "こんばんは", "こんばんわ": "こんばんは",
+                    "おはよう": "おはよう"}
+
+
+def _greeting(state: dict, memory: dict | None, text: str = "") -> str:
+    # echo the time-of-day the USER greeted with -- replying "こんにちは"
+    # (afternoon) to their "こんばんは" (evening) because the server's own
+    # clock disagrees reads as ignoring what they just said.  Only やあ/
+    # はじめまして (no time component) fall back to the wall clock.
+    hit = _leading_interjection(_morphs(text) or [])
+    lemma = (hit[0].base or hit[0].surface) if hit else ""
+    salutation = _SALUTATION_ECHO.get(lemma)
+    if not salutation:
+        hour = datetime.now().astimezone().hour
+        salutation = "おはよう" if 5 <= hour < 11 else "こんにちは" if hour < 18 else "こんばんは"
     state["stats"]["greetings"] = state["stats"].get("greetings", 0) + 1
     topic = state.get("current_topic", "")
     grounded = sum(1 for b in ((memory or {}).get("beliefs") or {}).values() if b.get("understood"))
@@ -813,7 +1120,7 @@ def converse(text: str, previous: dict | None, word_memory: dict | None = None,
         else:
             reply = "直前の応答を誤りとして残しました。どの部分が違うか短く教えてください。"
     elif intent == "greeting":
-        reply = _greeting(state, word_memory)
+        reply = _greeting(state, word_memory, text)
     elif intent == "ask_identity":
         reply = ("私はNoiseです。決まった性格や見た目を持つキャラクターではなく、"
                  "読書と会話から言葉の意味や出来事を学んでいる実験的な学習システムです。")
@@ -840,7 +1147,7 @@ def converse(text: str, previous: dict | None, word_memory: dict | None = None,
         else:
             reply = "あなたの好き嫌いは、まだ聞いていません。"
     elif intent == "recall_knowledge":
-        reply = _recall_knowledge(state)
+        reply = _recall_knowledge(state, interpretation.get("topic", ""))
     elif intent == "ask_curiosity":
         reply = _curiosity_answer(state, word_memory)
     elif intent == "learning_status":
