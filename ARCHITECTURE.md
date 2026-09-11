@@ -448,6 +448,20 @@ nothing to be similar to; the memory only helps from the second time a
 related topic surfaces onward, and the same recall is never repeated for the
 same subject once offered.
 
+**Read-only web reference lookup (`_web_gist`).** When Noise does not know a
+topic and is about to ask about it (`_ask_about`, first ask only, and only
+when no live claim already covers the subject), it may also look the word up
+via the SAME cached, network-budgeted Wiktionary/Wikipedia fetch the reading
+loop uses (`japanese_word_meaning_v1._wiktionary_gist` /
+`_wikipedia_genus`) -- one client, one cache, one budget policy, not a second
+implementation. A found gist is stored as a claim with `source:
+"web_reference"` (distinct from a human's `owner_testimony`, same
+`evidence_role: conversation_memory_not_world_fact`): capped, revisable
+testimony, never written into the word-meaning belief store this module does
+not touch, and never presented as Noise's own confirmed understanding --
+the reply says plainly "まだ自分では確かめていません". `AI_NOISE_SKIP_WEB_LOOKUP=1`
+disables it; `web_lookup` is injectable for tests.
+
 ## Decision replay, not state replay
 
 `.local/events.jsonl` is an append-only, cross-module log (`{ts, curricula, module, event_type, before, after, reason}` per line) of discrete state-changing decisions: a benchmark locking, a selected model switching. It exists to answer "when and why did the system decide this" without trusting a human's memory of a status snapshot, and it coexists with (does not replace) each module's own bounded `revision_history`-style fields, which the algorithms themselves still read.

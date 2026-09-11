@@ -10,6 +10,10 @@ import unittest
 # specifically exercise the phrasing layer use an explicit `_FakePhraser` and
 # are unaffected by this flag.
 os.environ.setdefault("AI_NOISE_SKIP_LOCAL_LLM", "1")
+# same reasoning for _ask_about's default web_lookup=_web_gist -- a real
+# Wiktionary/Wikipedia fetch on every "unknown topic" test.  Tests that
+# specifically exercise the web-gist path inject a fake lookup instead.
+os.environ.setdefault("AI_NOISE_SKIP_WEB_LOOKUP", "1")
 
 import noise_chat_v1 as chat
 
@@ -486,6 +490,60 @@ class LiveFailureRegressionTests(_MorphologyIsolatedTestCase):
         self.assertEqual(state["last_turn"]["interpretation"]["intent"], "ask_noise_preference")
         _, state = chat.converse("Noiseとは何ですか", None)
         self.assertEqual(state["last_turn"]["interpretation"]["intent"], "ask_identity")
+
+
+class WebReferenceLookupTests(unittest.TestCase):
+    """A read-only reference lookup for an unknown topic -- reuses
+    japanese_word_meaning_v1's cached Wiktionary/Wikipedia fetch, stored as
+    source: "web_reference" testimony: capped, revisable, never Noise's own
+    confirmed understanding and never written into the word-meaning belief
+    store (ARCHITECTURE.md "Optional local-model boundary" -- same boundary,
+    a different kind of external source)."""
+
+    def test_a_found_gist_is_offered_and_stored_as_web_reference_testimony(self):
+        state = chat._blank()
+        reply = chat._ask_about(state, "献", web_lookup=lambda t: f"{t}は道具の一種だと辞書にあります。")
+        self.assertIn("道具", reply)
+        self.assertEqual(state["claims"]["献"][0]["source"], "web_reference")
+        self.assertEqual(state["claims"]["献"][0]["evidence_role"],
+                         "conversation_memory_not_world_fact")
+
+    def test_a_missing_gist_falls_back_to_the_plain_question(self):
+        state = chat._blank()
+        reply = chat._ask_about(state, "献", web_lookup=lambda t: None)
+        self.assertNotIn("献", state.get("claims", {}))
+        self.assertIn("まだよく分かりません", reply)
+
+    def test_the_lookup_is_attempted_only_once_per_subject(self):
+        calls = {"n": 0}
+
+        def counting_lookup(topic):
+            calls["n"] += 1
+            return None
+
+        state = chat._blank()
+        chat._ask_about(state, "献", web_lookup=counting_lookup)
+        chat._ask_about(state, "献", web_lookup=counting_lookup)
+        chat._ask_about(state, "献", web_lookup=counting_lookup)
+        self.assertEqual(calls["n"], 1)
+
+    def test_web_reference_never_overrides_a_live_human_claim(self):
+        state = chat._blank()
+        chat._remember_claim(state, "献", "楽器の一種", "t1")
+        chat._ask_about(state, "献", web_lookup=lambda t: f"{t}は道具です。")
+        # only the human's claim is present -- the lookup does not run once a
+        # live claim already exists for this subject
+        self.assertEqual(len(state["claims"]["献"]), 1)
+        self.assertEqual(state["claims"]["献"][0]["source"], "owner_testimony")
+
+    def test_web_lookup_disabled_by_env_flag(self):
+        import os
+        os.environ.pop("AI_NOISE_SKIP_WEB_LOOKUP", None)
+        try:
+            os.environ["AI_NOISE_SKIP_WEB_LOOKUP"] = "1"
+            self.assertIsNone(chat._web_gist("献"))
+        finally:
+            os.environ["AI_NOISE_SKIP_WEB_LOOKUP"] = "1"   # restore test default
 
 
 if __name__ == "__main__":

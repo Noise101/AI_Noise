@@ -26,10 +26,17 @@ from datetime import datetime
 
 import conversation_embedding_v1 as association
 import japanese_proposition_v1 as propositions
+import japanese_word_meaning_v1 as word_meaning
 import morphology_teacher as morphology
 
 
-VERSION = 6     # v6: every remaining _interpret intent (correction, parse
+VERSION = 7     # v7: _web_gist -- a read-only reference lookup for an
+                # unknown topic (reuses japanese_word_meaning_v1's cached
+                # Wiktionary/Wikipedia fetch), stored as source:
+                # "web_reference" testimony (capped, revisable, never
+                # Noise's own confirmed understanding); one attempt per
+                # subject, only when no live claim already covers it
+                # v6: every remaining _interpret intent (correction, parse
                 # feedback, recall, curiosity, learning/activity status,
                 # Noise's-own-preference, confirm-understanding, preference,
                 # "Xとは何", the generic claim split) converted from a literal
@@ -252,7 +259,7 @@ def _live_claims(state: dict, subject: str) -> list[dict]:
 
 
 def _remember_claim(state: dict, subject: str, predicate: str, turn_id: str,
-                    structure: dict | None = None) -> dict:
+                    structure: dict | None = None, source: str = "owner_testimony") -> dict:
     claims = state.setdefault("claims", {}).setdefault(subject, [])
     existing = next((c for c in claims if c["predicate"] == predicate
                      and not c.get("retracted")), None)
@@ -261,7 +268,7 @@ def _remember_claim(state: dict, subject: str, predicate: str, turn_id: str,
         existing["last_turn"] = turn_id
         claim = existing
     else:
-        claim = {"predicate": predicate, "source": "owner_testimony",
+        claim = {"predicate": predicate, "source": source,
                  "evidence_role": "conversation_memory_not_world_fact",
                  "times_heard": 1, "first_turn": turn_id, "last_turn": turn_id,
                  "retracted": False}
@@ -849,7 +856,30 @@ def _recall_prompt(state: dict, subject: str) -> str:
     return f"ところで、以前「{target}」について話しましたが、関係ありますか。"
 
 
-def _ask_about(state: dict, subject: str) -> str:
+def _web_gist(topic: str) -> str | None:
+    """A short, read-only reference definition for `topic` -- reuses the same
+    cached, network-budgeted Wiktionary/Wikipedia lookup the reading loop
+    uses (`japanese_word_meaning_v1`), so this never opens a second web
+    client or a second cache/budget policy. Returned as one plain sentence
+    to be stored as `source: "web_reference"` testimony (capped, revisable,
+    never Noise's own confirmed belief, never written into the word-meaning
+    belief store this module does not touch)."""
+    if os.environ.get("AI_NOISE_SKIP_WEB_LOOKUP") == "1":
+        return None
+    try:
+        gist = word_meaning._wiktionary_gist(topic)
+        if gist and gist.get("genus"):
+            return f"{topic}は{gist['genus']}の一種だと辞書にあります。"
+        genus = word_meaning._wikipedia_genus(topic)
+        if genus:
+            return f"{topic}は{genus}だと百科事典にあります。"
+    except Exception:
+        return None
+    return None
+
+
+def _ask_about(state: dict, subject: str, turn_id: str = "",
+              web_lookup=_web_gist) -> str:
     count = state.setdefault("unknown_topics", {}).get(subject, 0) + 1
     state["unknown_topics"][subject] = count
     prompts = (("definition", f"{subject}はまだよく分かりません。どんなものですか。"),
@@ -857,6 +887,15 @@ def _ask_about(state: dict, subject: str) -> str:
                ("contrast", f"{subject}ではないものと、何が違いますか。"),
                ("use", f"{subject}は、いつ、何と一緒に現れますか。"))
     facet, reply = prompts[min(count - 1, len(prompts) - 1)]
+    # only the FIRST time this subject comes up -- a read-only reference
+    # lookup, not a repeated network hit on every retry.  Result is stored as
+    # capped testimony (same evidence_role as a human's claim), never
+    # promoted to Noise's own confirmed understanding by itself.
+    if count == 1 and not _live_claims(state, subject):
+        gist = web_lookup(subject)
+        if gist:
+            _remember_claim(state, subject, gist, turn_id, source="web_reference")
+            reply = f"{reply} {gist}まだ自分では確かめていません。"
     recall = _recall_prompt(state, subject)
     if recall:
         reply = f"{reply} {recall}"
