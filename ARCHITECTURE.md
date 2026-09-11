@@ -306,6 +306,18 @@ understood-rate + echo/clarification/malformed rates are tracked). v2 counted
 echoes as understood; the reader archives the v2 state under `.local/audit/` and
 its rates are not inherited. `AI_NOISE_JA_DIALOGUE=0` off.
 
+### Direct, meaningful conversation (`noise_chat_v1`)
+
+`local_worker_v21.py talk "..."` is deliberately narrower than free
+generation.  Noise can greet, ask about an unknown topic, remember an owner's
+explicit claim or preference, recall it later, and retain an explicit
+correction as an error.  A claim is stored as `owner_testimony` with
+`conversation_memory_not_world_fact`; it never enters the word-meaning ledger,
+the semantic vectors, rules, or capability probes merely because a human said
+it.  Contradicted conversation claims are retracted but retained in history.
+Until generation itself becomes reliably meaningful, an honest short template
+or question is preferred to fluent-looking nonsense.
+
 ## Decision replay, not state replay
 
 `.local/events.jsonl` is an append-only, cross-module log (`{ts, curricula, module, event_type, before, after, reason}` per line) of discrete state-changing decisions: a benchmark locking, a selected model switching. It exists to answer "when and why did the system decide this" without trusting a human's memory of a status snapshot, and it coexists with (does not replace) each module's own bounded `revision_history`-style fields, which the algorithms themselves still read.

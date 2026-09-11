@@ -58,10 +58,12 @@ from abstraction_world_v46 import (assess_open_transfer, empty_abstraction_memor
 from verified_experience_v47 import select_experience_profile
 from experience_rule_learning_v50 import learn_experience_rules
 import japanese_reader_v1 as japanese_reader
+import noise_chat_v1 as noise_chat
 
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RUNTIME = ROOT / ".local"
+HUMAN_CONVERSATION_FILE = "human-conversation.json"
 WORD = re.compile(r"[A-Za-z]+")
 JAPANESE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
 TITLE_STOP = {"the", "a", "an", "and", "or", "of", "to", "in", "on", "with", "three",
@@ -835,6 +837,12 @@ def render_human_status(status: dict, now_epoch: float | None = None,
              f"最優先の弱点   : {DIMENSION_JA.get(mastery.get('weakest_dimension'), mastery.get('weakest_dimension') or '未判定')}",
              "", "日本語読書（発達的・英語と並行）", "-" * 34,
              *_japanese_reading_ja(status.get("japanese_reading", {})),
+             "", "あなたとの会話", "-" * 34,
+             (f"会話           : {status.get('human_conversation', {}).get('turns', 0)}往復／"
+              f"記憶した話題 {status.get('human_conversation', {}).get('remembered_subjects', 0)}／"
+              f"好み {status.get('human_conversation', {}).get('preferences', 0)}／"
+              f"訂正 {status.get('human_conversation', {}).get('corrections', 0)}／"
+              f"まだ知らない話題 {status.get('human_conversation', {}).get('unknown_topics', 0)}"),
              "", "ストレージ", "-" * 34]
     lines.extend([
         f"永続データ     : {human_bytes(storage.get('runtime_bytes'))}",
@@ -1597,6 +1605,8 @@ def status_record(seed: str, runtime: Path, phase: str, rounds: int,
              "word_meaning", "semantic_representation", "cognition", "cognition_probe", "japanese_dialogue",
              "caregiver", "caregiver_questions", "llm_scaffold_totals",
              "aided_reading", "schema_migration", "self_vs_aided", "aided_store", "provenance", "sequence_retirement_log", "sequence_ever_trained_fingerprint", "sequence_boundary_fingerprint", "sequence_ever_trained_collections")},
+        "human_conversation": noise_chat.summary(
+            read_json(runtime / HUMAN_CONVERSATION_FILE)),
         "storage": read_json(runtime / "storage-status.json"),
         "global_memory": report.get("global_memory") or read_json(
             runtime / "global-language-memory.json").get("totals", {}),
@@ -2198,13 +2208,19 @@ def main() -> None:
     detail_parser.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
     stop_parser = subparsers.add_parser("stop", help="request a safe stop between cycles")
     stop_parser.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
+    talk_parser = subparsers.add_parser("talk", help="talk directly with Noise in short Japanese")
+    talk_parser.add_argument("utterance")
+    talk_parser.add_argument("--runtime", type=Path, default=DEFAULT_RUNTIME)
     args = parser.parse_args()
 
     if args.command == "status":
         print(json.dumps(read_json(args.runtime / "status.json"), ensure_ascii=False, indent=2))
         return
     if args.command == "status-ja":
-        print(render_human_status(read_json(args.runtime / "status.json")))
+        current = read_json(args.runtime / "status.json")
+        current["human_conversation"] = noise_chat.summary(
+            read_json(args.runtime / HUMAN_CONVERSATION_FILE))
+        print(render_human_status(current))
         return
     if args.command == "ability-ja":
         print(render_ability_report(
@@ -2218,6 +2234,15 @@ def main() -> None:
         args.runtime.mkdir(parents=True, exist_ok=True)
         (args.runtime / "STOP").touch()
         print("stop requested")
+        return
+    if args.command == "talk":
+        args.runtime.mkdir(parents=True, exist_ok=True)
+        memory_path = args.runtime / HUMAN_CONVERSATION_FILE
+        reply, memory = noise_chat.converse(
+            args.utterance, read_json(memory_path),
+            read_json(args.runtime / japanese_reader.WORD_MEANING_FILE))
+        write_json(memory_path, memory)
+        print(f"Noise: {reply}")
         return
     if args.command == "start":
         existing = read_json(args.runtime / "status.json")
