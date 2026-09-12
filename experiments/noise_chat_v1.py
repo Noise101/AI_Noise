@@ -955,6 +955,21 @@ def _belief(memory: dict | None, subject: str) -> dict:
     return ((memory or {}).get("beliefs") or {}).get(subject, {})
 
 
+def _claim_attribution(claims: list) -> str:
+    """A complete introductory phrase (already carrying は/では, no further
+    particle needed) crediting where these claims came from -- "あなたから
+    は" only when every one is the owner's OWN testimony.  A claim that came
+    from a dictionary lookup (source: "web_reference") must never be told
+    back to the user as something THEY said.  Mixed or unknown sources get a
+    neutral phrase rather than a guess."""
+    sources = {c.get("source", "owner_testimony") for c in claims}
+    if sources == {"web_reference"}:
+        return "辞書では"
+    if sources <= {"owner_testimony"}:
+        return "あなたからは"
+    return "これまでの記憶では"
+
+
 def _recall_knowledge(state: dict, topic: str = "") -> str:
     claims = state.get("claims", {})
     if topic and topic in claims:
@@ -964,11 +979,12 @@ def _recall_knowledge(state: dict, topic: str = "") -> str:
         if not live:
             return f"「{topic}」について、あなたから聞いた説明はまだありません。"
         state["stats"]["recalls"] = state["stats"].get("recalls", 0) + 1
+        attr = _claim_attribution(live[-3:])
         heard = "、".join(f"「{c['predicate']}」" for c in live[-3:])
-        return f"「{topic}」については、あなたから{heard}と聞いています。"
+        return f"「{topic}」については、{attr}{heard}と聞いています。"
     if topic:
         return f"「{topic}」について、あなたから聞いた説明はまだありません。"
-    memories = [f"{subject}は{live[-1]['predicate']}" for subject, claims_ in claims.items()
+    memories = [(subject, live[-1]) for subject, claims_ in claims.items()
                 if (live := [c for c in claims_ if not c.get("retracted")])]
     if not memories:
         return "あなたから聞いて覚えた説明は、まだありません。"
@@ -976,19 +992,22 @@ def _recall_knowledge(state: dict, topic: str = "") -> str:
     # each memory is a complete "Xは Y" statement, possibly with its own
     # internal commas -- bracket each one so the boundary between memories
     # stays unambiguous instead of running them all into one comma list
-    quoted = "、".join(f"「{m}」" for m in memories[-4:])
-    return f"あなたから聞いた説明では、{quoted}と覚えています。"
+    attr = _claim_attribution([c for _, c in memories[-4:]])
+    quoted = "、".join(f"「{subject}は{c['predicate']}」" for subject, c in memories[-4:])
+    return f"{attr}、{quoted}と覚えています。"
 
 
 def _meaning_answer(state: dict, subject: str, memory: dict | None) -> str:
     live, belief = _live_claims(state, subject), _belief(memory, subject)
     _touch_topic(state, subject)
     if live and belief.get("understood"):
-        return (f"あなたからは「{live[-1]['predicate']}」と聞き、読書では{subject}を"
+        attr = _claim_attribution([live[-1]])
+        return (f"{attr}「{live[-1]['predicate']}」と聞き、読書では{subject}を"
                 f"{belief.get('genus')}として扱っています。二つの経路が一致するかは確認中です。")
     if live:
+        attr = _claim_attribution(live[-2:])
         heard = "／".join(f"「{c['predicate']}」" for c in live[-2:])
-        return (f"{subject}について、会話の記憶には、あなたから{heard}と聞いたことがあります。"
+        return (f"{subject}について、会話の記憶には、{attr}{heard}と聞いたことがあります。"
                 "まだ私自身では確かめていません。")
     if belief.get("understood"):
         return (f"読書では、{subject}を{belief.get('genus')}として扱っています。"
@@ -1025,7 +1044,8 @@ def _follow_up_answer(state: dict, memory: dict | None) -> str:
     if unmentioned:
         claim = unmentioned[0]
         mentioned.append(claim["predicate"])
-        return f"{topic}については、あなたから「{claim['predicate']}」とも聞いています。"
+        attr = _claim_attribution([claim])
+        return f"{topic}については、{attr}「{claim['predicate']}」とも聞いています。"
     if belief.get("understood") and not progress.get("belief_mentioned"):
         progress["belief_mentioned"] = True
         return (f"読書では、{topic}を{belief.get('genus')}として扱っています。"

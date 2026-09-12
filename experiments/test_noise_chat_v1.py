@@ -573,5 +573,44 @@ class WebReferenceLookupTests(unittest.TestCase):
             os.environ["AI_NOISE_SKIP_WEB_LOOKUP"] = "1"   # restore test default
 
 
+class AttributionTests(unittest.TestCase):
+    """A claim's origin must be told back correctly -- a dictionary lookup is
+    not "something you told me". Found live: asking "もっと教えて" about a
+    word Noise had only looked up in a dictionary produced "あなたから...と
+    聞いています", falsely attributing the dictionary's content to the user."""
+
+    def _web_claim(self, state, subject, predicate):
+        chat._remember_claim(state, subject, predicate, "t1", source="web_reference")
+
+    def test_meaning_answer_credits_the_dictionary_not_the_user(self):
+        state = chat._blank()
+        self._web_claim(state, "献", "楽器の一種")
+        reply = chat._meaning_answer(state, "献", None)
+        self.assertIn("辞書", reply)
+        self.assertNotIn("あなたから", reply)
+
+    def test_follow_up_credits_the_dictionary_not_the_user(self):
+        state = chat._blank()
+        self._web_claim(state, "献", "楽器の一種")
+        chat._touch_topic(state, "献")
+        reply = chat._follow_up_answer(state, None)
+        self.assertIn("辞書", reply)
+        self.assertNotIn("あなたから", reply)
+
+    def test_recall_knowledge_credits_the_dictionary_not_the_user(self):
+        state = chat._blank()
+        self._web_claim(state, "献", "楽器の一種")
+        reply = chat._recall_knowledge(state, "献")
+        self.assertIn("辞書", reply)
+        self.assertNotIn("あなたから", reply)
+
+    def test_owner_testimony_still_credits_the_user(self):
+        state = chat._blank()
+        chat._remember_claim(state, "献", "楽器の一種", "t1")   # default: owner_testimony
+        reply = chat._meaning_answer(state, "献", None)
+        self.assertIn("あなたから", reply)
+        self.assertNotIn("辞書", reply)
+
+
 if __name__ == "__main__":
     unittest.main()
