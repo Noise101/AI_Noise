@@ -637,10 +637,20 @@ def run_once(runtime: Path) -> dict:
     # last cycle's prediction-failure feedback: capped counter-evidence to the
     # genus a word's story behaviour kept contradicting (one channel, invariant 10)
     pred_feedback = (_read(runtime / PREDICTION_FILE) or {}).get("prediction_feedback", {})
+    # last cycle's dialogue-failure feedback: the SAME channel, fed by Noise's
+    # own conversational misunderstandings ("use it, and correct it when you
+    # find out it was wrong").  Merged in (higher-strength entry wins per word)
+    # rather than passed separately -- one revisable-belief channel, two
+    # first-person sources.
+    dlg_feedback = (_read(runtime / JA_DIALOGUE_FILE) or {}).get("dialogue_feedback", {})
+    combined_feedback = dict(pred_feedback)
+    for w, fb in dlg_feedback.items():
+        if w not in combined_feedback or fb.get("strength", 0) > combined_feedback[w].get("strength", 0):
+            combined_feedback[w] = fb
     try:
         wm_report = word_meaning.learn_and_evaluate(
             wm_stories, prev_wm, cycle, known_words=wm_known,
-            prediction_feedback=pred_feedback)
+            prediction_feedback=combined_feedback)
     except Exception as exc:                      # never let it break the reader
         wm_report = {**(prev_wm or {}), "status": "error", "error": repr(exc)}
     _write(runtime / WORD_MEANING_FILE, wm_report)

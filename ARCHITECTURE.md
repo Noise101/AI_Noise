@@ -317,6 +317,37 @@ understood-rate + echo/clarification/malformed rates are tracked). v2 counted
 echoes as understood; the reader archives the v2 state under `.local/audit/` and
 its rates are not inherited. `AI_NOISE_JA_DIALOGUE=0` off.
 
+**The production/comprehension gap, and speaking about a "roughly understood"
+word (v5).** Reading tolerates a partially-resolved belief while still tracking
+narrative structure; `_claim()` originally required a *confirmed* genus
+(`understood=True`, `confidence>=0.55`) before producing ANY utterance at all —
+harmless for reading, but a hard wall for production, since only ~16% of
+encountered vocabulary ever clears that bar. A fifth, genus-independent
+strategy, `"usage"`, closes part of this gap the way a person actually
+speaks: it reports an *actually-read* verb usage straight from
+`wm["profiles"][word]` (`「いたち」がはしるのを読んだことがあります。`) rather than a
+claim about what the word means, so it needs no confirmed genus — a "roughly
+understood" word is still something Noise has seen used, and using it is
+itself the observation, not an assertion of understanding (`belief_supported`
+is always true for a real usage). To keep the **frozen probe** comparable
+across the version bump, `"usage"` is deliberately excluded from
+`_frozen_strategy`'s strategy set and from `_understood_concepts` (the frozen
+pool's only source) — it widens only the **practice** rotation, via a
+separate `_usage_concepts()` pool of profiled-but-genus-unconfirmed words.
+
+**Self-correction from conversational failure (`dialogue_feedback`).** The
+owner's framing: humans use words they have only roughly understood, and
+correct them once they find out they were wrong. `_record_outcome` tracks
+hits/misses per word+assumed-genus across dialogue turns (usage turns are
+skipped — they assert no genus, so a misunderstanding there is not evidence
+against a genus belief); `build_feedback` turns a persistent miss run into
+capped counter-evidence, in the exact shape `japanese_prediction_v1
+.build_feedback` already produces. `japanese_reader_v1` merges both into ONE
+`prediction_feedback` argument to `word_meaning.learn_and_evaluate` (higher
+`strength` wins per word on overlap) — one revisable-belief channel
+(invariant 10), now fed by two first-person sources: prediction-from-reading
+and failure-from-speaking.
+
 ### Direct, meaningful conversation (`noise_chat_v1`)
 
 `local_worker_v21.py talk "..."` and the local GUI use a stateful, bounded

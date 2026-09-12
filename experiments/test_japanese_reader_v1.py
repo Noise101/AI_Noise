@@ -277,6 +277,47 @@ class JapaneseReaderTest(unittest.TestCase):
             reader.curriculum.retention_check_due = orig_retention
         self.assertEqual(status["reading"]["status"], "no_book")
 
+    def test_dialogue_feedback_is_merged_into_the_prediction_feedback_channel(self):
+        # last cycle's japanese_dialogue_v1 self-correction signal (a word
+        # Noise kept failing to be understood about) must reach word_meaning
+        # through the SAME `prediction_feedback` parameter japanese_prediction_v1
+        # already feeds -- one revisable-belief channel, two first-person sources.
+        reader._write(self.runtime / reader.JA_DIALOGUE_FILE, {
+            "version": reader.ja_dialogue.VERSION,
+            "dialogue_feedback": {"きつね": {"against": "道具", "strength": 0.2,
+                                            "hits": 1, "misses": 6, "cycle": 3}}})
+        reader._write(self.runtime / reader.PREDICTION_FILE, {
+            "prediction_feedback": {"からす": {"against": "場所", "strength": 0.1,
+                                             "hits": 2, "misses": 5, "cycle": 3}}})
+        captured = {}
+
+        def fake_learn(*a, **k):
+            captured.update(k)
+            return {"status": "measured", "vocab": 0}
+        reader.word_meaning.learn_and_evaluate = fake_learn
+        reader.run_once(self.runtime)
+        fb = captured.get("prediction_feedback", {})
+        self.assertIn("きつね", fb)                 # from dialogue
+        self.assertIn("からす", fb)                 # from prediction
+        self.assertEqual(fb["きつね"]["against"], "道具")
+
+    def test_higher_strength_feedback_wins_on_a_shared_word(self):
+        reader._write(self.runtime / reader.JA_DIALOGUE_FILE, {
+            "version": reader.ja_dialogue.VERSION,
+            "dialogue_feedback": {"きつね": {"against": "道具", "strength": 0.25,
+                                            "hits": 1, "misses": 8, "cycle": 3}}})
+        reader._write(self.runtime / reader.PREDICTION_FILE, {
+            "prediction_feedback": {"きつね": {"against": "場所", "strength": 0.05,
+                                             "hits": 4, "misses": 5, "cycle": 3}}})
+        captured = {}
+
+        def fake_learn(*a, **k):
+            captured.update(k)
+            return {"status": "measured", "vocab": 0}
+        reader.word_meaning.learn_and_evaluate = fake_learn
+        reader.run_once(self.runtime)
+        self.assertEqual(captured["prediction_feedback"]["きつね"]["against"], "道具")
+
 
 if __name__ == "__main__":
     unittest.main()

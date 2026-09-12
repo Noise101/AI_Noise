@@ -15,7 +15,8 @@ WM = {
     },
     "contexts": {"椅子": {"鉛筆": 4, "つくえ": 3}, "きつね": {"からす": 5, "ぶどう": 2}},
     "entities": {"きつね": 40, "椅子": 12, "鉛筆": 8, "病院": 5, "からす": 30},
-    "profiles": {},
+    "profiles": {"椅子": {"subj_verbs": {}, "obj_verbs": {"つかう": 3}},
+                 "いたち": {"subj_verbs": {"はしる": 4, "とぶ": 1}, "obj_verbs": {}}},
 }
 RULES = [{"status": "reusable", "subject_genus": "生き物", "verb": "はしる", "object_genus": ""}]
 
@@ -160,6 +161,95 @@ class RunTest(unittest.TestCase):
         finally:
             del os.environ["AI_NOISE_JA_DIALOGUE"]
         self.assertTrue(jd.enabled())
+
+
+class UsageStrategyTest(unittest.TestCase):
+    """"usage" needs no confirmed genus: a person uses a word they have only
+    "roughly" understood, and corrects it later if it turns out wrong (the
+    owner's own framing) -- these test that path is real observation, not a
+    disguised understanding claim."""
+
+    def test_usage_example_prefers_the_more_frequent_role(self):
+        self.assertEqual(jd._usage_example(WM, "いたち"), ("はしる", "subject"))
+        self.assertEqual(jd._usage_example(WM, "椅子"), ("つかう", "object"))
+
+    def test_usage_example_is_none_without_a_profile(self):
+        self.assertIsNone(jd._usage_example(WM, "みらい"))
+
+    def test_usage_claim_needs_no_genus(self):
+        cl = jd._claim("いたち", WM, RULES, "usage")
+        self.assertFalse(cl["malformed"])
+        self.assertTrue(cl["parseable"])
+        self.assertEqual(cl["genus"], "")                 # asserted no meaning, only usage
+        self.assertIn("いたち", cl["text"])
+        self.assertIn("はしる", cl["text"])
+        self.assertIn("読んだことがあります", cl["text"])   # observation phrasing, not a definition
+
+    def test_usage_claim_is_malformed_with_no_recorded_usage(self):
+        cl = jd._claim("みらい", WM, RULES, "usage")
+        self.assertTrue(cl["malformed"])
+        self.assertEqual(cl["text"], "")
+
+    def test_usage_concepts_excludes_confirmed_genus_words(self):
+        pool = jd._usage_concepts(WM)
+        self.assertIn("いたち", pool)
+        self.assertNotIn("椅子", pool)                     # already _understood_concepts
+
+
+class DialogueFeedbackTest(unittest.TestCase):
+    """A word Noise keeps failing to be understood about is capped
+    counter-evidence against the genus it kept asserting -- the SAME
+    revisable-belief channel `japanese_prediction_v1.build_feedback` feeds,
+    now fed by Noise's own conversational misunderstandings."""
+
+    def _turn(self, concept, genus, strategy, understood, malformed=False):
+        return {"concept": concept, "genus": genus, "strategy": strategy,
+                "understood": understood, "malformed": malformed}
+
+    def test_repeated_misunderstanding_produces_feedback(self):
+        st = jd._blank()
+        for _ in range(6):
+            jd._record_outcome(st, self._turn("椅子", "道具", "genus", False))
+        fb = jd.build_feedback(st, cycle=10)
+        self.assertIn("椅子", fb)
+        self.assertEqual(fb["椅子"]["against"], "道具")
+        self.assertGreater(fb["椅子"]["strength"], 0)
+        self.assertLessEqual(fb["椅子"]["strength"], jd.FEEDBACK_MAX_PENALTY)
+
+    def test_mostly_understood_produces_no_feedback(self):
+        st = jd._blank()
+        for _ in range(6):
+            jd._record_outcome(st, self._turn("椅子", "道具", "genus", True))
+        self.assertEqual(jd.build_feedback(st, cycle=10), {})
+
+    def test_usage_turns_are_never_counted_as_genus_evidence(self):
+        st = jd._blank()
+        for _ in range(6):
+            jd._record_outcome(st, self._turn("いたち", "", "usage", False))
+        self.assertEqual(st["outcomes"], {})
+        self.assertEqual(jd.build_feedback(st, cycle=10), {})
+
+    def test_run_practice_reports_dialogue_feedback(self):
+        wm = {"beliefs": {**{("きぐ" + c): _b("道具") for c in
+                              "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもや"}},
+              "contexts": {}, "entities": {}, "profiles": {}}
+        st = None
+        for cyc in range(2, 6):
+            st = jd.run_practice(wm, RULES, st, cyc, partner=FakePartner())
+        self.assertIn("dialogue_feedback", st)
+
+    def test_practice_pool_reaches_a_usage_only_concept(self):
+        wm = {"beliefs": {**{("きぐ" + c): _b("道具") for c in
+                              "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもや"}},
+              "contexts": {}, "entities": {},
+              "profiles": {"げんぶつ": {"subj_verbs": {"うごく": 5}, "obj_verbs": {}}}}
+        st, usage_seen = None, False
+        for cyc in range(1, 100):
+            st = jd.run_practice(wm, RULES, st, cyc, partner=FakePartner())
+            for t in st.get("turns", []):
+                if t.get("concept") == "げんぶつ" and t.get("strategy") == "usage":
+                    usage_seen = True
+        self.assertTrue(usage_seen)
 
 
 if __name__ == "__main__":

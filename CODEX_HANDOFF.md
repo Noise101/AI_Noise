@@ -270,6 +270,61 @@ fluctuated between 0.095 and 0.227 for 65 measurements running — the tier that
 matters, `selection`, is trending `improving`. Read the full history before
 calling a small-n diagnostic swing a regression.
 
+## Reading-vs-speaking gap: usage strategy + dialogue self-correction (2026-09-12)
+
+The user asked, directly: reading is at ~8-year-old level; why is speaking
+near zero? Root cause, found by reading `_claim()`'s source: production
+requires a **fully confirmed** genus (`understood=True`, `confidence>=0.55`,
+real word) before any utterance is produced at all — reading tolerates a
+partial/ambiguous belief while still tracking structure; speaking has no such
+tolerance. Only 683/4155 (16%) of encountered vocabulary ever clears that bar,
+so the vast majority of what Noise has read is unspeakable no matter how good
+the reading gets. Compounded by a second, broader round of the same
+vocabulary-contamination pattern as the も気/も返事 bug above: this time
+whole-word structural fragments — `そんな` (bare 連体詞), `思った`/`していた`/
+`なかった` (verb+auxiliary chains), `これで`/`それは`/`だれか` (pronoun/question-word
++ bare particle) — extracted as "words" by the plain regex content-word
+scanner, which has no notion of a word boundary beyond a kana/kanji run.
+
+Two changes, both per the owner's explicit description of how humans use
+language ("人間はおおよそわかった言葉は使うし、つかって間違っていたらそれがわかったときに訂正する
+— people use roughly-understood words, and correct them when they turn out
+wrong"):
+
+1. **`japanese_dialogue_v1` v5 — a genus-independent `"usage"` strategy**,
+   practice-rotation only, reporting an actually-read verb usage
+   (`「いたち」がはしるのを読んだことがあります。`) for any profiled word, confirmed
+   genus or not. The frozen probe's concept-selection pool (`_understood_concepts`)
+   and strategy set (`_frozen_strategy`) are untouched, so the frozen metric
+   stays comparable across the version bump — only the practice pool widens.
+2. **`dialogue_feedback`** — hits/misses per word+assumed-genus across
+   dialogue turns (usage turns excluded: they assert no genus), turned into
+   capped counter-evidence in the exact shape `japanese_prediction_v1
+   .build_feedback` already produces, then merged (higher `strength` wins per
+   word) into the SAME `prediction_feedback` argument `japanese_reader_v1`
+   passes to `word_meaning.learn_and_evaluate`. One revisable-belief channel,
+   now fed by two first-person failure sources.
+
+Data hygiene: swept `.local/reading-word-meaning.json` for words whose
+morphological analysis is a single function-word morpheme (adverb/adnominal/
+conjunction/interjection/particle/auxiliary/filler/symbol) or ENDS in one —
+193 of 4155 belief entries (57 of them `understood`), removed from `beliefs`,
+`profiles`, `contexts` (both as keys and as neighbour references),
+`entities`, `taxonomy`, `llm_class`, `researched`, `selection_words`,
+`selection_refs`. Deliberately did NOT purge on "last morpheme is not 名詞"
+alone — that rule's false positives include real nouns the analyser mistags
+as verbs by homograph (`かえる` frog vs. 帰る/変える, `けむり` smoke), which are
+common, important words in this exact corpus; removing them would have been
+discarding real learning memory without a real reason.
+
+This was NOT a `noise_chat_v1` change. Per the user's explicit correction
+this session ("会話BOT作れとは一言もいってない" — I never asked you to build a
+chatbot; "だめな会話を、会話BOTでなおそうとしたのが間違い" — trying to fix bad conversation
+by patching a chatbot was the wrong move), `noise_chat_v1`'s conversation
+subsystem is left as-is; this fix targets the actual measured capability gap
+in the Japanese reading loop's own use-test (`japanese_dialogue_v1` /
+`japanese_word_meaning_v1`), not a parallel chat feature.
+
 ## Safety and integrity
 
 - Web access is read-only. Do not post, purchase, change permissions, or mutate external services.

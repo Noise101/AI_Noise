@@ -29,7 +29,18 @@ import time
 import urllib.request
 from collections import Counter
 
-VERSION = 4                     # v4: word_meaning._norm fixed a bug that let a
+VERSION = 5                     # v5: a genus-independent "usage" strategy (practice
+                                # only) lets Noise speak about a word it has only
+                                # "roughly" understood -- an actually-read verb usage,
+                                # never a claim of meaning -- widening the practice
+                                # pool beyond confirmed-genus concepts; paired with
+                                # `dialogue_feedback`, capped counter-evidence from
+                                # Noise's own conversational misunderstandings fed
+                                # back into word_meaning (self-correction from use,
+                                # not just from reading).  Frozen-pool selection and
+                                # the probe's strategy set are unchanged, so the
+                                # frozen metric stays comparable across the bump.
+                                # v4: word_meaning._norm fixed a bug that let a
                                 # topic/case particle glued to a following noun
                                 # ("も気", "も返事" -- really 気/返事 with a
                                 # stray leading も) be believed as its own
@@ -42,6 +53,18 @@ VERSION = 4                     # v4: word_meaning._norm fixed a bug that let a
 FROZEN_CONCEPTS = 12
 MIN_UNDERSTOOD_TO_START = 25
 STRATEGIES = ("genus", "property", "relation", "question")
+# "usage" needs no confirmed genus (only an actually-read verb usage), so it is
+# deliberately excluded from the concept-SELECTION pool and from the frozen
+# probe's strategy set (_frozen_strategy) -- mixing an always-honest, always-
+# gradable strategy into the frozen metric would move it for reasons that have
+# nothing to do with the capability the probe exists to track.  It is added
+# only to the PRACTICE rotation, where it lets Noise talk about words it has
+# only "roughly" understood, per the owner: humans use such words and correct
+# them later if they turn out wrong -- see `dialogue_feedback` below.
+PRACTICE_STRATEGIES = STRATEGIES + ("usage",)
+FEEDBACK_MIN_MISSES = 4
+FEEDBACK_MISS_RATIO = 1.5
+FEEDBACK_MAX_PENALTY = 0.25
 PARTNER_TIMEOUT = None      # no artificial cap -- wait for the reply, however long
 # run_practice calls the partner at most once per cycle, so a slower/larger
 # model costs one long wait per cycle, not a loop of them.  The owner's
@@ -160,6 +183,27 @@ def _understood_concepts(wm: dict, concrete_first: bool = True) -> list[str]:
     return out
 
 
+def _usage_concepts(wm: dict) -> list[str]:
+    """Real words Noise has actually seen used as a subject or object of a
+    verb, but has NOT confirmed a genus for -- "roughly understood" words a
+    person would still risk using in speech (the owner's framing).  These
+    never enter `_understood_concepts` (the frozen-pool source); they widen
+    only the PRACTICE rotation, and can only be spoken via strategy "usage"."""
+    beliefs = wm.get("beliefs") or {}
+    out = []
+    for w, profile in (wm.get("profiles") or {}).items():
+        if not _real_word(w):
+            continue
+        b = beliefs.get(w, {})
+        if b.get("understood") and b.get("genus") and float(b.get("confidence", 0)) >= 0.55:
+            continue                                   # already in _understood_concepts
+        if profile.get("subj_verbs") or profile.get("obj_verbs"):
+            out.append(w)
+    ent = wm.get("entities") or {}
+    out.sort(key=lambda w: -ent.get(w, 0))
+    return out
+
+
 def _related(wm: dict, concept: str) -> str:
     """A NOUN Noise has read alongside `concept` and also understands."""
     ctx = Counter((wm.get("contexts") or {}).get(concept, {}))
@@ -180,17 +224,56 @@ def _rule_verb(rules: list[dict], genus: str) -> str:
     return ""
 
 
+def _usage_example(wm: dict, concept: str) -> "tuple[str, str] | None":
+    """(verb, role) from Noise's OWN reading profile of `concept` -- the most
+    frequent verb it has been the subject or object of.  Requires no genus at
+    all: this is a plain recollection of something actually read, not a
+    claim about what the word MEANS."""
+    profile = (wm.get("profiles") or {}).get(concept, {})
+    subj_verbs, obj_verbs = profile.get("subj_verbs") or {}, profile.get("obj_verbs") or {}
+    if subj_verbs and (not obj_verbs or max(subj_verbs.values()) >= max(obj_verbs.values())):
+        v = max(subj_verbs, key=subj_verbs.get)
+        if _informative_verb(v):
+            return v, "subject"
+    if obj_verbs:
+        v = max(obj_verbs, key=obj_verbs.get)
+        if _informative_verb(v):
+            return v, "object"
+    return None
+
+
 def _claim(concept: str, wm: dict, rules: list[dict], strategy: str) -> dict:
     """The semantic content Noise is trying to convey, plus an honest read of
     whether its OWN knowledge actually supports that utterance (P1-2 point 8).
-    `text` is the sentence sent to the partner; the rest is never sent."""
+    `text` is the sentence sent to the partner; the rest is never sent.
+
+    "usage" is deliberately weaker than the other three: a person uses a word
+    they have only roughly understood, and corrects it later if it turns out
+    wrong (the owner's own framing) -- it needs no genus at all, only an
+    actually-observed usage, and it never asserts what the word MEANS, only
+    that Noise has read it used a certain way.  This is real self-reported
+    observation (invariant 2), not a claim of understanding, so it is always
+    "belief_supported" when the usage was actually read; genus/property/
+    relation/question still require a confirmed genus, unchanged."""
     b = (wm.get("beliefs") or {}).get(concept, {})
     g = _canon(b.get("genus", ""))
     conf = float(b.get("confidence", 0.0))
     belief_supported = bool(b.get("understood") and g and conf >= 0.55 and _real_word(concept))
     cl = {"form": strategy, "concept": concept, "genus": g, "relation": "", "verb": "",
-          "parseable": bool(concept and g), "belief_supported": belief_supported,
-          "relation_supported": False, "text": ""}
+          "parseable": bool(concept and (g or strategy == "usage")),
+          "belief_supported": belief_supported, "relation_supported": False, "text": ""}
+    if strategy == "usage":
+        example = _usage_example(wm, concept) if _real_word(concept) else None
+        if not example:
+            cl["malformed"] = True
+            return cl
+        verb, role = example
+        cl["verb"] = verb
+        particle = "が" if role == "subject" else "を"
+        cl["text"] = f"「{concept}」{particle}{verb}のを読んだことがあります。"
+        cl["belief_supported"] = True           # an observation, not an
+        cl["malformed"] = False                # understanding claim -- always
+        return cl                              # true when the usage was real
     if not (concept and g):
         cl["malformed"] = True
         return cl
@@ -322,7 +405,49 @@ def _blank() -> dict:
     return {"version": VERSION, "frozen": [], "frozen_tasks": [], "frozen_at": None,
             "strategy_performance": {}, "practice_rotation": 0,
             "probe_rotation": 0, "probe_round": {"attempts": {}, "started_cycle": None},
-            "probe_history": [], "turns": []}
+            "probe_history": [], "turns": [], "outcomes": {}}
+
+
+def _record_outcome(state: dict, turn: dict) -> None:
+    """Track hits/misses per word-genus assumption from Noise's OWN
+    conversational turns -- a first-person predict/fail signal, mirroring
+    `japanese_prediction_v1.build_feedback`.  A "usage" turn asserts no genus
+    (it is a plain observation, always true when the usage was real) so it
+    is not gradable evidence about the genus belief and is skipped."""
+    if turn.get("strategy") == "usage" or not turn.get("genus"):
+        return
+    w, g = turn.get("concept"), turn.get("genus")
+    if not w:
+        return
+    outcomes = state.setdefault("outcomes", {})
+    rec = outcomes.get(w)
+    if not rec or rec.get("assumed_genus") != g:
+        rec = {"assumed_genus": g, "hits": 0, "misses": 0}
+        outcomes[w] = rec
+    if turn.get("malformed") or not turn.get("understood"):
+        rec["misses"] += 1
+    else:
+        rec["hits"] += 1
+
+
+def build_feedback(state: dict, cycle: int) -> dict:
+    """Capped counter-evidence from Noise's own dialogue failures, in the
+    exact shape `japanese_word_meaning_v1._revise_belief` already reads via
+    `prediction_feedback` (invariant 10: one revisable-belief channel).  A
+    word Noise keeps failing to be understood about is real first-person
+    evidence its genus belief may be wrong -- "use it, and correct it when
+    you find out it was wrong" (the owner's own framing of the mechanism)."""
+    fb: dict = {}
+    for w, rec in (state.get("outcomes") or {}).items():
+        if not _real_word(w):
+            continue
+        h, m = rec.get("hits", 0), rec.get("misses", 0)
+        if m >= FEEDBACK_MIN_MISSES and m > FEEDBACK_MISS_RATIO * max(h, 1):
+            strength = round(min(FEEDBACK_MAX_PENALTY, 0.05 * (m - FEEDBACK_MISS_RATIO * h)), 3)
+            if strength > 0:
+                fb[w] = {"against": rec["assumed_genus"], "strength": strength,
+                         "hits": h, "misses": m, "cycle": cycle}
+    return fb
 
 
 _QUALITY_KEYS = ("parseable", "belief_supported", "relation_supported", "malformed")
@@ -354,6 +479,10 @@ def run_practice(wm: dict, rules: list[dict], previous: dict | None,
     concepts = _understood_concepts(wm)
     if len(concepts) < MIN_UNDERSTOOD_TO_START:
         return {**st, "status": "waiting", "have": len(concepts), "need": MIN_UNDERSTOOD_TO_START}
+    # practice-only: words seen used but not genus-confirmed ("roughly
+    # understood").  The frozen pool below is built from `concepts` alone.
+    usage_only = _usage_concepts(wm)
+    practice_pool = concepts + [w for w in usage_only if w not in concepts]
 
     if not st.get("frozen_tasks"):
         clean = [w for w in concepts
@@ -406,9 +535,13 @@ def run_practice(wm: dict, rules: list[dict], previous: dict | None,
             st["probe_history"] = st["probe_history"][-HISTORY_CAP:]
             st["probe_round"] = {"attempts": {}, "started_cycle": None}
     else:
-        c = concepts[st["practice_rotation"] % len(concepts)]
+        c = practice_pool[st["practice_rotation"] % len(practice_pool)]
         st["practice_rotation"] += 1
-        strat = STRATEGIES[st["practice_rotation"] % len(STRATEGIES)]
+        # a word with no confirmed genus can only honestly be spoken about via
+        # "usage" (a plain observation); confirmed concepts still rotate the
+        # full set so their genus/property/relation/question rate is tracked.
+        strat = ("usage" if c in usage_only and c not in concepts else
+                 PRACTICE_STRATEGIES[st["practice_rotation"] % len(PRACTICE_STRATEGIES)])
         turn = _attempt(c, strat, "practice")
         bucket = perf.setdefault(strat, {"turns": 0, "understood": 0})
         bucket["turns"] += 1
@@ -417,6 +550,7 @@ def run_practice(wm: dict, rules: list[dict], previous: dict | None,
 
     if turn:
         st["turns"] = (st["turns"] + [turn])[-TURNS_CAP:]
+        _record_outcome(st, turn)
 
     h = st["probe_history"]
     first, latest = (h[0] if h else None), (h[-1] if h else None)
@@ -452,10 +586,15 @@ def run_practice(wm: dict, rules: list[dict], previous: dict | None,
                 ("echo_rate", "clarification_rate", "malformed_rate", "new_info_rate")}
                 if latest else None,
             "sample_turn": turn,
+            "usage_pool_size": len(usage_only),
+            "dialogue_feedback": build_feedback(st, cycle),
             "note": "the partner is an environment; its replies never update a "
                     "belief -- only 'was I understood' is scored (invariant 13).  "
                     "A verbatim/partial echo, a bare agreement, a helpful guess at a "
-                    "malformed utterance, and an off-topic reply all fail."}
+                    "malformed utterance, and an off-topic reply all fail.  "
+                    "'usage' turns (practice only) make no genus claim -- they report "
+                    "an actually-read verb usage for a word Noise has not yet confirmed "
+                    "a meaning for, and so are excluded from dialogue_feedback."}
 
 
 def _best_strategy(perf: dict) -> "str | None":
