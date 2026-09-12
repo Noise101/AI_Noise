@@ -411,7 +411,13 @@ def _wiktionary_gist(word: str) -> dict | None:
         return None
     if not genus:
         genus = _wikipedia_genus(word)
-    return {"genus": genus, "terms": terms, "related": related[:8]}
+    # `gist_text` is the raw fetched sentence, kept even when nothing above
+    # resolved into a clean genus -- a page was actually read; callers that
+    # want to retain "encountered, unconfirmed" content rather than discard
+    # a fetch just because it did not parse into a structured genus (e.g.
+    # noise_chat_v1._web_gist) need the original text, not only the derived
+    # fields.
+    return {"genus": genus, "terms": terms, "related": related[:8], "gist_text": defsent}
 
 
 def _wikipedia_genus(word: str) -> str:

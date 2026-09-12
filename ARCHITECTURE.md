@@ -462,6 +462,20 @@ not touch, and never presented as Noise's own confirmed understanding --
 the reply says plainly "まだ自分では確かめていません". `AI_NOISE_SKIP_WEB_LOOKUP=1`
 disables it; `web_lookup` is injectable for tests.
 
+**A fetch that happened is not discarded just because it did not resolve
+cleanly.** Per the owner ("人間はみたものを捨てない" -- a person does not throw
+away what they have seen): the first version of the lookup above discarded
+the ENTIRE result whenever `_wiktionary_gist` could not extract a clean
+genus, even when a real page had been fetched and read (a definition
+sentence, related terms). `_wiktionary_gist` now also returns the raw
+fetched sentence (`gist_text`); `_web_gist` falls through genus -> raw
+definition -> related terms before giving up, and anything found this way is
+kept as an **encounter** (`_remember_encounter`, `state["encountered"]`) --
+distinct from a `claim` (a specific subject/predicate assertion someone can
+confirm or retract): an encounter carries no assertion shape at all, just
+"I have come across this, unconfirmed". Neither a claim nor an encounter is
+ever promoted to Noise's own confirmed understanding by being stored.
+
 ## Decision replay, not state replay
 
 `.local/events.jsonl` is an append-only, cross-module log (`{ts, curricula, module, event_type, before, after, reason}` per line) of discrete state-changing decisions: a benchmark locking, a selected model switching. It exists to answer "when and why did the system decide this" without trusting a human's memory of a status snapshot, and it coexists with (does not replace) each module's own bounded `revision_history`-style fields, which the algorithms themselves still read.

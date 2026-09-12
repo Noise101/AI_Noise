@@ -500,19 +500,45 @@ class WebReferenceLookupTests(unittest.TestCase):
     store (ARCHITECTURE.md "Optional local-model boundary" -- same boundary,
     a different kind of external source)."""
 
-    def test_a_found_gist_is_offered_and_stored_as_web_reference_testimony(self):
+    def test_a_confident_gist_is_offered_and_stored_as_web_reference_testimony(self):
         state = chat._blank()
-        reply = chat._ask_about(state, "献", web_lookup=lambda t: f"{t}は道具の一種だと辞書にあります。")
+        reply = chat._ask_about(state, "献", web_lookup=lambda t: {
+            "text": f"{t}は道具の一種だと辞書にあります。", "confident": True})
         self.assertIn("道具", reply)
         self.assertEqual(state["claims"]["献"][0]["source"], "web_reference")
         self.assertEqual(state["claims"]["献"][0]["evidence_role"],
                          "conversation_memory_not_world_fact")
+        self.assertNotIn("献", state.get("encountered", {}))
 
     def test_a_missing_gist_falls_back_to_the_plain_question(self):
         state = chat._blank()
         reply = chat._ask_about(state, "献", web_lookup=lambda t: None)
         self.assertNotIn("献", state.get("claims", {}))
+        self.assertNotIn("献", state.get("encountered", {}))
         self.assertIn("まだよく分かりません", reply)
+
+    def test_an_unresolved_fetch_is_kept_as_an_encounter_not_discarded(self):
+        # a page WAS fetched (something was read) but nothing resolved into a
+        # clean genus -- per the owner, that is not the same as never having
+        # looked, and must not be thrown away just because it did not parse
+        # into a tidy structured claim
+        state = chat._blank()
+        reply = chat._ask_about(state, "献", web_lookup=lambda t: {
+            "text": f"辞書には「{t}は古い言葉である」とありますが、うまく分類できませんでした。",
+            "confident": False})
+        self.assertIn("古い言葉", reply)
+        self.assertNotIn("献", state.get("claims", {}))       # not a confirmed claim
+        self.assertEqual(len(state["encountered"]["献"]), 1)
+        entry = state["encountered"]["献"][0]
+        self.assertEqual(entry["confidence"], "uncertain")
+        self.assertEqual(entry["source"], "web_reference")
+
+    def test_encounters_are_capped_and_never_promoted_to_a_claim(self):
+        state = chat._blank()
+        for i in range(chat.ENCOUNTERS_PER_SUBJECT + 3):
+            chat._remember_encounter(state, "献", f"見た内容{i}", "web_reference", f"t{i}")
+        self.assertEqual(len(state["encountered"]["献"]), chat.ENCOUNTERS_PER_SUBJECT)
+        self.assertNotIn("献", state.get("claims", {}))
 
     def test_the_lookup_is_attempted_only_once_per_subject(self):
         calls = {"n": 0}
@@ -530,7 +556,8 @@ class WebReferenceLookupTests(unittest.TestCase):
     def test_web_reference_never_overrides_a_live_human_claim(self):
         state = chat._blank()
         chat._remember_claim(state, "献", "楽器の一種", "t1")
-        chat._ask_about(state, "献", web_lookup=lambda t: f"{t}は道具です。")
+        chat._ask_about(state, "献", web_lookup=lambda t: {"text": f"{t}は道具です。",
+                                                          "confident": True})
         # only the human's claim is present -- the lookup does not run once a
         # live claim already exists for this subject
         self.assertEqual(len(state["claims"]["献"]), 1)

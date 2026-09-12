@@ -30,7 +30,14 @@ import japanese_word_meaning_v1 as word_meaning
 import morphology_teacher as morphology
 
 
-VERSION = 7     # v7: _web_gist -- a read-only reference lookup for an
+VERSION = 8     # v8: a fetch that happened is not discarded just because it
+                # did not resolve into a clean genus -- _web_gist falls
+                # through genus -> raw definition -> related terms before
+                # giving up, and anything found is kept as an "encounter"
+                # (state["encountered"], _remember_encounter): distinct from
+                # a claim (no assertion shape), never promoted to confirmed
+                # understanding, retained rather than thrown away
+                # v7: _web_gist -- a read-only reference lookup for an
                 # unknown topic (reuses japanese_word_meaning_v1's cached
                 # Wiktionary/Wikipedia fetch), stored as source:
                 # "web_reference" testimony (capped, revisable, never
@@ -200,7 +207,7 @@ def _blank() -> dict:
     return {"version": VERSION, "turns": [], "claims": {}, "preferences": {},
             "unknown_topics": {}, "question_history": {}, "errors": [],
             "current_topic": "", "awaiting": None, "topic_progress": {},
-            "topic_stack": [],
+            "topic_stack": [], "encountered": {},
             "stats": {"turns": 0, "claims_heard": 0, "corrections": 0,
                       "recalls": 0, "greetings": 0, "interpretations": 0}}
 
@@ -223,7 +230,7 @@ def _migrate(previous: dict | None) -> dict:
     state = _blank()
     for key in ("turns", "claims", "preferences", "unknown_topics",
                 "question_history", "errors", "recovered_turn_ids",
-                "last_turn", "dialogue_state", "embedding_memory"):
+                "last_turn", "dialogue_state", "embedding_memory", "encountered"):
         if key in old:
             state[key] = old[key]
     state["stats"].update(old.get("stats") or {})
@@ -281,6 +288,23 @@ def _remember_claim(state: dict, subject: str, predicate: str, turn_id: str,
     state["awaiting"] = None
     state.setdefault("topic_progress", {}).setdefault(subject, {})["testimony_heard"] = True
     return claim
+
+
+ENCOUNTERS_PER_SUBJECT = 6
+
+
+def _remember_encounter(state: dict, subject: str, text: str, source: str, turn_id: str) -> None:
+    """Something Noise came across (a web lookup, a partial parse, ...) that
+    did not resolve into a clean, structured claim -- retained anyway.
+    Distinct from `claims`: a claim is a specific subject/predicate assertion
+    someone can confirm or retract; an encounter is just "I have seen this",
+    with no assertion shape at all. Neither is ever promoted to Noise's own
+    confirmed understanding by being stored; both stay revisable, capped
+    evidence at most (ARCHITECTURE.md "Optional local-model boundary")."""
+    entries = state.setdefault("encountered", {}).setdefault(subject, [])
+    entries.append({"text": text, "source": source, "confidence": "uncertain",
+                    "turn_id": turn_id, "seen_at": _now()})
+    state["encountered"][subject] = entries[-ENCOUNTERS_PER_SUBJECT:]
 
 
 def _mark_previous_wrong(state: dict, reason: str, kind: str = "response") -> None:
@@ -856,23 +880,35 @@ def _recall_prompt(state: dict, subject: str) -> str:
     return f"ところで、以前「{target}」について話しましたが、関係ありますか。"
 
 
-def _web_gist(topic: str) -> str | None:
-    """A short, read-only reference definition for `topic` -- reuses the same
-    cached, network-budgeted Wiktionary/Wikipedia lookup the reading loop
-    uses (`japanese_word_meaning_v1`), so this never opens a second web
-    client or a second cache/budget policy. Returned as one plain sentence
-    to be stored as `source: "web_reference"` testimony (capped, revisable,
-    never Noise's own confirmed belief, never written into the word-meaning
-    belief store this module does not touch)."""
+def _web_gist(topic: str) -> "dict | None":
+    """A read-only reference lookup for `topic` -- reuses the same cached,
+    network-budgeted Wiktionary/Wikipedia lookup the reading loop uses
+    (`japanese_word_meaning_v1`), so this never opens a second web client or
+    a second cache/budget policy. Returns {"text": str, "confident": bool}:
+    `confident=True` only when a clean genus was extracted; a page that was
+    actually fetched but did not resolve into one is still returned
+    (confident=False, the raw definition sentence or related terms) --
+    a fetch that happened is not discarded merely because it did not parse
+    into a tidy structured genus.  Human memory does not discard what it has
+    seen just because it did not fully resolve; neither does this."""
     if os.environ.get("AI_NOISE_SKIP_WEB_LOOKUP") == "1":
         return None
     try:
         gist = word_meaning._wiktionary_gist(topic)
         if gist and gist.get("genus"):
-            return f"{topic}は{gist['genus']}の一種だと辞書にあります。"
+            return {"text": f"{topic}は{gist['genus']}の一種だと辞書にあります。",
+                    "confident": True}
         genus = word_meaning._wikipedia_genus(topic)
         if genus:
-            return f"{topic}は{genus}だと百科事典にあります。"
+            return {"text": f"{topic}は{genus}だと百科事典にあります。", "confident": True}
+        if gist and gist.get("gist_text"):
+            return {"text": f"辞書には「{gist['gist_text']}」とありますが、"
+                            "うまく分類できませんでした。",
+                    "confident": False}
+        if gist and (gist.get("terms") or gist.get("related")):
+            words = "、".join((gist.get("terms") or gist.get("related"))[:4])
+            return {"text": f"辞書では{topic}は「{words}」のような語と関係があるようです。",
+                    "confident": False}
     except Exception:
         return None
     return None
@@ -888,14 +924,22 @@ def _ask_about(state: dict, subject: str, turn_id: str = "",
                ("use", f"{subject}は、いつ、何と一緒に現れますか。"))
     facet, reply = prompts[min(count - 1, len(prompts) - 1)]
     # only the FIRST time this subject comes up -- a read-only reference
-    # lookup, not a repeated network hit on every retry.  Result is stored as
-    # capped testimony (same evidence_role as a human's claim), never
-    # promoted to Noise's own confirmed understanding by itself.
+    # lookup, not a repeated network hit on every retry.  A confident result
+    # (a clean genus) is stored as capped testimony, same as a human's claim;
+    # an uncertain one (something was fetched but did not resolve into a
+    # clean genus) is still retained as an "encounter" rather than discarded
+    # -- neither is ever promoted to Noise's own confirmed understanding by
+    # being stored.
     if count == 1 and not _live_claims(state, subject):
         gist = web_lookup(subject)
-        if gist:
-            _remember_claim(state, subject, gist, turn_id, source="web_reference")
-            reply = f"{reply} {gist}まだ自分では確かめていません。"
+        if gist and gist.get("text"):
+            text = gist["text"]
+            if gist.get("confident"):
+                _remember_claim(state, subject, text, turn_id, source="web_reference")
+                reply = f"{reply} {text}まだ自分では確かめていません。"
+            else:
+                _remember_encounter(state, subject, text, "web_reference", turn_id)
+                reply = f"{reply} {text}"
     recall = _recall_prompt(state, subject)
     if recall:
         reply = f"{reply} {recall}"
@@ -1275,6 +1319,7 @@ def summary(state: dict | None) -> dict:
             "preferences": len(state.get("preferences") or {}),
             "corrections": state["stats"].get("corrections", 0),
             "unknown_topics": len(state.get("unknown_topics") or {}),
+            "encountered_subjects": len(state.get("encountered") or {}),
             "current_topic": state.get("current_topic", ""),
             "topic_stack": list(state.get("topic_stack") or []),
             "last_intent": (state.get("dialogue_state") or {}).get("last_intent"),
