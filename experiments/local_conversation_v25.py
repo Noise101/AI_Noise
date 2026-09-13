@@ -38,7 +38,7 @@ class PracticeTurn:
 class OllamaConversationPartner:
     def __init__(self, base_url: str = "http://127.0.0.1:11434", model: str | None = None):
         self.base_url = base_url.rstrip("/")
-        self.model = model or os.environ.get("AI_NOISE_LOCAL_MODEL", "qwen3.8:27b")
+        self.model = model or os.environ.get("AI_NOISE_LOCAL_MODEL", "gemma3:12b")
 
     def _request(self, prompt: str) -> dict | None:
         schema = {"type": "object", "properties": {

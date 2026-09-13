@@ -67,14 +67,19 @@ FEEDBACK_MISS_RATIO = 1.5
 FEEDBACK_MAX_PENALTY = 0.25
 PARTNER_TIMEOUT = None      # no artificial cap -- wait for the reply, however long
 # run_practice calls the partner at most once per cycle, so a slower/larger
-# model costs one long wait per cycle, not a loop of them.  The owner's
-# standing choice is qwen3.8:27b, accepting its ~55s replies; an earlier
+# model costs one long wait per cycle, not a loop of them.  An earlier
 # revision added a 30s cap that was never the owner's decision, and it
 # silently scored two whole probe rounds 0.0 by cutting the model off before
 # it could answer.  The call now blocks until the model actually replies or
-# the connection itself fails, instead of being cut off on a clock. Override
-# with AI_NOISE_JA_DIALOGUE_MODEL if a different partner model is ever wanted.
-PARTNER_MODEL = os.environ.get("AI_NOISE_JA_DIALOGUE_MODEL", "qwen3.8:27b")
+# the connection itself fails, instead of being cut off on a clock.
+# 2026-09-13: qwen3.8:27b (the prior standing choice) kept ~20GB resident in
+# Ollama, which combined with everything else running filled swap and stalled
+# the whole worker loop for hours at a time (19h uptime, +3 reading cycles).
+# gemma3:12b measured ~2.2GB resident, ~1.4s warm replies (vs ~55s), and
+# produced fluent, on-topic Japanese in side-by-side spot checks -- switched
+# by the owner's choice after trying it live. Override with
+# AI_NOISE_JA_DIALOGUE_MODEL if a different partner model is ever wanted.
+PARTNER_MODEL = os.environ.get("AI_NOISE_JA_DIALOGUE_MODEL", "gemma3:12b")
 HISTORY_CAP = 200
 TURNS_CAP = 60
 

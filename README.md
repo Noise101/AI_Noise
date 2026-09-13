@@ -69,7 +69,7 @@ python3 experiments/noise_chat_ui.py start
 python3 experiments/noise_chat_ui.py stop
 ```
 
-会話エンジンv4は、「？」の有無に頼らず文末の形(ですか/ますか/かな等)から質問かどうかを判定し、複数の話題を`topic_stack`で保持して「それについてもっと」「さっきの話に戻って」に応えます。人間から聞いた説明、読書から独立に得た根拠、過去の解析誤りも別々に保持します。GUIは各返答の下にNoiseの発話解釈と話題を表示し、記憶しただけの内容を「理解した」とは表示しません。返答の内容が確定した後、利用可能なら`qwen3.8:27b`がより自然な言い回しに整えますが、元の返答に含まれる語をすべて保っているか機械的に検証し、失敗すれば元の文のまま返します(`AI_NOISE_CHAT_PHRASING=0`で無効化可能)。従来の`.local/human-conversation.json`は消去せず自動移行します。人の発言は
+会話エンジンv4は、「？」の有無に頼らず文末の形(ですか/ますか/かな等)から質問かどうかを判定し、複数の話題を`topic_stack`で保持して「それについてもっと」「さっきの話に戻って」に応えます。人間から聞いた説明、読書から独立に得た根拠、過去の解析誤りも別々に保持します。GUIは各返答の下にNoiseの発話解釈と話題を表示し、記憶しただけの内容を「理解した」とは表示しません。返答の内容が確定した後、利用可能なら`gemma3:12b`がより自然な言い回しに整えますが、元の返答に含まれる語をすべて保っているか機械的に検証し、失敗すれば元の文のまま返します(`AI_NOISE_CHAT_PHRASING=0`で無効化可能)。従来の`.local/human-conversation.json`は消去せず自動移行します。人の発言は
 `owner_testimony`として記憶され、検証なしに世界知識へ昇格しません。GUIが停止しても
 自動学習ワーカーは停止しません。
 
@@ -330,7 +330,7 @@ python3 local_worker_v21.py stop
 
 ## v25: ローカルAIとの会話練習
 
-`local_conversation_v25.py`は、各新規カリキュラムで一度、Noise自身の最弱能力と最も強い好奇心から発話をテンプレート生成し、Ollama `qwen3.8:27b`(`AI_NOISE_LOCAL_MODEL`で上書き可)と短い一往復を行います。返答、相手からの質問、観察した語形を`.local/dialogue-ledger.json`へ保存します。
+`local_conversation_v25.py`は、各新規カリキュラムで一度、Noise自身の最弱能力と最も強い好奇心から発話をテンプレート生成し、Ollama `gemma3:12b`(`AI_NOISE_LOCAL_MODEL`で上書き可)と短い一往復を行います。返答、相手からの質問、観察した語形を`.local/dialogue-ledger.json`へ保存します。
 
 ローカルAIは会話相手であり教師・採点者・情報源ではありません。全発言は`verified=false`、`evidence_score=0.0`で、辞書的意味や因果知識を直接更新できません。Ollamaが停止中なら会話だけを飛ばし、通常の学習は継続します。無効化する場合は`start`または`run`へ`--no-local-conversation`を付けます。
 

@@ -55,7 +55,7 @@ _STOP = {"the", "a", "an", "and", "or", "but", "to", "of", "in", "on", "at", "is
 class OllamaWorker:
     def __init__(self, base_url: str = "http://127.0.0.1:11434", model: str | None = None):
         self.base_url = base_url.rstrip("/")
-        self.model = model or os.environ.get("AI_NOISE_LOCAL_MODEL", "qwen3.8:27b")
+        self.model = model or os.environ.get("AI_NOISE_LOCAL_MODEL", "gemma3:12b")
 
     def available(self) -> bool:
         try:
